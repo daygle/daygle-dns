@@ -145,6 +145,7 @@ Environment variables that change this:
 | `DAYGLE_DNS_ADMIN_USER`, `DAYGLE_DNS_ADMIN_PASSWORD` | Create the admin account now (for scripted installs). |
 | `DAYGLE_DNS_LAN_GUI=0` | Keep the web console on `127.0.0.1` (this also skips creating the admin account). |
 | `DAYGLE_DNS_AI=0` | Leave the AI scanner off. |
+| `DAYGLE_DNS_OLLAMA=1` | Also install (or update) a local [Ollama](https://ollama.com) server for the AI's optional language-model reader, and download `DAYGLE_DNS_OLLAMA_MODEL` (default `qwen2.5:1.5b`). Needs about 3.5 GB of memory. `=0` removes it. It can also be installed later from the console (AI > Language Model). |
 | `DAYGLE_DNS_KEEP_RESOLVED=1` | Leave systemd-resolved alone. |
 | `DAYGLE_DNS_KEEP_RESOLV_CONF=1` | Only warn when `/etc/resolv.conf` names no DNS server, instead of filling it in (this server, then your `dns-nameservers` or default gateway) and stopping dhcpcd from emptying it. On a Debian host set up with `/etc/network/interfaces` (no systemd-resolved or NetworkManager), the installer also installs `resolvconf` so `dns-nameservers` takes effect, with this server first. |
 | `DAYGLE_DNS_NO_DEPS=1` | Do not install prerequisites; print instructions instead. |

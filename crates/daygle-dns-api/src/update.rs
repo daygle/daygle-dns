@@ -1783,6 +1783,105 @@ fn launch_run(
     }
 }
 
+/// What the console can ask the root update service to do with a local
+/// Ollama server.
+pub const OLLAMA_ACTIONS: [&str; 3] = ["install", "update", "remove"];
+
+/// Hand an Ollama `action` (install, update or remove) to the root update
+/// service, the same way a server update is: the request names only the
+/// action, which the root step checks against its own fixed list and runs
+/// with the `ollama-setup.sh` the installer put beside it. Nothing the
+/// service account writes selects a path, a URL or a command. Progress is
+/// the update state ([`read_state`]); Ollama work and updates never overlap.
+pub fn start_ollama(action: &str, config_dir: Option<&Path>) -> Result<(), StartError> {
+    use sha2::Digest as _;
+    if !OLLAMA_ACTIONS.contains(&action) {
+        return Err(StartError::Io(std::io::Error::other(format!(
+            "unknown Ollama action '{action}'"
+        ))));
+    }
+    if !can_update(config_dir) {
+        return Err(StartError::NotUpdateable);
+    }
+    let Some(updates) = resolved_updates_dir() else {
+        return Err(StartError::NotUpdateable);
+    };
+    static LAUNCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _launching = LAUNCH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if update_in_progress() {
+        return Err(StartError::AlreadyRunning);
+    }
+    let dir = workspace_dir();
+    secure_workspace(&dir).map_err(StartError::Io)?;
+    let _ = replace_file(&dir.join("update.log"), b"");
+    let _ = std::fs::remove_file(dir.join(APPLY_LOG));
+    let state_path = dir.join("state.json");
+    let what = match action {
+        "install" => "Installing Ollama",
+        "update" => "Updating Ollama",
+        _ => "Removing Ollama",
+    };
+    write_state_atomic(
+        &state_path,
+        &UpdateState {
+            phase: "preparing".to_string(),
+            pid: 0,
+            started_at: now_rfc3339(),
+            message: format!("{what}: handing off to the update service..."),
+            exit_code: 0,
+            automatic: false,
+        },
+    )
+    .map_err(StartError::Io)?;
+    let staging = updates.join("staging");
+    let staged = (|| -> std::io::Result<()> {
+        for stale in [
+            staging.join("apply.bin"),
+            staging.join("apply.json"),
+            updates.join("request"),
+            updates.join("request.processing"),
+        ] {
+            let _ = std::fs::remove_file(stale);
+        }
+        replace_file(&staging.join("apply.bin"), action.as_bytes())?;
+        let sha: String = sha2::Sha256::digest(action.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let manifest = serde_json::json!({ "kind": "ollama", "version": "0", "sha256": sha });
+        replace_file(&staging.join("apply.json"), manifest.to_string().as_bytes())?;
+        replace_file(&updates.join("request"), b"")
+    })();
+    if let Err(e) = staged {
+        let _ = write_state_atomic(
+            &state_path,
+            &UpdateState {
+                phase: "error".to_string(),
+                pid: 0,
+                started_at: now_rfc3339(),
+                message: format!("{what} could not be handed to the update service: {e}"),
+                exit_code: 1,
+                automatic: false,
+            },
+        );
+        return Err(StartError::Io(e));
+    }
+    Ok(())
+}
+
+/// Whether a local Ollama looks installed (its binary or systemd unit).
+pub fn ollama_installed() -> bool {
+    [
+        "/usr/local/bin/ollama",
+        "/usr/bin/ollama",
+        "/etc/systemd/system/ollama.service",
+    ]
+    .iter()
+    .any(|p| Path::new(p).exists())
+}
+
 /// Create the workspace (mode `0700`) or verify an existing one.
 ///
 /// The workspace lives in the shared temp dir under a fixed name, so another

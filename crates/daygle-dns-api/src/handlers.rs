@@ -1529,6 +1529,11 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         "threat_feed_status": ai.intel_status(),
         "network_evidence": settings.network_evidence,
         "domain_age": settings.domain_age,
+        "llm_enabled": settings.llm_enabled,
+        "llm_url": settings.llm_url,
+        "llm_model": settings.llm_model,
+        "llm_candidates_per_scan": settings.llm_candidates_per_scan,
+        "llm_timeout_secs": settings.llm_timeout_secs,
         "established_days": daygle_dns_ml::store::ESTABLISHED_DAYS,
         "established_clients": daygle_dns_ml::store::ESTABLISHED_CLIENTS,
         "page_model": ai.page_model_status(),
@@ -2836,6 +2841,287 @@ pub async fn ai_update_models(State(state): State<AppState>) -> Response {
             Json(serde_json::json!({ "started": true, "pid": pid })),
         )
             .into_response(),
+        Err(e) => start_error_response(e),
+    }
+}
+
+// ---- AI language model (Ollama) -------------------------------------------
+
+/// Whether an Ollama address points at this machine: only then can the
+/// console install, update or remove the server itself.
+fn llm_url_is_local(url: &str) -> bool {
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .unwrap_or("");
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = if let Some(v6) = authority.strip_prefix('[') {
+        v6.split(']').next().unwrap_or("")
+    } else {
+        authority.rsplit_once(':').map_or(authority, |(h, _)| h)
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+/// `GET /api/ai/llm` - the language-model reader: its settings, whether the
+/// Ollama server answers (version, models), the model download in progress,
+/// whether a newer Ollama is out, and whether the console can install,
+/// update or remove a local Ollama (with the progress of that operation).
+pub async fn ai_llm_status(State(state): State<AppState>) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let settings = ai.settings.load_full();
+    let manager = ai.llm();
+    let (version, models) = tokio::join!(
+        manager.version(&settings.llm_url),
+        manager.models(&settings.llm_url)
+    );
+    // Only worth a GitHub request when there is an Ollama to compare.
+    let latest = if version.is_ok() {
+        manager.latest_release().await
+    } else {
+        None
+    };
+    let dir = config_dir(&state);
+    let (can_update, installed, operation) = run_blocking(move || {
+        (
+            crate::update::can_update(dir.as_deref()),
+            crate::update::ollama_installed(),
+            crate::update::read_state(),
+        )
+    })
+    .await;
+    let local = llm_url_is_local(&settings.llm_url);
+    let update_available = match (&version, &latest) {
+        (Ok(current), Some(latest)) => daygle_dns_ml::llm::older(current, latest),
+        _ => false,
+    };
+    let model_present = models
+        .as_ref()
+        .is_ok_and(|list| list.iter().any(|m| m.name == settings.llm_model));
+    Json(serde_json::json!({
+        "enabled": settings.llm_enabled,
+        "url": settings.llm_url,
+        "model": settings.llm_model,
+        "candidates_per_scan": settings.llm_candidates_per_scan,
+        "timeout_secs": settings.llm_timeout_secs,
+        "reachable": version.is_ok(),
+        "version": version.as_ref().ok(),
+        "error": version.as_ref().err(),
+        "models": models.as_ref().ok(),
+        "model_present": model_present,
+        "pull": manager.pull_state(),
+        "latest_version": latest,
+        "update_available": update_available,
+        "service": {
+            "local": local,
+            "manageable": can_update && local,
+            "installed": installed,
+            "operation": operation,
+        },
+        "suggested_models": [
+            { "name": "qwen2.5:0.5b", "note": "Fastest, about 0.4 GB. Rough answers." },
+            { "name": "qwen2.5:1.5b", "note": "Recommended, about 1 GB." },
+            { "name": "llama3.2:1b", "note": "About 1.3 GB." },
+            { "name": "gemma2:2b", "note": "About 1.6 GB." },
+            { "name": "qwen2.5:3b", "note": "Better answers, about 1.9 GB. Slow on older CPUs." },
+            { "name": "llama3.2:3b", "note": "About 2 GB. Slow on older CPUs." }
+        ],
+    }))
+    .into_response()
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct LlmTestRequest {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// `POST /api/ai/llm/test` - ask the model about a sample page, with the
+/// saved settings or the `url`/`model` given (to try them before saving),
+/// and report the answer and how long it took.
+pub async fn ai_llm_test(
+    State(state): State<AppState>,
+    body: Option<Json<LlmTestRequest>>,
+) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let settings = ai.settings.load_full();
+    let request = body.map(|Json(b)| b).unwrap_or_default();
+    let url = request
+        .url
+        .map(|u| u.trim().trim_end_matches('/').to_string())
+        .unwrap_or_else(|| settings.llm_url.clone());
+    let model = request
+        .model
+        .map(|m| m.trim().to_string())
+        .unwrap_or_else(|| settings.llm_model.clone());
+    if !daygle_dns_core::config::valid_llm_url(&url) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "not an http:// or https:// address",
+        );
+    }
+    if !daygle_dns_core::config::valid_llm_model(&model) {
+        return error_response(StatusCode::BAD_REQUEST, "not an Ollama model name");
+    }
+    let version = match ai.llm().version(&url).await {
+        Ok(version) => version,
+        Err(e) => {
+            return Json(serde_json::json!({ "ok": false, "error": e })).into_response();
+        }
+    };
+    let timeout = Duration::from_secs(settings.llm_timeout_secs.clamp(5, 600));
+    let labels: Vec<String> = ["news", "shopping", "jobs", "education", "phishing", "scam"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let started = std::time::Instant::now();
+    let answer = run_blocking(move || {
+        daygle_dns_ml::llm::ask(
+            &url,
+            &model,
+            timeout,
+            "careers.example",
+            "Careers at Example Co",
+            "Browse our open roles in engineering and sales. Apply online in minutes.",
+            &labels,
+        )
+    })
+    .await;
+    let seconds = started.elapsed().as_secs_f64();
+    match answer {
+        Ok(reading) => Json(serde_json::json!({
+            "ok": true,
+            "version": version,
+            "seconds": seconds,
+            "category": reading.category,
+            "threat": reading.threat,
+            "confidence": reading.confidence,
+            "reason": reading.reason,
+        }))
+        .into_response(),
+        Err(e) => Json(serde_json::json!({
+            "ok": false,
+            "version": version,
+            "seconds": seconds,
+            "error": e,
+        }))
+        .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LlmModelRequest {
+    pub model: String,
+}
+
+/// `POST /api/ai/llm/pull` - download a model to the Ollama server, or
+/// update one (pulling a name it has fetches only what changed). Runs in
+/// the background; `GET /api/ai/llm` reports `pull`.
+pub async fn ai_llm_pull(
+    State(state): State<AppState>,
+    Json(body): Json<LlmModelRequest>,
+) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let model = body.model.trim().to_string();
+    if !daygle_dns_core::config::valid_llm_model(&model) {
+        return error_response(StatusCode::BAD_REQUEST, "not an Ollama model name");
+    }
+    let url = ai.settings.load().llm_url.clone();
+    match ai.llm().start_pull(&url, &model) {
+        Ok(()) => {
+            state.logs.push(
+                daygle_dns_core::LogLevel::Info,
+                "api",
+                format!("AI language model download started: {model}"),
+            );
+            (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({ "started": true, "model": model })),
+            )
+                .into_response()
+        }
+        Err(e) => error_response(StatusCode::CONFLICT, &e),
+    }
+}
+
+/// `POST /api/ai/llm/delete` - remove a model from the Ollama server.
+pub async fn ai_llm_delete(
+    State(state): State<AppState>,
+    Json(body): Json<LlmModelRequest>,
+) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let model = body.model.trim().to_string();
+    if !daygle_dns_core::config::valid_llm_model(&model) {
+        return error_response(StatusCode::BAD_REQUEST, "not an Ollama model name");
+    }
+    let url = ai.settings.load().llm_url.clone();
+    match ai.llm().delete(&url, &model).await {
+        Ok(()) => {
+            state.logs.push(
+                daygle_dns_core::LogLevel::Info,
+                "api",
+                format!("AI language model deleted: {model}"),
+            );
+            Json(serde_json::json!({ "deleted": true, "model": model })).into_response()
+        }
+        Err(e) => error_response(StatusCode::BAD_GATEWAY, &e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LlmServiceRequest {
+    pub action: String,
+}
+
+/// `POST /api/ai/llm/service` - install, update or remove the local Ollama
+/// server through the root update service (only for a local address, on a
+/// host that can update itself). Progress is `GET /api/ai/llm`'s
+/// `service.operation`.
+pub async fn ai_llm_service(
+    State(state): State<AppState>,
+    Json(body): Json<LlmServiceRequest>,
+) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let action = body.action.trim().to_ascii_lowercase();
+    if !crate::update::OLLAMA_ACTIONS.contains(&action.as_str()) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "action must be install, update or remove",
+        );
+    }
+    if !llm_url_is_local(&ai.settings.load().llm_url) {
+        return error_response(
+            StatusCode::CONFLICT,
+            "the language model address is not on this machine; manage that Ollama where it runs",
+        );
+    }
+    let dir = config_dir(&state);
+    let started = action.clone();
+    match run_blocking(move || crate::update::start_ollama(&started, dir.as_deref())).await {
+        Ok(()) => {
+            state.logs.push(
+                daygle_dns_core::LogLevel::Info,
+                "api",
+                format!("Ollama {action} handed to the update service"),
+            );
+            (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({ "started": true, "action": action })),
+            )
+                .into_response()
+        }
         Err(e) => start_error_response(e),
     }
 }
@@ -6727,6 +7013,12 @@ pub struct AiUpdate {
     pub network_evidence: Option<bool>,
     /// Use when a flagged domain was registered as evidence.
     pub domain_age: Option<bool>,
+    /// Ask a local language model (Ollama) to read kept pages.
+    pub llm_enabled: Option<bool>,
+    pub llm_url: Option<String>,
+    pub llm_model: Option<String>,
+    pub llm_candidates_per_scan: Option<u32>,
+    pub llm_timeout_secs: Option<u64>,
 }
 
 /// listener-relevant `[server]` fields apply live; the rest are restarts.
@@ -7718,6 +8010,23 @@ pub async fn update_settings(
         }
         if let Some(v) = a.domain_age {
             config.ai.domain_age = v;
+        }
+        if let Some(v) = a.llm_enabled {
+            config.ai.llm_enabled = v;
+        }
+        // An address or model name that is not one is refused by
+        // `validate()`, not silently kept.
+        if let Some(v) = &a.llm_url {
+            config.ai.llm_url = v.trim().trim_end_matches('/').to_string();
+        }
+        if let Some(v) = &a.llm_model {
+            config.ai.llm_model = v.trim().to_string();
+        }
+        if let Some(v) = a.llm_candidates_per_scan {
+            config.ai.llm_candidates_per_scan = v.clamp(1, 32);
+        }
+        if let Some(v) = a.llm_timeout_secs {
+            config.ai.llm_timeout_secs = v.clamp(5, 600);
         }
     }
 

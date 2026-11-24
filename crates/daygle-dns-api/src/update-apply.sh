@@ -17,9 +17,11 @@
 # __DAYGLE_DNS_UPDATES_DIR__/__DAYGLE_DNS_MODELS_DIR__/__DAYGLE_DNS_USER__):
 #   <updates>/request               - empty trigger marker (created atomically
 #                                     by the updater after staging completes)
-#   <updates>/staging/apply.json   - {"kind":"install|models","version":"x.y.z","sha256":"<64hex>"}
-#   <updates>/staging/apply.bin    - the staged installer script (kind=install)
-#                                     or models bundle tar.gz (kind=models)
+#   <updates>/staging/apply.json   - {"kind":"install|models|ollama","version":"x.y.z","sha256":"<64hex>"}
+#   <updates>/staging/apply.bin    - the staged installer script (kind=install),
+#                                     models bundle tar.gz (kind=models), or
+#                                     the action word (kind=ollama:
+#                                     install|update|remove)
 #
 # Only the fixed staging paths are ever touched (the manifest cannot select a
 # path). The manifest's sha256 is written by the same unprivileged account
@@ -331,7 +333,7 @@ if [ "$KIND" = install ] && grep -q '"automatic"[[:space:]]*:[[:space:]]*true' "
 fi
 BAD=""
 case "$KIND" in
-  install|models) ;;
+  install|models|ollama) ;;
   *) BAD="unsupported update kind '$KIND' in the update manifest" ;;
 esac
 
@@ -362,6 +364,68 @@ if [ -z "$ACTUAL" ] || [ "$ACTUAL" != "$SHA256" ]; then
   log "rejecting update: sha256 mismatch (expected $SHA256)"
   as_service rm -f -- "$REQ.processing"
   fail "the staged binary failed checksum verification - refusing to install it. Re-run the update from the console."
+  exit 1
+fi
+
+# ---- local Ollama server ----------------------------------------------
+# kind=ollama: install, update or remove the local Ollama server the AI's
+# language-model reader uses. The staged file holds only the action word,
+# checked here against a fixed list; the work is done by ollama-setup.sh,
+# which the installer put root-owned beside this helper (never a script
+# from the service-writable dirs). Progress streams into the shared state
+# like an installer run; the DNS service itself is not touched.
+if [ "$KIND" = "ollama" ]; then
+  ACTION="$(tr -cd '[:lower:]' < "$BIN" | head -c 16)"
+  case "$ACTION" in
+    install|update|remove) ;;
+    *)
+      log "rejecting Ollama request: unknown action"
+      as_service rm -f -- "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
+      fail "the Ollama request named an unknown action."
+      exit 1
+      ;;
+  esac
+  SETUP="$(dirname -- "$0")/ollama-setup.sh"
+  if [ ! -f "$SETUP" ] || [ -L "$SETUP" ] || [ "$(stat -c %u "$SETUP" 2>/dev/null)" != "$(id -u)" ]; then
+    log "ollama-setup.sh missing beside the apply helper"
+    as_service rm -f -- "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
+    fail "this installation has no Ollama setup helper yet. Update Daygle DNS (or re-run its installer), then try again."
+    exit 1
+  fi
+  case "$ACTION" in
+    install) WHAT="Installing Ollama" ;;
+    update) WHAT="Updating Ollama" ;;
+    *) WHAT="Removing Ollama" ;;
+  esac
+  state applying "$WHAT..."
+  log "Ollama: $ACTION"
+  : > "$PRIV/ollama-exit"
+  (
+    rc=0
+    HOME="${HOME:-/root}" sh "$SETUP" "$ACTION" >>"$LOG" 2>&1 || rc=$?
+    printf '%s' "$rc" > "$PRIV/ollama-exit"
+  ) &
+  WORKER="$!"
+  LAST="$WHAT..."
+  while kill -0 "$WORKER" 2>/dev/null; do
+    sleep 3
+    STEP="$(tail -n 20 "$LOG" 2>/dev/null | tr '\r' '\n' | grep '^\[ollama-setup\]' | tail -n 1 | sed 's/^\[ollama-setup\] //' | cut -c1-160)"
+    NEW="Ollama: ${STEP:-working...}"
+    if [ "$NEW" != "$LAST" ]; then
+      LAST="$NEW"
+      state applying "$LAST"
+    fi
+  done
+  RC="$(cat "$PRIV/ollama-exit" 2>/dev/null || true)"
+  case "$RC" in ''|*[!0-9]*) RC=1 ;; esac
+  as_service rm -f -- "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
+  LAST_LINE="$(tail -n 20 "$LOG" 2>/dev/null | grep '^\[ollama-setup\]' | tail -n 1 | sed 's/^\[ollama-setup\] //' | cut -c1-200)"
+  if [ "$RC" -eq 0 ]; then
+    log "Ollama $ACTION finished"
+    state "done" "Ollama: ${LAST_LINE:-$ACTION finished}"
+    exit 0
+  fi
+  fail "Ollama ${ACTION} failed${LAST_LINE:+: $LAST_LINE}. Details in apply.log."
   exit 1
 fi
 
@@ -773,6 +837,6 @@ if [ "$KIND" = "models" ]; then
   exit 1
 fi
 
-# Unreachable: the kind was validated above (install or models only).
+# Unreachable: the kind was validated above (install, models or ollama).
 fail "unsupported update kind '$KIND'."
 exit 1

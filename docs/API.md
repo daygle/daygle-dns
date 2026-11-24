@@ -1661,6 +1661,11 @@ POST /api/ai/threat-feeds/update
 GET  /api/ai/model-status
 GET  /api/ai/model-health
 POST /api/ai/update-models
+GET  /api/ai/llm
+POST /api/ai/llm/test          {"url": "http://127.0.0.1:11434", "model": "qwen2.5:1.5b"}
+POST /api/ai/llm/pull          {"model": "qwen2.5:1.5b"}
+POST /api/ai/llm/delete        {"model": "qwen2.5:1.5b"}
+POST /api/ai/llm/service       {"action": "install|update|remove"}
 ```
 
 Available when `[ai] enabled = true`. The scanner runs two independent
@@ -1752,6 +1757,38 @@ download the models bundle from the latest release and hand it to the
 privileged apply service, which installs the files and restarts the server.
 A `202` only means the update began; poll `GET /api/ai/model-status` until
 `done`/`error`.
+
+The language-model reader talks to an Ollama server at `ai.llm_url`.
+`GET /api/ai/llm` reports its settings (`enabled`, `url`, `model`,
+`candidates_per_scan`, `timeout_secs`), whether the server answers
+(`reachable`, `version`, `error`), its `models` (`name`, `size`,
+`modified_at`, `parameter_size`, `quantization`), whether the configured
+model is among them (`model_present`), the model download in progress or the
+last one (`pull`: `model`, `status`, `completed`, `total`, `done`, `error`),
+the newest Ollama release (`latest_version`, `update_available`; looked up on
+GitHub at most every 6 hours, and only while a server answers), a few
+`suggested_models`, and `service`: whether the address is this machine
+(`local`), whether the console can install, update or remove it
+(`manageable`: a local address on a host with the update service),
+`installed`, and the shared update state as `operation`.
+
+`POST /api/ai/llm/test` asks the model about a sample page, with the saved
+address and model or the ones given, and returns the answer and the seconds
+it took. `POST /api/ai/llm/pull` downloads a model (`202`; follow `pull`);
+pulling a name the server has updates it, fetching only what changed. One
+download runs at a time (`409` otherwise). `POST /api/ai/llm/delete` removes
+one. Model names are letters, digits and `._:-/` (`400` otherwise).
+
+`POST /api/ai/llm/service` hands `install`, `update` or `remove` to the root
+update service, like a server update (`202`; follow `service.operation`
+until `done`/`error`). The request carries only the action; the root step
+checks it against its own list and runs the `ollama-setup.sh` the installer
+put beside it. Install runs Ollama's official installer, keeps the server on
+`127.0.0.1:11434` at low CPU and disk priority, and downloads the default
+model; it refuses a machine with less than about 3.5 GB of memory. Update
+runs the official installer again (models are kept). Remove deletes the
+server, its account and its models. `409` when the address is not on this
+machine or an update is running.
 
 `GET /api/ai/model-health` scores the loaded threat model against names built
 from the store's held-out threat families: `{available, model, checked, lost,

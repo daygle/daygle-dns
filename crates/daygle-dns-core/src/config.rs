@@ -1513,6 +1513,20 @@ pub struct AiSettings {
     /// old one is lowered a little. Each lookup tells the TLD's registry
     /// which domain was asked about, never who asked. On by default.
     pub domain_age: bool,
+    /// Ask a local language model (an Ollama server) to read the pages the
+    /// AI has already fetched, for the domains it is least sure of. It can
+    /// raise a threat's confidence or name an unsure domain's category; it
+    /// never clears a threat, and its labels are never trained on. Off by
+    /// default.
+    pub llm_enabled: bool,
+    /// The Ollama server's base URL (`http` or `https`).
+    pub llm_url: String,
+    /// The Ollama model to ask, e.g. `qwen2.5:1.5b`.
+    pub llm_model: String,
+    /// Pages the language model reads per scan cycle, at most (1-32).
+    pub llm_candidates_per_scan: u32,
+    /// Longest one language-model answer may take, in seconds (5-600).
+    pub llm_timeout_secs: u64,
 }
 
 impl Default for AiSettings {
@@ -1552,8 +1566,50 @@ impl Default for AiSettings {
             threat_feeds: true,
             network_evidence: true,
             domain_age: true,
+            llm_enabled: false,
+            llm_url: DEFAULT_LLM_URL.to_string(),
+            llm_model: DEFAULT_LLM_MODEL.to_string(),
+            llm_candidates_per_scan: 6,
+            llm_timeout_secs: 60,
         }
     }
+}
+
+/// Where a local Ollama listens by default (the installer keeps it on
+/// loopback).
+pub const DEFAULT_LLM_URL: &str = "http://127.0.0.1:11434";
+/// The model the installer downloads and the setting starts with: small
+/// enough for a CPU-only host, able to read a page.
+pub const DEFAULT_LLM_MODEL: &str = "qwen2.5:1.5b";
+
+/// Whether `name` is a plausible Ollama model name (`library/name:tag`):
+/// letters, digits and `._:-/`, 1-128 characters. Model names travel to the
+/// Ollama API and into the console, so nothing else is accepted.
+pub fn valid_llm_model(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-' | '/'))
+        && !name.starts_with(['/', '.', '-'])
+        && !name.contains("..")
+}
+
+/// Whether `url` is a usable language-model server address: `http` or
+/// `https`, with a host, no credentials.
+pub fn valid_llm_url(url: &str) -> bool {
+    let rest = match url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+    {
+        Some(rest) => rest,
+        None => return false,
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    !host.is_empty()
+        && !host.contains('@')
+        && url.len() <= 256
+        && !url.contains(char::is_whitespace)
 }
 
 /// `auto_retrain` defaults on: installs that predate the field get the
@@ -2552,6 +2608,16 @@ pub struct AiUpdate {
     pub network_evidence: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain_age: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_candidates_per_scan: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_timeout_secs: Option<u64>,
 }
 
 impl AiUpdate {
@@ -2590,6 +2656,11 @@ impl AiUpdate {
             threat_feeds: Some(settings.threat_feeds),
             network_evidence: Some(settings.network_evidence),
             domain_age: Some(settings.domain_age),
+            llm_enabled: Some(settings.llm_enabled),
+            llm_url: Some(settings.llm_url.clone()),
+            llm_model: Some(settings.llm_model.clone()),
+            llm_candidates_per_scan: Some(settings.llm_candidates_per_scan),
+            llm_timeout_secs: Some(settings.llm_timeout_secs),
         }
     }
 
@@ -2695,6 +2766,27 @@ impl AiUpdate {
         }
         if let Some(v) = self.domain_age {
             ai.domain_age = v;
+        }
+        if let Some(v) = self.llm_enabled {
+            ai.llm_enabled = v;
+        }
+        if let Some(v) = &self.llm_url {
+            let v = v.trim().trim_end_matches('/');
+            if valid_llm_url(v) {
+                ai.llm_url = v.to_string();
+            }
+        }
+        if let Some(v) = &self.llm_model {
+            let v = v.trim();
+            if valid_llm_model(v) {
+                ai.llm_model = v.to_string();
+            }
+        }
+        if let Some(v) = self.llm_candidates_per_scan {
+            ai.llm_candidates_per_scan = v.clamp(1, 32);
+        }
+        if let Some(v) = self.llm_timeout_secs {
+            ai.llm_timeout_secs = v.clamp(5, 600);
         }
     }
 
@@ -4239,6 +4331,26 @@ impl DaygleConfig {
                     "ai.auto_block_categories contains an empty category".to_string(),
                 ));
             }
+        }
+        if !valid_llm_url(&ai.llm_url) {
+            return Err(DaygleError::Config(
+                "ai.llm_url must be an http:// or https:// address".to_string(),
+            ));
+        }
+        if !valid_llm_model(&ai.llm_model) {
+            return Err(DaygleError::Config(
+                "ai.llm_model must be an Ollama model name such as qwen2.5:1.5b".to_string(),
+            ));
+        }
+        if !(1..=32).contains(&ai.llm_candidates_per_scan) {
+            return Err(DaygleError::Config(
+                "ai.llm_candidates_per_scan must be 1-32".to_string(),
+            ));
+        }
+        if !(5..=600).contains(&ai.llm_timeout_secs) {
+            return Err(DaygleError::Config(
+                "ai.llm_timeout_secs must be 5-600".to_string(),
+            ));
         }
         self.display
             .check(false)
@@ -6100,6 +6212,11 @@ mod tests {
         ai.threat_feeds = !ai.threat_feeds;
         ai.network_evidence = !ai.network_evidence;
         ai.domain_age = !ai.domain_age;
+        ai.llm_enabled = !ai.llm_enabled;
+        ai.llm_url = s("http://10.0.0.5:11434");
+        ai.llm_model = s("llama3.2:3b");
+        ai.llm_candidates_per_scan = 3;
+        ai.llm_timeout_secs = 90;
 
         c.display = DisplaySettings {
             time_zone: s("UTC"),
@@ -7336,6 +7453,41 @@ scope = "groups"
         assert_eq!(cfg.ai.model_path, "/m/a.bin");
         // Unknown keys are still refused.
         assert!(DaygleConfig::parse("[ai]\nno_such_setting = 1\n").is_err());
+    }
+
+    #[test]
+    fn language_model_addresses_and_names_are_checked() {
+        for good in [
+            "http://127.0.0.1:11434",
+            "https://ollama.lan",
+            "http://[::1]:11434",
+        ] {
+            assert!(valid_llm_url(good), "{good}");
+        }
+        for bad in [
+            "",
+            "ftp://x",
+            "file:///etc/passwd",
+            "http://",
+            "http://user:pw@host",
+            "http://a b",
+        ] {
+            assert!(!valid_llm_url(bad), "{bad}");
+        }
+        for good in [
+            "qwen2.5:1.5b",
+            "llama3.2:3b",
+            "library/gemma2:2b",
+            "hf.co/org/model:Q4_K_M",
+        ] {
+            assert!(valid_llm_model(good), "{good}");
+        }
+        for bad in ["", "../x", "/abs", "-flag", "a b", "x;rm", ".hidden"] {
+            assert!(!valid_llm_model(bad), "{bad}");
+        }
+        let mut c = DaygleConfig::default();
+        c.ai.llm_url = "gopher://x".into();
+        assert!(c.validate().is_err());
     }
 
     #[test]

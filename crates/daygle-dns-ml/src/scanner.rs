@@ -36,6 +36,29 @@ pub struct ActiveBlock {
     pub expires_at: i64,
 }
 
+/// Longest the language-model stage may run in one scan cycle.
+const LLM_STAGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// The confidence a threat verdict takes when the language model reads its
+/// page as a threat too, or `None` to leave it: two independent readings
+/// (the name and the page) agreeing strongly reach blocking confidence; a
+/// weaker agreement adds a little, never to blocking. Never lowers, and
+/// `ai.page_rule = "evidence"` only records.
+fn llm_raise(cfg: &AiSettings, base: f32, reading: &crate::llm::LlmReading) -> Option<f32> {
+    if cfg.page_rule == daygle_dns_core::config::PageRule::Evidence
+        || !reading.threat
+        || reading.confidence < 0.7
+    {
+        return None;
+    }
+    let raised = if base >= 0.5 && reading.confidence >= 0.85 {
+        base.max(crate::evidence::LISTED_CONFIDENCE)
+    } else {
+        base.max((base + 0.1).min(0.95))
+    };
+    (raised > base + 0.001).then_some(raised)
+}
+
 /// A content verdict below this confidence has its page read (with
 /// `ai.fetch_pages`): the name alone left the categorizer unsure.
 pub const CATEGORY_PAGE_BELOW: f32 = 0.5;
@@ -360,7 +383,138 @@ impl Scanner {
             )),
             Err(e) => self.log_warn(format!("AI category page stage failed: {e}")),
         }
+
+        // 7. The language model, when one is configured: it reads pages the
+        //    stages above kept, for the verdicts the AI is least sure of.
+        match self.llm_stage(&cfg, Utc::now().timestamp()) {
+            Ok((0, _)) => {}
+            Ok((read, changed)) => self.log_info(format!(
+                "AI asked the language model about {read} page(s); {changed} verdict(s) changed"
+            )),
+            Err(e) => self.log_warn(format!("AI language-model stage failed: {e}")),
+        }
         Ok(classified)
+    }
+
+    /// Ask the configured language model (see [`crate::llm`]) to read kept
+    /// pages: threats below the block threshold first, then content
+    /// verdicts below [`CATEGORY_PAGE_BELOW`]. A threat it agrees with is
+    /// raised (with `ai.page_rule` other than `evidence`); an unsure
+    /// domain takes the category it names. It never lowers or clears a
+    /// threat. Returns `(read, changed)`.
+    fn llm_stage(&self, cfg: &AiSettings, now: i64) -> Result<(usize, usize)> {
+        if !cfg.llm_enabled {
+            return Ok((0, 0));
+        }
+        let candidates = self.store.llm_candidates(
+            now,
+            cfg.block_threshold,
+            CATEGORY_PAGE_BELOW,
+            cfg.llm_candidates_per_scan.clamp(1, 32),
+        )?;
+        if candidates.is_empty() {
+            return Ok((0, 0));
+        }
+        let content_labels: Vec<String> = self
+            .content
+            .categories()
+            .into_iter()
+            .filter(|label| label != crate::learn::BENIGN_LABEL)
+            .collect();
+        let mut labels = content_labels.clone();
+        for label in &cfg.auto_block_categories {
+            let label = label.to_ascii_lowercase();
+            if !labels.contains(&label) {
+                labels.push(label);
+            }
+        }
+        if labels.is_empty() {
+            return Ok((0, 0));
+        }
+        let deadline = std::time::Instant::now() + LLM_STAGE_BUDGET;
+        let timeout = std::time::Duration::from_secs(cfg.llm_timeout_secs.clamp(5, 600));
+        let (mut read, mut changed) = (0usize, 0usize);
+        for candidate in candidates {
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            let reading = match crate::llm::ask(
+                &cfg.llm_url,
+                &cfg.llm_model,
+                timeout,
+                &candidate.domain,
+                &candidate.title,
+                &candidate.text,
+                &labels,
+            ) {
+                Ok(reading) => reading,
+                Err(e) => {
+                    // An unreachable server would fail every candidate the
+                    // same way: stop for this cycle, the rows stay queued.
+                    self.log_warn(format!(
+                        "AI language model ({}) could not read {}: {e}",
+                        cfg.llm_model, candidate.domain
+                    ));
+                    break;
+                }
+            };
+            read += 1;
+            let said = format!(
+                "language model {} reads {}{} ({:.0}%){}",
+                cfg.llm_model,
+                reading.category.as_deref().unwrap_or("no listed category"),
+                if reading.threat { ", a threat" } else { "" },
+                reading.confidence * 100.0,
+                if reading.reason.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", reading.reason)
+                }
+            );
+            let (note, confidence, category) = if candidate.channel == "threat" {
+                match llm_raise(cfg, candidate.confidence, &reading) {
+                    Some(raised) => (
+                        format!("{said} - confidence now {:.0}%", raised * 100.0),
+                        Some(raised),
+                        None,
+                    ),
+                    None => (said, None, None),
+                }
+            } else {
+                match reading.category.as_deref().filter(|label| {
+                    !reading.threat
+                        && reading.confidence >= cfg.page_confidence_floor
+                        && reading.confidence > candidate.confidence
+                        && !cfg.is_auto_block_category(label)
+                        && content_labels.iter().any(|known| known == label)
+                }) {
+                    Some(label) => (
+                        format!(
+                            "{said}; the name alone was {:.0}%",
+                            candidate.confidence * 100.0
+                        ),
+                        Some(reading.confidence.min(0.9)),
+                        Some(label.to_string()),
+                    ),
+                    None => (said, None, None),
+                }
+            };
+            let moved = confidence.is_some();
+            self.store.record_llm_reading(
+                &candidate.domain,
+                &candidate.channel,
+                &note,
+                confidence,
+                category.as_deref(),
+            )?;
+            if moved {
+                changed += 1;
+            }
+        }
+        if changed > 0 {
+            self.refresh_snapshot(cfg, now);
+        }
+        Ok((read, changed))
     }
 
     /// Read the pages of domains the categorizer is unsure of (below
