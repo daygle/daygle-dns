@@ -3013,7 +3013,16 @@ fn ai_schemas() -> Value {
                 "url": { "type": "string" },
                 "model": { "type": "string" },
                 "candidates_per_scan": { "type": "integer" },
-                "timeout_secs": { "type": "integer" },
+                "timeout_secs": {
+                    "type": "integer",
+                    "description": "Per-answer limit for scan reads (`ai.llm_timeout_secs`)."
+                },
+                "test_timeout_secs": {
+                    "type": "integer",
+                    "description": "The limit `POST /ai/llm/test` runs under: `timeout_secs` \
+                        held to 300-600 s, because a test is usually the model's first answer \
+                        and also loads it into memory."
+                },
                 "reachable": { "type": "boolean" },
                 "version": { "type": ["string", "null"] },
                 "error": { "type": ["string", "null"] },
@@ -3096,7 +3105,12 @@ fn ai_schemas() -> Value {
             "properties": {
                 "started": { "type": "boolean" },
                 "model": { "type": "string" },
-                "action": { "type": "string" }
+                "action": { "type": "string" },
+                "timeout_secs": {
+                    "type": "integer",
+                    "description": "For a test: the limit it runs under (300-600 s, whatever \
+                        `ai.llm_timeout_secs` says)."
+                }
             }
         },
         "AiLlmDeleted": {

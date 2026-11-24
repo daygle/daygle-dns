@@ -1760,8 +1760,9 @@ A `202` only means the update began; poll `GET /api/ai/model-status` until
 
 The language-model reader talks to an Ollama server at `ai.llm_url`.
 `GET /api/ai/llm` reports its settings (`enabled`, `url`, `model`,
-`candidates_per_scan`, `timeout_secs`), whether the server answers
-(`reachable`, `version`, `error`), its `models` (`name`, `size`,
+`candidates_per_scan`, `timeout_secs`, and `test_timeout_secs`, the longer
+limit a test gets because its first answer also loads the model), whether the
+server answers (`reachable`, `version`, `error`), its `models` (`name`, `size`,
 `modified_at`, `parameter_size`, `quantization`), whether the configured
 model is among them (`model_present`), the model download in progress or the
 last one (`pull`: `model`, `status`, `completed`, `total`, `done`, `error`),
@@ -1777,8 +1778,11 @@ install, update or remove it
 `POST /api/ai/llm/test` asks the model about a sample page, with the saved
 address and model or the ones given. It checks the server answers (`502`
 otherwise), then asks in the background (`202`), since an answer can take
-minutes on a CPU: `GET /api/ai/llm` reports `test` (`running`, `ok`,
-`seconds`, `category`, `threat`, `confidence`, `reason`, `error`). `POST /api/ai/llm/pull` downloads a model (`202`; follow `pull`);
+minutes on a CPU. The `202` body gives the limit it runs under
+(`timeout_secs`; `ai.llm_timeout_secs` is held to 300-600s, because a test is
+usually the model's first answer and also loads it), and `GET /api/ai/llm`
+reports `test` (`running`, `ok`, `seconds`, `category`, `threat`,
+`confidence`, `reason`, `error`). `POST /api/ai/llm/pull` downloads a model (`202`; follow `pull`);
 pulling a name the server has updates it, fetching only what changed. One
 download runs at a time (`409` otherwise). `POST /api/ai/llm/delete` removes
 one. Model names are letters, digits and `._:-/` (`400` otherwise).
