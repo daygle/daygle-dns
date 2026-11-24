@@ -3279,6 +3279,7 @@ fn the_shadow_judge_rejects_on_lost_threats_and_on_floods() {
     assert!(flooded.contains("flagged"), "{flooded}");
 }
 
+#[cfg(feature = "verifier-onnx")]
 #[test]
 fn the_verifier_switches_on_without_a_restart() {
     let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
