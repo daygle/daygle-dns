@@ -303,6 +303,11 @@ Each answer takes seconds on a CPU, so at most `ai.llm_candidates_per_scan`
 `ai.llm_timeout_secs` (120) per answer. An unreachable server is skipped
 until the next cycle.
 
+The Test button on the Language Model tab gets at least 300 seconds and at
+most 600, whatever `ai.llm_timeout_secs` says: a test is usually the model's
+first answer, which also loads it into memory, and a shorter limit would
+report that first load as a failure. The tab says which limit it uses.
+
 | Setting | Default |
 |---|---|
 | `ai.llm_enabled` | `false` |

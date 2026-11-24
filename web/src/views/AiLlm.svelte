@@ -230,6 +230,13 @@
       <label><span>Pages Per Scan</span><input type="number" min="1" max="32" bind:value={form.perScan} disabled={!isAdmin} /></label>
       <label><span>Answer Time Limit (Seconds)</span><input type="number" min="5" max="600" bind:value={form.timeout} disabled={!isAdmin} /></label>
     </div>
+    {#if llm.test_timeout_secs && llm.test_timeout_secs > llm.timeout_secs}
+      <p class="muted small" style="margin: 8px 0 0">
+        A test gets {llm.test_timeout_secs}s, not {llm.timeout_secs}s: it is
+        usually the model's first answer, which also loads the model into
+        memory. Scan reads keep the limit above.
+      </p>
+    {/if}
     {#if llm.reachable && !llm.model_present}
       <p class="small" style="color: var(--warn)">
         The model {llm.model} is not on this Ollama server yet. Download it below.

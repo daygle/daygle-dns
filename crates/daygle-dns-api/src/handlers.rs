@@ -2906,6 +2906,9 @@ pub async fn ai_llm_status(State(state): State<AppState>) -> Response {
         "model": settings.llm_model,
         "candidates_per_scan": settings.llm_candidates_per_scan,
         "timeout_secs": settings.llm_timeout_secs,
+        // The limit a test will actually run under, which is not the
+        // per-answer one (see [`test_timeout`]).
+        "test_timeout_secs": test_timeout(settings.llm_timeout_secs).as_secs(),
         "reachable": version.is_ok(),
         "version": version.as_ref().ok(),
         "error": version.as_ref().err(),
@@ -2941,11 +2944,28 @@ pub struct LlmTestRequest {
     pub model: Option<String>,
 }
 
+/// The shortest limit a test runs under, whatever `ai.llm_timeout_secs` says:
+/// a test is usually the model's first answer, which also loads it into
+/// memory, and the shorter limit would report that slow first load as a
+/// failure rather than as work in progress.
+const TEST_TIMEOUT_MIN_SECS: u64 = 300;
+/// The longest: the ceiling `ai.llm_timeout_secs` itself allows.
+const TEST_TIMEOUT_MAX_SECS: u64 = 600;
+
+/// The limit `POST /api/ai/llm/test` gives the model, from the configured
+/// per-answer limit. The value reached is reported both by `GET /api/ai/llm`
+/// (`test_timeout_secs`) and in the `202` body, so raising a short setting is
+/// visible to the operator instead of silent.
+fn test_timeout(configured_secs: u64) -> Duration {
+    Duration::from_secs(configured_secs.clamp(TEST_TIMEOUT_MIN_SECS, TEST_TIMEOUT_MAX_SECS))
+}
+
 /// `POST /api/ai/llm/test` - ask the model about a sample page, with the
 /// saved settings or the `url`/`model` given (to try them before saving).
 /// The question runs in the background (`202`): an answer can take minutes
 /// on a CPU. `GET /api/ai/llm` reports `test` with the answer and the
-/// seconds it took. Checks the server answers first.
+/// seconds it took. Checks the server answers first. The `202` body gives the
+/// limit it runs under (see [`test_timeout`]).
 pub async fn ai_llm_test(
     State(state): State<AppState>,
     body: Option<Json<LlmTestRequest>>,
@@ -2976,13 +2996,15 @@ pub async fn ai_llm_test(
     if let Err(e) = manager.version(&url).await {
         return error_response(StatusCode::BAD_GATEWAY, &e);
     }
-    // A test is often the model's first answer, which also loads it into
-    // memory: give it at least 5 minutes whatever the per-answer limit.
-    let timeout = Duration::from_secs(settings.llm_timeout_secs.clamp(300, 600));
+    let timeout = test_timeout(settings.llm_timeout_secs);
     match manager.start_test(&url, &model, timeout) {
         Ok(()) => (
             StatusCode::ACCEPTED,
-            Json(serde_json::json!({ "started": true, "model": model })),
+            Json(serde_json::json!({
+                "started": true,
+                "model": model,
+                "timeout_secs": timeout.as_secs(),
+            })),
         )
             .into_response(),
         Err(e) => error_response(StatusCode::CONFLICT, &e),
