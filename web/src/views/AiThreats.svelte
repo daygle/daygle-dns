@@ -2,20 +2,11 @@
   import IconButton from '../IconButton.svelte';
   import { api, formatApiError, getStoredUser } from '../api.js';
   import { formatDate } from '../datetime.svelte.js';
-  import { percent, titleCase } from '../aiLabels.js';
+  import { pageRuleLabel, percent, stampTime, titleCase } from '../aiLabels.js';
   import ColumnPicker from '../ColumnPicker.svelte';
   import { isHidden } from '../columns.svelte.js';
   import AiExemptionDialog from './AiExemptionDialog.svelte';
   import AiCorrectionDialog from './AiCorrectionDialog.svelte';
-
-  const PAGE_RULE_LABELS = {
-    evidence: 'Evidence only',
-    corroborate: 'Corroborate',
-    decide: 'Decide',
-  };
-  function pageRuleLabel(rule) {
-    return PAGE_RULE_LABELS[rule] || rule;
-  }
 
   const COLUMNS = [
     { key: 'domain', label: 'Domain', locked: true },
@@ -261,6 +252,9 @@
   }
 
   async function exportCorrections() {
+    // Shares `exporting` with the threat exports: a second click while the
+    // first download is being built would produce two files.
+    exporting = 'corrections';
     notice = null;
     error = null;
     try {
@@ -269,6 +263,8 @@
       notice = 'Exported your corrections.';
     } catch (e) {
       error = formatApiError(e);
+    } finally {
+      exporting = '';
     }
   }
 
@@ -334,13 +330,6 @@
     return Number(n || 0).toLocaleString();
   }
 
-  // Unset times come back as the UNIX epoch.
-  function stamp(value, format) {
-    if (!value) return '-';
-    const ms = Date.parse(value);
-    return Number.isNaN(ms) || ms <= 0 ? '-' : format(ms);
-  }
-
   // Reload on mount and whenever the search box changes (back to page 1,
   // since the filter changed the list). Typing waits for a pause.
   let searchTimer;
@@ -364,10 +353,10 @@
 </script>
 
 {#if notice}
-  <div class="card" style="border-color: var(--ok); margin-bottom: 14px">{notice}</div>
+  <div class="card" role="status" style="border-color: var(--ok); margin-bottom: 14px">{notice}</div>
 {/if}
 {#if error}
-  <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">{error}</div>
+  <div class="card" role="alert" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">{error}</div>
 {/if}
 
 {#if loading}
@@ -470,7 +459,7 @@
     </div>
     {#if explainError}<p class="dialog-error" style="margin: 8px 0 0">{explainError}</p>{/if}
     {#if explainResult}
-      <div class="explain">
+      <div class="explain" aria-live="polite">
         <div class="row" style="gap: 8px; flex-wrap: wrap">
           <code>{explainResult.domain}</code>
           {#if explainResult.blocked}
@@ -479,7 +468,7 @@
             <span class="pill">Not Blocked</span>
           {/if}
           <span class="muted small">
-            {explainResult.mode} mode, block threshold {percent(explainResult.block_threshold)}
+            {titleCase(explainResult.mode)} mode, block threshold {percent(explainResult.block_threshold)}
           </span>
         </div>
         <ul>
@@ -531,7 +520,7 @@
     <div class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap">
       <h3 style="margin: 0">Detected Threats ({fmt(total)})</h3>
       <div class="row" style="gap: 8px; flex-wrap: wrap">
-        <input type="search" placeholder="Search Domains" bind:value={search} style="min-width: 200px" />
+        <input type="search" placeholder="Search Domains" aria-label="Search domains" bind:value={search} style="min-width: 200px" />
         <select bind:value={categoryFilter} aria-label="Filter by category" style="min-width: 150px">
           <option value="">All Categories</option>
           {#each categories as category (category)}
@@ -554,8 +543,8 @@
         <button class="secondary" onclick={() => exportThreats('list')} disabled={!!exporting}>
           {exporting === 'list' ? 'Exporting...' : 'Domain List'}
         </button>
-        <button class="secondary" title="Every exemption, mislabelled mark and relabel, for retraining a model offline" onclick={exportCorrections}>
-          Corrections CSV
+        <button class="secondary" title="Every exemption, mislabelled mark and relabel, for retraining a model offline" onclick={exportCorrections} disabled={!!exporting}>
+          {exporting === 'corrections' ? 'Exporting...' : 'Corrections CSV'}
         </button>
         <button class="secondary" onclick={load}>Reload</button>
         <ColumnPicker table="ai-threats" columns={COLUMNS} />
@@ -614,7 +603,7 @@
             {#if show('evidence')}
               <td class="muted evidence" title={r.evidence}>{r.evidence || '-'}</td>
             {/if}
-            {#if show('re-check')}<td class="muted nowrap">{stamp(r.expires_at, formatDate)}</td>{/if}
+            {#if show('re-check')}<td class="muted nowrap">{stampTime(r.expires_at, formatDate)}</td>{/if}
             {#if isAdmin}
               <td class="num">
                 {#if r.not_threat}
@@ -669,7 +658,7 @@
 {#if correctionDomain}
   <AiCorrectionDialog
     domain={correctionDomain}
-    categories={categories.filter((c) => !threatLabels.includes(c))}
+    categories={categories.filter((c) => !threatLabels.some((l) => l.toLowerCase() === c.toLowerCase()))}
     onCancel={() => (correctionDomain = null)}
     onConfirm={(reason, category) => applyCorrection(correctionDomain, reason, category)}
   />
@@ -682,6 +671,9 @@
   .explain .small { font-size: 0.78rem; }
   .evidence-line { display: block; margin: 2px 0; word-break: break-word; }
   .warn { color: var(--danger); font-size: 0.85rem; margin: 0 0 8px; }
+  /* The label-editor and Check a Domain errors use this class too; without a
+     rule here they rendered in the normal text colour, not as errors. */
+  .dialog-error { color: var(--danger); margin: 0 0 10px; }
   .labels { display: flex; flex-wrap: wrap; gap: 6px 18px; }
   .check { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; }
   .check input { width: auto; }

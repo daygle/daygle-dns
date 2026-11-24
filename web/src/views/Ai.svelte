@@ -60,22 +60,32 @@
 
 <PageHeader icon={icons.ai} title="AI" tagline={current.tagline} />
 
-<div class="tabs">
+<div class="tabs" role="tablist" aria-label="AI">
   {#each tabs as t (t.id)}
-    <button class="tab" class:active={current.id === t.id} onclick={() => (tab = t.id)}>{t.label}</button>
+    <button
+      class="tab"
+      class:active={current.id === t.id}
+      id={`ai-tab-${t.id}`}
+      role="tab"
+      aria-selected={current.id === t.id}
+      aria-controls="ai-tabpanel"
+      onclick={() => (tab = t.id)}
+    >{t.label}</button>
   {/each}
 </div>
 
-{#if current.id === 'scanner'}
-  <AiStatus onOpenThreats={() => (tab = 'threats')} />
-{:else if current.id === 'settings'}
-  <AiSettings />
-{:else if current.id === 'threats'}
-  <AiThreats />
-{:else if current.id === 'exemptions'}
-  <AiExemptions />
-{:else if current.id === 'llm'}
-  <AiLlm />
-{:else}
-  <AiVerdicts />
-{/if}
+<div id="ai-tabpanel" role="tabpanel" aria-labelledby={`ai-tab-${current.id}`}>
+  {#if current.id === 'scanner'}
+    <AiStatus onOpenThreats={() => (tab = 'threats')} />
+  {:else if current.id === 'settings'}
+    <AiSettings />
+  {:else if current.id === 'threats'}
+    <AiThreats />
+  {:else if current.id === 'exemptions'}
+    <AiExemptions />
+  {:else if current.id === 'llm'}
+    <AiLlm />
+  {:else}
+    <AiVerdicts />
+  {/if}
+</div>

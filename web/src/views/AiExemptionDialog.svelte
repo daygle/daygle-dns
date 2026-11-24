@@ -1,4 +1,6 @@
 <script>
+  import { dialogFocus } from '../dialogFocus.js';
+
   const REASONS = [
     'False Positive',
     'Required Service',
@@ -14,12 +16,19 @@
 <svelte:window onkeydown={(event) => event.key === 'Escape' && onCancel()} />
 
 <div class="modal-backdrop" role="presentation" onclick={(event) => event.target === event.currentTarget && onCancel()}>
-  <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="exemption-title">
+  <div
+    class="modal card"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="exemption-title"
+    aria-describedby="exemption-desc"
+    use:dialogFocus
+  >
     <div class="spread modal-title">
       <h3 id="exemption-title" style="margin: 0">Exempt Domain</h3>
       <button class="secondary" style="padding: 2px 10px" onclick={onCancel} aria-label="Close">✕</button>
     </div>
-    <p class="muted">The AI will never block {domain} or its subdomains.</p>
+    <p class="muted" id="exemption-desc">The AI will never block {domain} or its subdomains.</p>
     <label class="reason-label">
       <span>Reason</span>
       <select bind:value={reason} required>
