@@ -65,8 +65,26 @@ pub fn prompt(domain: &str, title: &str, text: &str, labels: &[String]) -> Strin
          Domain: {domain}\n<page>\nTitle: {title}\n{text}\n</page>",
         labels = labels.join(", "),
         title = clean(title, 200),
-        text = clean(text, PAGE_CHARS),
+        text = within_tokens(&clean(text, PAGE_CHARS), PAGE_TOKENS),
     )
+}
+
+/// The page's share of the model's 2048-token window, leaving room for the
+/// instructions, the label list and the answer.
+const PAGE_TOKENS: f32 = 1_200.0;
+
+/// `text` cut to about `budget` tokens. English and other Latin-script text
+/// runs about four characters a token; Chinese, Japanese and similar
+/// scripts about one, so a character count alone would overflow the window
+/// for them.
+fn within_tokens(text: &str, budget: f32) -> String {
+    let mut used = 0.0f32;
+    text.chars()
+        .take_while(|c| {
+            used += if c.is_ascii() { 0.3 } else { 1.0 };
+            used <= budget
+        })
+        .collect()
 }
 
 /// The JSON schema Ollama constrains the answer to.
@@ -581,6 +599,18 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("cannot connect"), "{err}");
+    }
+
+    /// A page in a script of one token a character is cut shorter than an
+    /// English one, so the prompt still fits the 2048-token window.
+    #[test]
+    fn page_text_is_bounded_by_tokens_not_characters() {
+        let english = "word ".repeat(1_000);
+        let chinese = "\u{4e2d}".repeat(3_000);
+        let p_en = prompt("d.example", "t", &english, &labels());
+        let p_zh = prompt("d.example", "t", &chinese, &labels());
+        assert!(p_en.len() - p_en.matches(' ').count() > 2_000);
+        assert!(p_zh.chars().filter(|c| *c == '\u{4e2d}').count() <= 1_200);
     }
 
     #[test]
