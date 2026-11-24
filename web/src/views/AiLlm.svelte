@@ -234,7 +234,7 @@
     {#if isAdmin}
       <div class="row" style="margin-top: 10px; gap: 10px; flex-wrap: wrap">
         <button onclick={() => save()} disabled={busy}>{busy ? 'Saving...' : 'Save'}</button>
-        <button class="secondary" onclick={test} disabled={testing}>{testing ? 'Asking the model...' : 'Test'}</button>
+        <button class="secondary" onclick={test} disabled={testing}>{testing ? 'Asking the model (the first answer can take a few minutes)...' : 'Test'}</button>
       </div>
     {/if}
     {#if testResult}

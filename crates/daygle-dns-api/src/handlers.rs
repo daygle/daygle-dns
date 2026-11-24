@@ -2975,7 +2975,9 @@ pub async fn ai_llm_test(
             return Json(serde_json::json!({ "ok": false, "error": e })).into_response();
         }
     };
-    let timeout = Duration::from_secs(settings.llm_timeout_secs.clamp(5, 600));
+    // A test is often the model's first answer, which also loads it into
+    // memory: give it at least 5 minutes whatever the per-answer limit.
+    let timeout = Duration::from_secs(settings.llm_timeout_secs.clamp(300, 600));
     let labels: Vec<String> = ["news", "shopping", "jobs", "education", "phishing", "scam"]
         .iter()
         .map(|s| s.to_string())

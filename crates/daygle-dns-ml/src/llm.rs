@@ -117,6 +117,37 @@ pub fn parse_answer(answer: &str, labels: &[String]) -> Option<LlmReading> {
     })
 }
 
+/// Why a request to the server failed, in words an operator can act on.
+/// `reqwest`'s own message ("error sending request for url ...") hides the
+/// cause in its source chain.
+pub fn describe(error: &reqwest::Error, timeout: Duration) -> String {
+    if error.is_timeout() {
+        return format!(
+            "no answer within {} s. The first answer also loads the model into memory, which \
+             can take minutes on a CPU: raise the answer time limit, try again, or use a \
+             smaller model",
+            timeout.as_secs()
+        );
+    }
+    if error.is_connect() {
+        return "cannot connect to the Ollama server (is it running?)".to_string();
+    }
+    let mut message = error.to_string();
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    if message.contains("connection closed") || message.contains("reset") {
+        message.push_str(
+            " (the server dropped the request: it may have run out of memory loading the \
+             model; see journalctl -u ollama)",
+        );
+    }
+    message.chars().take(400).collect()
+}
+
 fn blocking_client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .timeout(timeout)
@@ -144,13 +175,15 @@ pub fn ask(
         "stream": false,
         "format": schema(labels),
         "keep_alive": "10m",
-        "options": { "temperature": 0, "num_predict": 160, "num_ctx": 4096 }
+        // 2048 tokens hold the prompt and a 3,000-character page, and load
+        // faster and in less memory than a larger window.
+        "options": { "temperature": 0, "num_predict": 160, "num_ctx": 2048 }
     });
     let response = client
         .post(format!("{}/api/generate", base_url.trim_end_matches('/')))
         .json(&body)
         .send()
-        .map_err(|e| format!("request failed: {e}"))?;
+        .map_err(|e| describe(&e, timeout))?;
     let status = response.status();
     let value: Value = response
         .json()
@@ -502,6 +535,52 @@ mod tests {
         assert_eq!(p.matches("</page>").count(), 1);
         assert_eq!(p.matches("<page>").count(), 1);
         assert!(p.contains("untrusted"));
+    }
+
+    /// A server that accepts the request and never answers (a model still
+    /// loading) is reported as a timeout with what to do, not as reqwest's
+    /// bare "error sending request".
+    #[test]
+    fn a_slow_server_is_reported_as_a_timeout() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let held: Vec<_> = listener.incoming().take(1).collect();
+            std::thread::sleep(Duration::from_secs(5));
+            drop(held);
+        });
+        let err = ask(
+            &url,
+            "m",
+            Duration::from_secs(1),
+            "d.example",
+            "t",
+            "text",
+            &labels(),
+        )
+        .unwrap_err();
+        assert!(err.contains("no answer within 1 s"), "{err}");
+        assert!(err.contains("loads the model"), "{err}");
+    }
+
+    #[test]
+    fn a_closed_port_is_reported_plainly() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let err = ask(
+            &format!("http://127.0.0.1:{port}"),
+            "m",
+            Duration::from_secs(2),
+            "d.example",
+            "t",
+            "text",
+            &labels(),
+        )
+        .unwrap_err();
+        assert!(err.contains("cannot connect"), "{err}");
     }
 
     #[test]
