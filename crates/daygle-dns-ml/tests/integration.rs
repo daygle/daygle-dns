@@ -4032,3 +4032,39 @@ fn a_threat_label_you_set_does_not_block_in_train_mode() {
     assert!(ai.snapshot().load().is_empty());
     assert!(ai.blockable_counts().unwrap().contains_key("phishing"));
 }
+
+/// A threat label outlives the verdicts under it: it stays on the threat
+/// list (with its undo) after the verdict expires unqueried, and even for a
+/// domain the scanner never saw.
+#[test]
+fn a_threat_label_stays_listed_after_its_verdict_expires() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(&dir, settings(AiMode::Enforce));
+    threat_verdict(&ai, "old-flag.example", "phishing", 0.995);
+    ai.set_category_override("old-flag.example", "phishing")
+        .unwrap();
+    let later = chrono::Utc::now().timestamp() + 365 * 86400;
+    ai.store.expire_old(later, 1000).unwrap();
+    assert!(threat_list(&ai).contains(&"old-flag.example".to_string()));
+    assert!(ai.snapshot().load().contains_key("old-flag.example"));
+
+    ai.set_category_override("never-seen.example", "malware")
+        .unwrap();
+    assert!(threat_list(&ai).contains(&"never-seen.example".to_string()));
+}
+
+/// A detected threat the operator also labels exports with the operator's
+/// label, at full confidence and without an expiry.
+#[test]
+fn a_threat_label_on_a_detected_threat_exports_as_the_operators() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(&dir, settings(AiMode::Enforce));
+    threat_verdict(&ai, "both.example", "phishing", 0.995);
+    ai.set_category_override("both.example", "malware").unwrap();
+    let exported = ai.export_threats().unwrap();
+    let rows: Vec<_> = exported.iter().filter(|r| r.0 == "both.example").collect();
+    assert_eq!(rows.len(), 1, "{exported:?}");
+    assert_eq!(rows[0].1, "malware");
+    assert!((rows[0].2 - 1.0).abs() < 1e-6);
+    assert_eq!(rows[0].3, i64::MAX);
+}

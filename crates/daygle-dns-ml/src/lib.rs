@@ -666,19 +666,21 @@ impl AiEngine {
         let cfg = self.settings.load_full();
         let now = chrono::Utc::now().timestamp();
         let eligible = self.scanner.eligible_blocks(&cfg, now)?;
+        // The operator's own threat labels are exported at full confidence,
+        // with their label and no expiry, in place of the model's row.
         let mut rows: Vec<(String, String, f32, i64)> = self
             .store
             .export_threats(now, cfg.block_threshold)?
             .into_iter()
-            .filter(|(domain, ..)| eligible.contains_key(domain))
+            .filter(|(domain, ..)| {
+                eligible
+                    .get(domain)
+                    .is_some_and(|block| block.expires_at != i64::MAX)
+            })
             .collect();
-        // The operator's own threat labels, at full confidence: they block
-        // whatever the model scored, so they are exported first.
-        let listed: std::collections::HashSet<String> =
-            rows.iter().map(|(domain, ..)| domain.clone()).collect();
         let mut labelled: Vec<(String, String, f32, i64)> = eligible
             .into_iter()
-            .filter(|(domain, block)| block.expires_at == i64::MAX && !listed.contains(domain))
+            .filter(|(_, block)| block.expires_at == i64::MAX)
             .map(|(domain, block)| (domain, block.category, 1.0, i64::MAX))
             .collect();
         labelled.sort_by(|a, b| a.0.cmp(&b.0));

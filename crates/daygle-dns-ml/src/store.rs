@@ -178,6 +178,17 @@ const VERDICTS_TABLE: &str = "CREATE TABLE IF NOT EXISTS ai_verdicts (
     PRIMARY KEY (domain, channel)
 )";
 
+/// Give every relabelled domain a threat-channel row (pending, so the
+/// scanner fills it in): the Threats tab lists from those rows, and a threat
+/// label must stay listed, with its undo, for as long as it blocks.
+fn list_relabelled(conn: &Connection) -> rusqlite::Result<usize> {
+    conn.execute(
+        "INSERT OR IGNORE INTO ai_verdicts (domain, channel, last_seen)
+         SELECT domain, 'threat', created_at FROM ai_category_overrides",
+        [],
+    )
+}
+
 const OVERRIDES_TABLE: &str = "CREATE TABLE IF NOT EXISTS ai_overrides (
     domain     TEXT PRIMARY KEY,
     action     TEXT NOT NULL,
@@ -555,7 +566,12 @@ impl AiStore {
         let tx = conn.transaction()?;
         let expired: Vec<(String, String, bool)> = {
             let mut stmt = tx.prepare(
-                "SELECT domain, channel, last_seen > classified_at FROM ai_verdicts
+                // A domain the operator relabelled keeps its rows: the
+                // relabel lists it (and may block it) whether or not it is
+                // still queried.
+                "SELECT domain, channel, last_seen > classified_at OR EXISTS (
+                     SELECT 1 FROM ai_category_overrides c WHERE c.domain = ai_verdicts.domain)
+                 FROM ai_verdicts
                  WHERE status IN ('classified', 'skipped')
                    AND expires_at > 0 AND expires_at <= ?1
                  LIMIT ?2",
@@ -640,6 +656,7 @@ impl AiStore {
         if deleted > 0 {
             delete_orphaned_page_history(&tx)?;
         }
+        list_relabelled(&tx)?;
         tx.commit()?;
         Ok(deleted)
     }
@@ -821,6 +838,7 @@ impl AiStore {
              ON CONFLICT(domain) DO UPDATE SET category = ?2, created_at = ?3",
             params![domain, category.to_ascii_lowercase(), now_epoch()],
         )?;
+        list_relabelled(&conn)?;
         Ok(())
     }
 
