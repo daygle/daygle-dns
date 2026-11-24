@@ -543,13 +543,14 @@ impl LlmManager {
         }
     }
 
-    /// The newest Ollama release on GitHub (`0.x.y`), checked at most every
-    /// six hours; `None` when it could not be found.
+    /// The newest Ollama release on GitHub (`0.x.y`). A version found is
+    /// reused for six hours; `None` is remembered only briefly, so an outage
+    /// or a rate limit cannot hide the `update_available` badge for the rest
+    /// of the day (see [`release_cache_ttl`]).
     pub async fn latest_release(&self) -> Option<String> {
-        const EVERY: Duration = Duration::from_secs(6 * 3600);
         if let Ok(latest) = self.latest.lock() {
             if let Some((at, version)) = latest.as_ref() {
-                if at.elapsed() < EVERY {
+                if at.elapsed() < release_cache_ttl(version) {
                     return version.clone();
                 }
             }
@@ -579,6 +580,26 @@ impl LlmManager {
             *latest = Some((std::time::Instant::now(), fetched.clone()));
         }
         fetched
+    }
+}
+
+/// How long a release lookup is reused: six hours when it found a version,
+/// [`MIN_UPDATE_CHECK_INTERVAL_SECS`] when it did not.
+///
+/// The retry is the same floor the Daygle release checker puts on asking
+/// GitHub, because the API's unauthenticated budget (60/hour) is shared by
+/// everything behind the address. Waiting the full six hours instead - as
+/// this used to - meant a single failed lookup, from a brief outage or that
+/// very rate limit, left the "Update available" badge unknown until the next
+/// day.
+///
+/// [`MIN_UPDATE_CHECK_INTERVAL_SECS`]: daygle_dns_core::config::MIN_UPDATE_CHECK_INTERVAL_SECS
+fn release_cache_ttl(version: &Option<String>) -> Duration {
+    const FOUND: Duration = Duration::from_secs(6 * 3600);
+    if version.is_some() {
+        FOUND
+    } else {
+        Duration::from_secs(daygle_dns_core::config::MIN_UPDATE_CHECK_INTERVAL_SECS)
     }
 }
 
@@ -716,6 +737,20 @@ mod tests {
         assert_eq!(got.category.as_deref(), Some("jobs"));
         assert!((got.confidence - 0.8).abs() < 1e-6);
         assert!(parse_answer(r#"{"category":"jo"#, &labels()).is_none());
+    }
+
+    /// A version is worth keeping for six hours; a failure is not, or one
+    /// outage would hide the update badge for the rest of the day.
+    #[test]
+    fn a_failed_release_lookup_is_retried_long_before_a_found_one() {
+        let found = release_cache_ttl(&Some("0.5.7".to_string()));
+        let missed = release_cache_ttl(&None);
+        assert_eq!(found, Duration::from_secs(6 * 3600));
+        assert_eq!(
+            missed,
+            Duration::from_secs(daygle_dns_core::config::MIN_UPDATE_CHECK_INTERVAL_SECS)
+        );
+        assert!(missed < found);
     }
 
     #[test]
