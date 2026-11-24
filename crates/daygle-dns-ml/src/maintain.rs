@@ -46,9 +46,6 @@ use crate::store::AiStore;
 /// rollback - goes live the same way.
 pub type Installer = Box<dyn Fn(&Path) -> Result<()> + Send + Sync>;
 
-/// Run after a model is promoted (the engine refreshes what depends on it).
-pub type AfterPromotion = Box<dyn Fn() + Send + Sync>;
-
 /// A maintenance step with nothing to report (the verifier refresh).
 pub type Step = Box<dyn Fn() + Send + Sync>;
 
@@ -139,7 +136,9 @@ pub struct Trial {
 }
 
 impl Trial {
-    fn from_json(value: &serde_json::Value) -> Self {
+    /// Read a trial record ([`Self::to_json`]'s shape, as the status API
+    /// reports it).
+    pub fn from_json(value: &serde_json::Value) -> Self {
         let int = |key: &str| value.get(key).and_then(|v| v.as_i64());
         Self {
             started_at: int("started_at"),
@@ -288,7 +287,6 @@ pub struct Retrainer {
     /// and rotate the same model files.
     running: Mutex<()>,
     installer: OnceLock<Installer>,
-    after_promotion: OnceLock<AfterPromotion>,
     /// Threat feeds and this network's usage: confirmation, probes and trial
     /// truths that do not depend on the operator.
     evidence: OnceLock<Arc<NetworkEvidence>>,
@@ -311,7 +309,6 @@ impl Retrainer {
             last_attempt: Mutex::new(None),
             running: Mutex::new(()),
             installer: OnceLock::new(),
-            after_promotion: OnceLock::new(),
             evidence: OnceLock::new(),
         }
     }
@@ -328,11 +325,6 @@ impl Retrainer {
     /// written to disk.
     pub fn set_installer(&self, installer: Installer) {
         let _ = self.installer.set(installer);
-    }
-
-    /// Something to run after each promotion.
-    pub fn set_after_promotion(&self, hook: AfterPromotion) {
-        let _ = self.after_promotion.set(hook);
     }
 
     /// The model file this retrainer maintains.
@@ -595,9 +587,6 @@ impl Retrainer {
                 LogLevel::Warn,
                 format!("could not encode the retrain result: {e}"),
             ),
-        }
-        if let Some(hook) = self.after_promotion.get() {
-            hook();
         }
         Ok(())
     }

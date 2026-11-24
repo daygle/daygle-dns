@@ -2,9 +2,8 @@
 //! jobs, so a label can never mean two things at once.
 //!
 //! The scanner runs a [`Channel::Content`] pass and a [`Channel::Threat`]
-//! pass over every domain. The content pass can have its own model
-//! (`ai.category_model_path`); each pass has its own confidence floor and
-//! verdict TTL. This wrapper is what makes the two passes
+//! pass over every domain with the same model; each pass has its own
+//! confidence floor and verdict TTL. This wrapper is what makes the two passes
 //! mean different things:
 //!
 //! | Channel   | Verdict it reports                                      |

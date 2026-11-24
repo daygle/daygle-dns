@@ -348,12 +348,7 @@ impl DomainClassifier for MiniLmVerifier {
     }
 
     fn classify(&self, input: &ClassificationInput) -> Option<Verdict> {
-        let text = if input.title.is_empty() && input.text.is_empty() {
-            input.domain.clone()
-        } else {
-            format!("{} {} {}", input.domain, input.title, input.text)
-        };
-        let embedding = self.embed_text(&text).ok()?;
+        let embedding = self.embed_text(&input.domain).ok()?;
         let (category, cosine) = self.top_match(&embedding)?;
         if cosine < f32::EPSILON {
             return None;

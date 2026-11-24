@@ -211,14 +211,8 @@ impl AiEngine {
         } else {
             settings.model_path.clone()
         };
-        // The threat channel always runs the shared model; the content
-        // channel can run a categorizer of its own.
-        let content_path = if dedicated_category_model(settings) {
-            settings.category_model_path.clone()
-        } else {
-            shared_path.clone()
-        };
-        let content = content_channel(&content_path, &logs)?;
+        // Both channels run the one model.
+        let content = content_channel(&shared_path, &logs)?;
         let threat = threat_channel(
             &shared_path,
             settings,
@@ -269,14 +263,10 @@ impl AiEngine {
                 let file = path.to_string_lossy().into_owned();
                 // Build both before installing either, so a load failure
                 // never leaves the channels on different models.
-                let content = (!dedicated_category_model(&current))
-                    .then(|| content_channel(&file, &logs))
-                    .transpose()?;
+                let content = content_channel(&file, &logs)?;
                 let threat =
                     threat_channel(&file, &current, &settings, &logs, &reference, &network)?;
-                if let Some(content) = content {
-                    content_swap.replace(content);
-                }
+                content_swap.replace(content);
                 threat_swap.replace(threat);
                 announce(&logs, path == learned, "classifier", &file);
                 model.store(Arc::new(file));
@@ -425,27 +415,6 @@ impl AiEngine {
     /// The model the scanner maintains for itself, beside `ai.db`.
     pub fn learned_model_path(&self) -> &Path {
         &self.shared.learned
-    }
-
-    /// Whether a retrained model is the one currently loaded.
-    pub fn learned_model_active(&self) -> bool {
-        self.shared.active()
-    }
-
-    /// What the last successful retrain achieved, as recorded beside the model.
-    pub fn learned_model_record(&self) -> Option<serde_json::Value> {
-        self.shared.record()
-    }
-
-    /// The model's trials: a candidate in progress, a pause after a
-    /// rejection, and past outcomes.
-    pub fn learned_model_trial(&self) -> learn::Trial {
-        self.shared.retrainer.trial()
-    }
-
-    /// Whether a retrain replaced a model that can still be restored.
-    pub fn learned_model_previous(&self) -> bool {
-        self.shared.retrainer.has_previous()
     }
 
     /// The model's maintenance state, for the status API.
@@ -692,9 +661,7 @@ impl AiEngine {
 /// Whether going from `old` to `new` changes what is loaded at startup: a
 /// model or the database.
 fn needs_restart(old: &AiSettings, new: &AiSettings) -> bool {
-    old.model_path != new.model_path
-        || old.category_model_path != new.category_model_path
-        || old.database != new.database
+    old.model_path != new.model_path || old.database != new.database
 }
 
 /// Whether the verifier (its files or threshold) changed: applied live by
@@ -703,13 +670,6 @@ fn verifier_changed(old: &AiSettings, new: &AiSettings) -> bool {
     old.verifier_model_path != new.verifier_model_path
         || old.verifier_reference_path != new.verifier_reference_path
         || old.verifier_threshold != new.verifier_threshold
-}
-
-/// Whether the content channel runs a model of its own. Naming the shared
-/// model explicitly is the same as leaving the field empty.
-fn dedicated_category_model(settings: &AiSettings) -> bool {
-    let category = settings.category_model_path.trim();
-    !category.is_empty() && category != settings.model_path.trim()
 }
 
 fn content_channel(
@@ -965,7 +925,7 @@ mod tests {
         live.auto_block_categories = vec!["scam".to_string()];
         assert!(!needs_restart(&old, &live));
         for change in [
-            |s: &mut AiSettings| s.category_model_path = "/m/cat.bin".to_string(),
+            |s: &mut AiSettings| s.model_path = "/m/other.bin".to_string(),
             |s: &mut AiSettings| s.database = "/d/ai.db".to_string(),
         ] {
             let mut new = old.clone();

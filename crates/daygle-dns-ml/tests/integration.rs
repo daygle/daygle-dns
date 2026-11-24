@@ -68,6 +68,24 @@ const SITE_SHAPES: &[(&str, &str)] = &[
     ("gambling", "gambling-site"),
 ];
 
+/// What the status API reports about the maintained model.
+fn learned_active(ai: &AiEngine) -> bool {
+    ai.maintained_status()["active"] == true
+}
+
+fn learned_record(ai: &AiEngine) -> Option<serde_json::Value> {
+    let last = ai.maintained_status()["last"].clone();
+    (!last.is_null()).then_some(last)
+}
+
+fn learned_previous(ai: &AiEngine) -> bool {
+    ai.maintained_status()["previous"] == true
+}
+
+fn learned_trial(ai: &AiEngine) -> daygle_dns_ml::learn::Trial {
+    daygle_dns_ml::learn::Trial::from_json(&ai.maintained_status()["trial"])
+}
+
 // ── Store semantics ─────────────────────────────────────────────────────────
 
 /// A database from before the channel split stored one verdict per domain.
@@ -1015,12 +1033,12 @@ fn retraining_installs_a_learned_model_once_there_is_data() {
     );
     assert_eq!(stats.labels, 3);
     assert!(ai.learned_model_path().is_file());
-    let record = ai.learned_model_record().expect("the retrain is recorded");
+    let record = learned_record(&ai).expect("the retrain is recorded");
     assert_eq!(record["verdicts"], 240);
     assert_eq!(record["starter"], stats.starter);
     // The new model is live: the content channel switched from the
     // configured model to the trained file, without a restart.
-    assert!(ai.learned_model_active());
+    assert!(learned_active(&ai));
     assert_eq!(ai.content_backend_name(), "fasttext");
 }
 
@@ -1060,11 +1078,8 @@ fn a_retrain_keeps_one_model_to_roll_back_to() {
             .unwrap();
     }
     ai.retrain_learned_model().unwrap();
-    assert!(
-        !ai.learned_model_previous(),
-        "nothing has been replaced yet"
-    );
-    assert_eq!(ai.learned_model_record().unwrap()["verdicts"], 240);
+    assert!(!learned_previous(&ai), "nothing has been replaced yet");
+    assert_eq!(learned_record(&ai).unwrap()["verdicts"], 240);
 
     // Three more domains: a second retrain replaces the first model.
     for i in 240..243 {
@@ -1085,18 +1100,18 @@ fn a_retrain_keeps_one_model_to_roll_back_to() {
             .unwrap();
     }
     ai.retrain_learned_model().unwrap();
-    assert_eq!(ai.learned_model_record().unwrap()["verdicts"], 243);
-    assert!(ai.learned_model_previous());
+    assert_eq!(learned_record(&ai).unwrap()["verdicts"], 243);
+    assert!(learned_previous(&ai));
 
     ai.rollback_learned_model().unwrap();
     assert_eq!(
-        ai.learned_model_record().unwrap()["verdicts"],
+        learned_record(&ai).unwrap()["verdicts"],
         240,
         "the record follows the restored model"
     );
     // Reversible: the model just replaced is now the previous one.
     ai.rollback_learned_model().unwrap();
-    assert_eq!(ai.learned_model_record().unwrap()["verdicts"], 243);
+    assert_eq!(learned_record(&ai).unwrap()["verdicts"], 243);
 }
 
 /// A threat candidate is offered for a page read once, and what the page said
@@ -2069,7 +2084,7 @@ fn retraining_judges_itself_on_held_out_corrections() {
     }
 
     let stats = ai.retrain_learned_model().unwrap();
-    let record = ai.learned_model_record().unwrap();
+    let record = learned_record(&ai).unwrap();
     let held = record["validation_examples"].as_u64().unwrap() as usize;
     assert!(held > 0, "some corrections are held out: {record}");
     assert_eq!(
@@ -2805,7 +2820,7 @@ fn a_scheduled_retrain_runs_in_the_shadow_until_promoted() {
         ),
     );
     seed_content_verdicts(&ai, 0..240);
-    assert!(!ai.learned_model_active());
+    assert!(!learned_active(&ai));
 
     let stats = ai
         .run_due_maintenance()
@@ -2813,10 +2828,10 @@ fn a_scheduled_retrain_runs_in_the_shadow_until_promoted() {
         .unwrap();
     assert_eq!(stats.local(), 240);
     assert!(
-        !ai.learned_model_active(),
+        !learned_active(&ai),
         "a candidate on trial does not answer queries"
     );
-    assert!(ai.learned_model_trial().in_progress());
+    assert!(learned_trial(&ai).in_progress());
     assert!(
         ai.run_due_maintenance().is_none(),
         "nothing replaces a candidate on trial"
@@ -2825,7 +2840,7 @@ fn a_scheduled_retrain_runs_in_the_shadow_until_promoted() {
     end_trial_soon(&ai);
     std::thread::sleep(std::time::Duration::from_millis(1100));
     assert!(ai.run_due_maintenance().is_none());
-    let trial = ai.learned_model_trial();
+    let trial = learned_trial(&ai);
     assert!(
         trial
             .last_outcome
@@ -2833,7 +2848,7 @@ fn a_scheduled_retrain_runs_in_the_shadow_until_promoted() {
             .is_some_and(|o| o.starts_with("promoted")),
         "{trial:?}"
     );
-    assert!(ai.learned_model_active(), "promoted without a restart");
+    assert!(learned_active(&ai), "promoted without a restart");
     assert_eq!(ai.content_backend_name(), "fasttext");
     assert_eq!(trial.history.len(), 1, "the trial is in the history");
 }
@@ -2845,7 +2860,7 @@ fn a_damaged_learned_model_falls_back_to_the_configured_one() {
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join("learned.bin"), b"not a fastText model").unwrap();
     let ai = engine(&dir, settings(AiMode::Train));
-    assert!(!ai.learned_model_active());
+    assert!(!learned_active(&ai));
     assert_eq!(ai.content_backend_name(), "heuristic");
 }
 
@@ -3088,7 +3103,7 @@ fn a_bundled_corpus_beside_the_model_is_preferred() {
 /// that covers everything the test recorded.
 fn end_trial_soon(ai: &AiEngine) {
     let now = chrono::Utc::now().timestamp();
-    let mut trial = ai.learned_model_trial();
+    let mut trial = learned_trial(ai);
     assert!(trial.in_progress(), "a scheduled retrain starts a trial");
     trial.started_at = Some(now - 600);
     trial.ends_at = Some(now + 1);
@@ -3149,10 +3164,10 @@ fn a_worse_candidate_is_rejected_without_ever_going_live() {
     std::thread::sleep(std::time::Duration::from_millis(1100));
     assert!(ai.run_due_maintenance().is_none());
 
-    let trial = ai.learned_model_trial();
+    let trial = learned_trial(&ai);
     let outcome = trial.last_outcome.clone().unwrap_or_default();
     assert!(outcome.starts_with("rejected"), "{trial:?}");
-    assert!(!ai.learned_model_active(), "the live model never changed");
+    assert!(!learned_active(&ai), "the live model never changed");
     assert_eq!(ai.content_backend_name(), "heuristic");
     assert!(!ai.learned_model_path().exists());
     assert!(trial.retry_after.is_some(), "retraining pauses");
@@ -3487,7 +3502,7 @@ fn a_retrain_learns_from_the_threat_feeds() {
     seed_content_verdicts(&ai, 0..60);
     let stats = ai.retrain_learned_model().unwrap();
     assert!(stats.intel > 0, "{stats:?}");
-    let record = ai.learned_model_record().unwrap();
+    let record = learned_record(&ai).unwrap();
     assert!(
         record["intel_validation_examples"].as_u64().unwrap() > 0,
         "{record}"
@@ -3663,7 +3678,7 @@ fn a_promoted_model_that_blocks_far_more_is_rolled_back() {
     );
     seed_content_verdicts(&ai, 0..240);
     ai.run_due_maintenance().unwrap().unwrap();
-    assert!(ai.learned_model_active(), "trials are off: it went live");
+    assert!(learned_active(&ai), "trials are off: it went live");
     let status = ai.maintained_status();
     let promoted_at = status["watch"]["promoted_at"].as_i64().expect("watched");
 
@@ -3676,8 +3691,8 @@ fn a_promoted_model_that_blocks_far_more_is_rolled_back() {
         .unwrap();
     ai.run_due_maintenance();
 
-    assert!(!ai.learned_model_active(), "the configured model is back");
-    let trial = ai.learned_model_trial();
+    assert!(!learned_active(&ai), "the configured model is back");
+    let trial = learned_trial(&ai);
     assert!(
         trial
             .last_outcome
@@ -3709,7 +3724,7 @@ fn not_a_threat_marks_on_new_detections_roll_a_model_back() {
     );
     seed_content_verdicts(&ai, 0..240);
     ai.run_due_maintenance().unwrap().unwrap();
-    assert!(ai.learned_model_active());
+    assert!(learned_active(&ai));
     for i in 0..3 {
         let domain = format!("flagged{i}.example");
         ai.store.observe(&domain).unwrap();
@@ -3730,8 +3745,8 @@ fn not_a_threat_marks_on_new_detections_roll_a_model_back() {
             .unwrap();
     }
     ai.run_due_maintenance();
-    assert!(!ai.learned_model_active());
-    let outcome = ai.learned_model_trial().last_outcome.unwrap_or_default();
+    assert!(!learned_active(&ai));
+    let outcome = learned_trial(&ai).last_outcome.unwrap_or_default();
     assert!(outcome.contains("not a threat"), "{outcome}");
 }
 
@@ -3765,7 +3780,7 @@ fn a_well_behaved_promoted_model_stays_live() {
         .record_threat_rate_at(1_000, 14, promoted_at)
         .unwrap();
     ai.run_due_maintenance();
-    assert!(ai.learned_model_active());
+    assert!(learned_active(&ai));
     assert!(!ai.maintained_status()["watch"].is_null());
 }
 

@@ -164,14 +164,9 @@ impl DomainClassifier for HeuristicBackend {
     }
 
     fn classify(&self, input: &ClassificationInput) -> Option<Verdict> {
-        // Lowercase once (page title/text are not normalized like the query
-        // name is), then split on dots, hyphens, slashes and spaces: every
-        // `-token-` run is therefore already a label of its own.
-        let hay = if input.title.is_empty() && input.text.is_empty() {
-            input.domain.to_ascii_lowercase()
-        } else {
-            format!("{} {} {}", input.domain, input.title, input.text).to_ascii_lowercase()
-        };
+        // Lowercase once, then split on dots, hyphens, slashes and spaces:
+        // every `-token-` run is therefore already a label of its own.
+        let hay = input.domain.to_ascii_lowercase();
         let labels: Vec<&str> = hay
             .split(['.', '-', '/', ' '])
             .filter(|s| !s.is_empty())

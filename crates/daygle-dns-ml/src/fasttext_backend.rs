@@ -80,13 +80,8 @@ impl DomainClassifier for FastTextBackend {
     fn classify(&self, input: &ClassificationInput) -> Option<Verdict> {
         // fastText expects prose-ish text; tokens separated by spaces.
         // Domains are passed as-is (dots/hyphens are its word-token
-        // boundaries), title/text (when the fetch stage lands) appended.
-        let text = if input.title.is_empty() && input.text.is_empty() {
-            input.domain.clone()
-        } else {
-            format!("{} {} {}", input.domain, input.title, input.text)
-        };
-        let predictions = self.model.predict(&text, 1, 0.0);
+        // boundaries).
+        let predictions = self.model.predict(&input.domain, 1, 0.0);
         let best = predictions.into_iter().next()?;
         let category = best
             .label

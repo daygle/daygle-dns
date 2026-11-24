@@ -324,8 +324,7 @@ see [AI.md](AI.md).
   `Channel::Content` categorizes (`news`, `shopping`, ...) and stores a
   label only, and `Channel::Threat` reports detected threats and is the
   only channel that can block on its own. It reports only the labels in
-  `ai.auto_block_categories`. Both run `ai.model_path` (the content channel
-  can have its own `ai.category_model_path`); each has its own confidence floor
+  `ai.auto_block_categories`. Both run `ai.model_path`; each has its own confidence floor
   (`ai.category_confidence_floor` / `ai.confidence_floor`) and its own
   verdict TTL (`ai.category_ttl_secs` / `ai.threat_ttl_secs`).
   `channel::ChannelBackend` is what scopes a classifier to one job; a
