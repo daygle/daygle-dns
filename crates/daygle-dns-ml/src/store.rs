@@ -939,6 +939,7 @@ impl AiStore {
             "SELECT channel, category, domain FROM ai_verdicts v
              WHERE status = 'classified' AND severity != 'disputed' AND category != ''
                AND backend NOT IN ('page', 'llm')
+               AND NOT (channel = 'threat' AND substr(evidence, 1, length(?4)) = ?4)
                AND expires_at > ?3
                AND confidence >= CASE channel WHEN 'threat' THEN ?2 ELSE ?1 END
                AND NOT EXISTS (
@@ -952,13 +953,21 @@ impl AiStore {
         // subdomains of an overridden parent near the top took slots and were
         // then dropped, so eligible rows below them never came back. Rows
         // stream strongest first, so reading stops once `limit` are kept.
-        let rows = stmt.query_map(params![content_floor, threat_floor, now_epoch], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })?;
+        let rows = stmt.query_map(
+            params![
+                content_floor,
+                threat_floor,
+                now_epoch,
+                crate::evidence::UNFLAGGED_NOTE
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            },
+        )?;
         let limit = limit as usize;
         let mut kept = Vec::new();
         for row in rows {

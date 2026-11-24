@@ -778,7 +778,13 @@ impl Retrainer {
         if let Err(e) = &outcome {
             // Info, not Warn: "not enough data yet" is the normal state for a
             // young install, not a fault.
-            self.log(LogLevel::Info, format!("AI retrain skipped: {e}"));
+            // The reason alone: "configuration error:" (the error type's
+            // prefix) read as if a setting were wrong.
+            let why = match e {
+                DaygleError::Config(why) => why.clone(),
+                other => other.to_string(),
+            };
+            self.log(LogLevel::Info, format!("AI retrain skipped: {why}"));
         }
         Some(outcome)
     }
