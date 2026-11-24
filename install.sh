@@ -25,7 +25,8 @@
 # (by default it is turned off so the server can bind port 53).
 #
 # DAYGLE_DNS_KEEP_RESOLV_CONF=1 only warns when /etc/resolv.conf names no DNS
-# server (by default the installer fills it in; see check_host_resolver).
+# server (by default the installer fills it in, installing resolvconf on
+# ifupdown hosts; see check_host_resolver).
 #
 # DAYGLE_DNS_ONNX=0 builds without the MiniLM/ONNX AI verifier, =1 with it.
 # By default it is left out on x86 CPUs without AVX2, which its prebuilt
@@ -367,6 +368,9 @@ port_53_holders() {
 # first when it answers on loopback, then the `dns-nameservers` of
 # /etc/network/interfaces, else the default gateway. dhcpcd is told to stop
 # rewriting the file. The old file is kept as /etc/resolv.conf.daygle-bak.
+# On a Debian-style host configured by ifupdown (see use_resolvconf), the
+# resolvconf package is then installed so those `dns-nameservers` lines take
+# effect the standard way (setup_resolvconf).
 # DAYGLE_DNS_KEEP_RESOLV_CONF=1, or a console-driven update, only warns.
 check_host_resolver() {
     [ -e /etc/resolv.conf ] || return 0
@@ -383,6 +387,8 @@ check_host_resolver() {
     upstream="$(cat /etc/network/interfaces /etc/network/interfaces.d/* 2>/dev/null \
         | awk '$1 == "dns-nameservers" { for (i = 2; i <= NF; i++) print $i }' \
         | grep -vE '^(127\.|::1$)' | awk '!seen[$0]++' | head -n 2 | tr '\n' ' ')"
+    from_interfaces=0
+    [ -n "$upstream" ] && from_interfaces=1
     if [ -z "$upstream" ] && have_cmd ip; then
         upstream="$(ip -4 route show default 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "via") { print $(i + 1); exit } }')"
     fi
@@ -418,6 +424,79 @@ check_host_resolver() {
             | run_as_root tee -a /etc/dhcpcd.conf >/dev/null
         log "Told dhcpcd to leave /etc/resolv.conf alone (nohook resolv.conf in /etc/dhcpcd.conf)."
     fi
+    # The file just written lets apt resolve; now hand it to resolvconf where
+    # that is how the host is meant to be run. Failing that, the file stays.
+    if [ "$from_interfaces" = "1" ] && use_resolvconf; then
+        setup_resolvconf "$servers" || true
+    fi
+}
+
+# Whether this host should get Debian's resolvconf package: apt, networking
+# set up by ifupdown (/etc/network/interfaces, which names the DNS servers in
+# `dns-nameservers` lines that only resolvconf applies), and no
+# systemd-resolved, NetworkManager or openresolv already owning
+# /etc/resolv.conf. DAYGLE_DNS_NO_DEPS=1 installs nothing.
+use_resolvconf() {
+    have_cmd apt-get && have_cmd dpkg || return 1
+    [ "${DAYGLE_DNS_NO_DEPS:-0}" != "1" ] || return 1
+    [ -f /etc/network/interfaces ] || return 1
+    if have_cmd systemctl; then
+        systemctl is-active --quiet systemd-resolved 2>/dev/null && return 1
+        systemctl is-active --quiet NetworkManager 2>/dev/null && return 1
+    fi
+    if have_cmd resolvconf && ! dpkg -s resolvconf >/dev/null 2>&1; then
+        return 1 # openresolv or another implementation: not ours to replace
+    fi
+    return 0
+}
+
+# Install resolvconf, put this server first through its `head` file when
+# `servers` starts with 127.0.0.1, and register each interface's
+# `dns-nameservers` now (ifup does this at boot, but the interfaces are
+# already up), so /etc/resolv.conf works without restarting the network.
+# If the result names no DNS server besides this one, the plain file written
+# before is put back.
+setup_resolvconf() {
+    if ! dpkg -s resolvconf >/dev/null 2>&1; then
+        log "Installing resolvconf so the dns-nameservers lines in /etc/network/interfaces take effect..."
+        if ! run_as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends resolvconf; then
+            log "WARNING: could not install resolvconf; keeping the /etc/resolv.conf written above."
+            return 1
+        fi
+    fi
+    head_file=/etc/resolvconf/resolv.conf.d/head
+    case " $1 " in
+        *" 127.0.0.1 "*)
+            if ! grep -qE '^[[:space:]]*nameserver[[:space:]]+127\.0\.0\.1([[:space:]]|$)' "$head_file" 2>/dev/null; then
+                run_as_root mkdir -p /etc/resolvconf/resolv.conf.d
+                printf '# Added by the Daygle DNS installer: ask this server first.\nnameserver 127.0.0.1\n' \
+                    | run_as_root tee -a "$head_file" >/dev/null
+            fi
+            ;;
+    esac
+    cat /etc/network/interfaces /etc/network/interfaces.d/* 2>/dev/null | awk '
+        $1 == "iface" { name = $2 "." $3 }
+        $1 == "dns-nameservers" && name != "" { for (i = 2; i <= NF; i++) print name, $i }
+    ' | awk '!seen[$0]++' | while read -r record server; do
+        printf 'nameserver %s\n' "$server" | run_as_root resolvconf -a "$record" 2>/dev/null || true
+    done
+    run_as_root resolvconf -u 2>/dev/null || true
+    # Success needs a server other than this one, or the host is back to
+    # having nothing to ask while Daygle DNS restarts.
+    if awk '$1 == "nameserver" && $2 !~ /^(127\.|::1$)/ { found = 1 } END { exit !found }' /etc/resolv.conf 2>/dev/null; then
+        log "resolvconf now manages /etc/resolv.conf: $(awk '$1 == "nameserver" { printf "%s ", $2 }' /etc/resolv.conf)"
+        log "  (DNS servers: dns-nameservers in /etc/network/interfaces; this server first via $head_file)"
+        return 0
+    fi
+    log "WARNING: resolvconf produced no DNS server besides this one; restoring the /etc/resolv.conf written above."
+    run_as_root rm -f /etc/resolv.conf
+    {
+        echo "# Written by the Daygle DNS installer: this file named no DNS server."
+        for server in $1; do
+            echo "nameserver $server"
+        done
+    } | run_as_root tee /etc/resolv.conf >/dev/null
+    return 1
 }
 
 # Free port 53 for the DNS server. systemd-resolved (Ubuntu, Fedora and
