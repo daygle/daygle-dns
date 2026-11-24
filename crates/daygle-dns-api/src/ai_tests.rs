@@ -138,11 +138,11 @@ async fn status_reports_the_page_content_defaults_over_http() {
     let dir = scratch_dir("status");
     let ai = engine(&dir);
     let status = json(AppState::for_tests(Some(ai)), "/api/ai/status").await;
-    assert_eq!(status["fetch_pages"], false);
+    assert_eq!(status["fetch_pages"], true);
     assert_eq!(status["page_fetch_timeout_secs"], 5);
     assert_eq!(status["page_fetch_max_bytes"], 524_288);
     assert_eq!(status["page_candidates_per_scan"], 16);
-    assert_eq!(status["page_rule"], "evidence");
+    assert_eq!(status["page_rule"], "corroborate");
     assert!(
         (status["page_confidence_floor"].as_f64().unwrap() - 0.6).abs() < 1e-6,
         "{}",

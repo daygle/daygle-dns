@@ -144,7 +144,7 @@ pub fn adjust(confidence: f32, evidence: &str, registered: i64, now: i64) -> (f3
         };
         return (raised, format!("{AGE_NOTE}{when} (newly registered)"));
     }
-    if days >= OLD_DAYS && !evidence.contains(", listed by ") {
+    if days >= OLD_DAYS && !evidence.contains(crate::evidence::LISTED_NOTE) {
         return (
             (confidence - OLD_LOWER).max(0.0),
             format!("{AGE_NOTE}{when} (long-standing)"),

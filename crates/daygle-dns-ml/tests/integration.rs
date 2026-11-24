@@ -28,6 +28,9 @@ fn settings(mode: AiMode) -> AiSettings {
     AiSettings {
         enabled: true,
         mode,
+        // Page reading is on by default; tests that read pages turn it on
+        // with a reader of their own, so no test reaches the network.
+        fetch_pages: false,
         ..AiSettings::default()
     }
 }
@@ -1540,8 +1543,8 @@ impl daygle_dns_ml::page::PageReader for WeakReads {
     }
 }
 
-/// The default rule records the reading only: agreement cannot raise the
-/// confidence and disagreement cannot lower it.
+/// The `evidence` rule records the reading only: agreement cannot raise
+/// the confidence and disagreement cannot lower it.
 #[test]
 fn an_evidence_reading_never_moves_confidence() {
     let dir = TempDir::new().unwrap();
@@ -1550,6 +1553,7 @@ fn an_evidence_reading_never_moves_confidence() {
         &dir,
         AiSettings {
             fetch_pages: true,
+            page_rule: PageRule::Evidence,
             ..settings(AiMode::Train)
         },
     );
@@ -4067,4 +4071,92 @@ fn a_threat_label_on_a_detected_threat_exports_as_the_operators() {
     assert_eq!(rows[0].1, "malware");
     assert!((rows[0].2 - 1.0).abs() < 1e-6);
     assert_eq!(rows[0].3, i64::MAX);
+}
+
+/// A domain a threat feed lists is a threat even when its name reads
+/// harmless to the model: the listing alone blocks it in enforce mode.
+#[test]
+fn a_listed_domain_is_a_threat_even_when_its_name_reads_harmless() {
+    let dir = TempDir::new().unwrap();
+    AiStore::open(&dir.path().join("ai.db"))
+        .unwrap()
+        .replace_intel(
+            "phishing_army",
+            &["harmless-looking.example".to_string()]
+                .into_iter()
+                .collect(),
+        )
+        .unwrap();
+    let zones = zone_store(&dir);
+    let ai = engine(&dir, settings(AiMode::Enforce));
+    ai.store.observe("harmless-looking.example").unwrap();
+    ai.scanner.run_cycle(0, zones.as_ref()).unwrap();
+    let blocks = ai.snapshot().load();
+    assert_eq!(blocks["harmless-looking.example"].category, "phishing");
+    assert!(threat_list(&ai).contains(&"harmless-looking.example".to_string()));
+}
+
+/// A page that says what it is, for a domain the categorizer is unsure of.
+struct JobsPage;
+
+impl daygle_dns_ml::page::PageReader for JobsPage {
+    fn inspect(&self, domain: &str) -> daygle_dns_ml::page::Inspection {
+        daygle_dns_ml::page::Inspection {
+            note: format!("test page for {domain}"),
+            reading: None,
+            page: Some((
+                "Careers".to_string(),
+                "Browse job openings near you. Job search made simple. Employers: post a job today."
+                    .to_string(),
+            )),
+        }
+    }
+}
+
+/// With page reading on, a domain the categorizer could not place gets its
+/// category from its page, and that label is never trained on.
+#[test]
+fn an_unsure_domain_is_categorized_from_its_page_and_not_trained_on() {
+    let dir = TempDir::new().unwrap();
+    let zones = zone_store(&dir);
+    let ai = engine(
+        &dir,
+        AiSettings {
+            fetch_pages: true,
+            ..settings(AiMode::Train)
+        },
+    );
+    assert!(ai.scanner.set_page_reader(Box::new(JobsPage)));
+    ai.store.observe("acme-careers-portal.example").unwrap();
+    ai.scanner.run_cycle(0, zones.as_ref()).unwrap();
+
+    let (rows, _) = ai.store.list_verdicts(None, None, 16, 0).unwrap();
+    let content = rows
+        .iter()
+        .find(|r| r.domain == "acme-careers-portal.example" && r.channel == "content")
+        .unwrap();
+    assert_eq!(content.category, "jobs", "{content:?}");
+    assert_eq!(content.status, "classified");
+    assert!(
+        content.evidence.contains("job openings"),
+        "{}",
+        content.evidence
+    );
+    let trainable = ai
+        .store
+        .confident_verdicts(0.0, 0.0, chrono::Utc::now().timestamp(), 100)
+        .unwrap();
+    assert!(!trainable
+        .iter()
+        .any(|(_, _, domain)| domain == "acme-careers-portal.example"));
+
+    // Read once per verdict: the next cycle leaves it alone.
+    ai.scanner.run_cycle(0, zones.as_ref()).unwrap();
+    let (rows, _) = ai.store.list_verdicts(None, None, 16, 0).unwrap();
+    assert_eq!(
+        rows.iter()
+            .filter(|r| r.domain == "acme-careers-portal.example" && r.channel == "content")
+            .count(),
+        1
+    );
 }

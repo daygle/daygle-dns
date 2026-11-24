@@ -19,6 +19,8 @@ const STARTER_MODEL: &str = concat!(
 fn base_settings() -> AiSettings {
     AiSettings {
         enabled: true,
+        // No test reaches the network.
+        fetch_pages: false,
         ..AiSettings::default()
     }
 }

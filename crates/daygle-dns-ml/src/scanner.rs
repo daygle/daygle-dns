@@ -36,7 +36,10 @@ pub struct ActiveBlock {
     pub expires_at: i64,
 }
 
-/// Longest the page stage may run in one scan cycle.
+/// A content verdict below this confidence has its page read (with
+/// `ai.fetch_pages`): the name alone left the categorizer unsure.
+pub const CATEGORY_PAGE_BELOW: f32 = 0.5;
+/// Longest the page stages may run in one scan cycle, together.
 const PAGE_STAGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// Domain → active block; swapped atomically after each scan cycle and on
@@ -190,6 +193,19 @@ impl Scanner {
             if expired > 0 {
                 self.log_info(format!("AI re-queued {expired} expired verdict(s)"));
             }
+            // A threat on a domain the network has since come to rely on is
+            // re-checked now, not at expiry: the evidence disputes it.
+            if cfg.network_evidence {
+                match self.store.requeue_newly_established() {
+                    Ok(0) => {}
+                    Ok(n) => self.log_info(format!(
+                        "AI re-checks {n} threat verdict(s) on domains now established on this network"
+                    )),
+                    Err(e) => self.log_warn(format!(
+                        "AI could not re-check threats on established domains: {e}"
+                    )),
+                }
+            }
             // A backlog larger than one batch carries on next cycle rather
             // than an `expire_check_secs` later: an expired verdict blocks
             // nothing until it is re-checked.
@@ -326,18 +342,144 @@ impl Scanner {
         // 5. Page content: evidence for the domains just flagged. Only the
         //    threat channel's candidates are read, and only when the operator
         //    turned it on; a failure here never fails the cycle.
-        match self.page_stage(&cfg, Utc::now().timestamp()) {
+        // Both page stages share one wall-clock budget per cycle.
+        let deadline = std::time::Instant::now() + PAGE_STAGE_BUDGET;
+        match self.page_stage(&cfg, Utc::now().timestamp(), deadline) {
             Ok(0) => {}
             Ok(read) => self.log_info(format!("AI read {read} page(s) behind threat candidates")),
             Err(e) => self.log_warn(format!("AI page stage failed: {e}")),
         }
+
+        // 6. Page content for categories: the pages of domains the
+        //    categorizer is unsure of, in whatever budget the threat stage
+        //    left.
+        match self.category_page_stage(&cfg, Utc::now().timestamp(), deadline) {
+            Ok((0, _)) => {}
+            Ok((read, set)) => self.log_info(format!(
+                "AI read {read} page(s) of domains it was unsure how to categorize; {set} categorized from their page"
+            )),
+            Err(e) => self.log_warn(format!("AI category page stage failed: {e}")),
+        }
         Ok(classified)
+    }
+
+    /// Read the pages of domains the categorizer is unsure of (below
+    /// [`CATEGORY_PAGE_BELOW`], or no category) and categorize them from
+    /// what their page says when it says so more surely. Only ordinary
+    /// categories the categorizer knows are taken (see
+    /// [`crate::page::classify_category`]); a page reading never makes or
+    /// clears a threat, and it is never trained on. Returns `(read, set)`.
+    fn category_page_stage(
+        &self,
+        cfg: &AiSettings,
+        now: i64,
+        deadline: std::time::Instant,
+    ) -> Result<(usize, usize)> {
+        if !cfg.fetch_pages || std::time::Instant::now() >= deadline {
+            return Ok((0, 0));
+        }
+        let candidates = self.store.category_page_candidates(
+            now,
+            CATEGORY_PAGE_BELOW,
+            cfg.page_candidates_per_scan.clamp(1, 64),
+        )?;
+        if candidates.is_empty() {
+            return Ok((0, 0));
+        }
+        let live;
+        let reader: &dyn crate::page::PageReader = match self.page_reader.get() {
+            Some(reader) => reader.as_ref(),
+            None => {
+                live = crate::page::PageFetcher::new(
+                    std::time::Duration::from_secs(cfg.page_fetch_timeout_secs.clamp(1, 30)),
+                    cfg.page_fetch_max_bytes.clamp(16 * 1024, 2 * 1024 * 1024) as usize,
+                );
+                &live
+            }
+        };
+        let known: HashSet<String> = self.content.categories().into_iter().collect();
+        let workers = crate::page::workers().min(candidates.len());
+        let chunk = candidates.len().div_ceil(workers);
+        let readings: Vec<(String, f32, crate::page::Inspection)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = candidates
+                .chunks(chunk)
+                .map(|part| {
+                    scope.spawn(move || {
+                        part.iter()
+                            .take_while(|_| std::time::Instant::now() < deadline)
+                            .map(|(domain, confidence)| {
+                                (domain.clone(), *confidence, reader.inspect(domain))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| handle.join().unwrap_or_default())
+                .collect()
+        });
+        let mut set = 0usize;
+        for (domain, confidence, inspection) in &readings {
+            let Some((title, text)) = &inspection.page else {
+                self.store
+                    .record_category_page(domain, &inspection.note, None)?;
+                continue;
+            };
+            if let Err(e) = self.store.save_page_text(domain, title, text) {
+                self.log_warn(format!("AI could not keep the text of {domain}: {e}"));
+            }
+            let reading = crate::page::classify_category(title, text).filter(|r| {
+                r.confidence >= cfg.page_confidence_floor
+                    && r.confidence > *confidence
+                    && !cfg.is_auto_block_category(r.category)
+                    && (known.is_empty() || known.contains(r.category))
+            });
+            let short: String = title.chars().take(80).collect();
+            match reading {
+                Some(r) => {
+                    let note = format!(
+                        "page \"{short}\" reads {} ({:.0}%: {}); the name alone was {:.0}%",
+                        r.category,
+                        r.confidence * 100.0,
+                        r.cues
+                            .iter()
+                            .take(3)
+                            .copied()
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        confidence * 100.0
+                    );
+                    if self.store.record_category_page(
+                        domain,
+                        &note,
+                        Some((r.category, r.confidence)),
+                    )? {
+                        set += 1;
+                    }
+                }
+                None => {
+                    let note = format!("page \"{short}\" read, no clearer category");
+                    self.store.record_category_page(domain, &note, None)?;
+                }
+            }
+        }
+        if set > 0 {
+            // Category blocking follows the new labels at once.
+            self.refresh_snapshot(cfg, now);
+        }
+        Ok((readings.len(), set))
     }
 
     /// Fetch and read the page behind each new threat candidate, recording
     /// what it says. `ai.page_rule` decides whether the reading may move the
     /// verdict's confidence; with the default `evidence` it never does.
-    fn page_stage(&self, cfg: &AiSettings, now: i64) -> Result<usize> {
+    fn page_stage(
+        &self,
+        cfg: &AiSettings,
+        now: i64,
+        deadline: std::time::Instant,
+    ) -> Result<usize> {
         if !cfg.fetch_pages {
             return Ok(0);
         }
@@ -364,7 +506,6 @@ impl Scanner {
         // batch of slow sites (each trying HTTPS, HTTP and redirects) must
         // not hold up classification. A candidate not reached stays unread
         // and is picked up next cycle.
-        let deadline = std::time::Instant::now() + PAGE_STAGE_BUDGET;
         let workers = crate::page::workers().min(candidates.len());
         let chunk = candidates.len().div_ceil(workers);
         let readings: Vec<(String, f32, crate::page::Inspection)> = std::thread::scope(|scope| {

@@ -222,6 +222,10 @@ impl AiEngine {
             &network,
         )?;
 
+        // A model file that changed while the server was down (a release
+        // bundle, a new configured path) re-checks verdicts like a promotion.
+        note_live_model(&store, &shared_path, &logs);
+
         // The channels sit behind reloadable handles, so a new model goes
         // live without a restart.
         let content_swap = backend::Reloadable::new(content);
@@ -258,6 +262,7 @@ impl AiEngine {
             let learned = learned_shared.clone();
             let reference = learned_reference.clone();
             let network = network.clone();
+            let store = store.clone();
             Box::new(move |path: &Path| {
                 let current = settings.load_full();
                 let file = path.to_string_lossy().into_owned();
@@ -269,6 +274,7 @@ impl AiEngine {
                 content_swap.replace(content);
                 threat_swap.replace(threat);
                 announce(&logs, path == learned, "classifier", &file);
+                note_live_model(&store, &file, &logs);
                 model.store(Arc::new(file));
                 active.store(path == learned, std::sync::atomic::Ordering::Relaxed);
                 Ok(())
@@ -747,6 +753,61 @@ fn threat_channel(
         threat,
         network.clone(),
     )))
+}
+
+/// How soon verdicts are re-checked once a different model is live: spread
+/// over this window, so a better model corrects old verdicts in days.
+pub const MODEL_CHANGE_RECHECK_SECS: i64 = 3 * 86_400;
+const LIVE_MODEL_KEY: &str = "live_model";
+
+/// What identifies the model file in use: its path, size and modification
+/// time (a promotion rewrites the same path).
+fn model_fingerprint(path: &str) -> String {
+    let path = path.trim();
+    if path.is_empty() {
+        return "heuristic".to_string();
+    }
+    let (len, modified) = std::fs::metadata(path)
+        .map(|m| {
+            (
+                m.len(),
+                m.modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_secs()),
+            )
+        })
+        .unwrap_or((0, 0));
+    format!("{path}:{len}:{modified}")
+}
+
+/// Record the model now live; when it differs from the one before, bring
+/// forward the re-check of the verdicts the old model made (see
+/// [`AiStore::stagger_rechecks`]). Never fails the caller.
+fn note_live_model(store: &AiStore, path: &str, logs: &LogStore) {
+    let fingerprint = model_fingerprint(path);
+    let before = store.meta(LIVE_MODEL_KEY).ok().flatten();
+    if before.as_deref() == Some(fingerprint.as_str()) {
+        return;
+    }
+    if before.is_some() {
+        match store.stagger_rechecks(chrono::Utc::now().timestamp(), MODEL_CHANGE_RECHECK_SECS)
+        {
+            Ok(0) => {}
+            Ok(n) => logs.push(
+                daygle_dns_core::LogLevel::Info,
+                "ai",
+                format!(
+                    "a different model is live: {n} verdict(s) will be re-checked over the next {} days",
+                    MODEL_CHANGE_RECHECK_SECS / 86_400
+                ),
+            ),
+            Err(e) => tracing::warn!(error = %e, "could not schedule re-checks after a model change"),
+        }
+    }
+    if let Err(e) = store.set_meta(LIVE_MODEL_KEY, &fingerprint) {
+        tracing::warn!(error = %e, "could not record the live model");
+    }
 }
 
 /// Whether a learned model should be preferred over the configured one: it

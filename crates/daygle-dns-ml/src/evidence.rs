@@ -14,6 +14,7 @@
 //! | Evidence                                   | Effect                                |
 //! |--------------------------------------------|---------------------------------------|
 //! | a feed lists it under a threat label       | corroborated at blocking confidence   |
+//! | ... and the model saw no threat at all     | a threat on the listing alone         |
 //! | its registered domain is a popular site    | disputed - never blocks on its name   |
 //! | established: many clients, for weeks       | disputed - never blocks on its name   |
 //! | a machine-generated name first seen today  | noted, small raise, never to blocking |
@@ -44,6 +45,8 @@ use crate::store::{AiStore, Sighting};
 /// default block threshold, so a flagged and listed domain blocks in enforce
 /// mode.
 pub const LISTED_CONFIDENCE: f32 = 0.99;
+/// What a feed listing writes into a verdict's evidence.
+pub const LISTED_NOTE: &str = ", listed by ";
 /// How much a machine-generated name first seen today raises a threat
 /// verdict, and the most it can raise it to: never to blocking on its own.
 const GENERATED_RAISE: f32 = 0.05;
@@ -115,6 +118,30 @@ impl NetworkEvidence {
             && (intel.is_popular(domain) || self.sighting(domain).is_some_and(|s| s.established()))
     }
 
+    /// A threat verdict from a feed listing alone, for a domain the model
+    /// saw no threat in: the feeds are curated by people who looked at the
+    /// site, so a listed name is a threat whatever its spelling suggests.
+    /// Only for labels the operator ticked, and only while the network
+    /// evidence is on.
+    pub fn listed(&self, domain: &str) -> Option<Verdict> {
+        if !self.settings.load().network_evidence {
+            return None;
+        }
+        let feed = self.intel().feed_for(domain)?;
+        if !self.settings.load().is_auto_block_category(feed.label) {
+            return None;
+        }
+        Some(Verdict {
+            category: feed.label.to_string(),
+            confidence: LISTED_CONFIDENCE,
+            severity: Severity::Threat,
+            evidence: format!(
+                "no threat in the name{LISTED_NOTE}{} as {}",
+                feed.source, feed.label
+            ),
+        })
+    }
+
     /// Apply the evidence to one verdict (see the module table).
     pub fn judge(&self, domain: &str, base: Verdict) -> Verdict {
         if !matches!(base.severity, Severity::Threat | Severity::Disputed) {
@@ -130,7 +157,7 @@ impl NetworkEvidence {
                     confidence: base.confidence.max(LISTED_CONFIDENCE),
                     severity: Severity::Threat,
                     evidence: format!(
-                        "{}, listed by {} as {}",
+                        "{}{LISTED_NOTE}{} as {}",
                         base.evidence, feed.source, feed.label
                     ),
                     ..base
@@ -201,8 +228,11 @@ impl<B: DomainClassifier> DomainClassifier for EvidenceBackend<B> {
     }
 
     fn classify(&self, input: &ClassificationInput) -> Option<Verdict> {
-        let base = self.inner.classify(input)?;
-        Some(self.evidence.judge(&input.domain, base))
+        match self.inner.classify(input) {
+            Some(base) => Some(self.evidence.judge(&input.domain, base)),
+            // The model saw no threat: a feed listing is one on its own.
+            None => self.evidence.listed(&input.domain),
+        }
     }
 }
 
@@ -282,6 +312,31 @@ mod tests {
         intel.reload();
         let evidence = NetworkEvidence::new(store.clone(), intel, settings);
         (dir, store, evidence)
+    }
+
+    /// A listed domain is a threat even when the model saw none, under the
+    /// feed's label; an unticked label or the evidence switched off leaves
+    /// it alone.
+    #[test]
+    fn a_feed_listing_is_a_threat_on_its_own() {
+        let (_dir, _store, judge) = evidence(AiSettings::default());
+        let got = judge.listed("paypa1-login.example").unwrap();
+        assert_eq!(got.category, "phishing");
+        assert_eq!(got.severity, Severity::Threat);
+        assert_eq!(got.confidence, LISTED_CONFIDENCE);
+        assert!(got.evidence.contains("listed by Phishing Army as phishing"));
+        assert!(judge.listed("news.example").is_none());
+
+        let (_dir, _store, judge) = evidence(AiSettings {
+            auto_block_categories: vec!["malware".into()],
+            ..AiSettings::default()
+        });
+        assert!(judge.listed("paypa1-login.example").is_none());
+        let (_dir, _store, judge) = evidence(AiSettings {
+            network_evidence: false,
+            ..AiSettings::default()
+        });
+        assert!(judge.listed("paypa1-login.example").is_none());
     }
 
     #[test]

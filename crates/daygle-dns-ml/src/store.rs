@@ -919,6 +919,7 @@ impl AiStore {
         let mut stmt = conn.prepare(
             "SELECT channel, category, domain FROM ai_verdicts v
              WHERE status = 'classified' AND severity != 'disputed' AND category != ''
+               AND backend != 'page'
                AND expires_at > ?3
                AND confidence >= CASE channel WHEN 'threat' THEN ?2 ELSE ?1 END
                AND NOT EXISTS (
@@ -996,6 +997,75 @@ impl AiStore {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(collected)
+    }
+
+    /// Domains whose category the categorizer is unsure of (below `below`
+    /// confidence, or no category at all) and whose page has not been read
+    /// for this verdict: `(domain, confidence)`, most looked-up first. A
+    /// relabelled domain is settled, and a threat candidate's page is read
+    /// by the threat stage, so both are left out.
+    pub fn category_page_candidates(
+        &self,
+        now_epoch: i64,
+        below: f32,
+        limit: u32,
+    ) -> Result<Vec<(String, f32)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT domain, confidence FROM ai_verdicts v
+             WHERE channel = 'content' AND status IN ('classified', 'skipped')
+               AND confidence < ?1 AND expires_at > ?2
+               AND page_fetched_at < classified_at
+               AND NOT EXISTS (SELECT 1 FROM ai_category_overrides c WHERE c.domain = v.domain)
+               AND NOT EXISTS (
+                   SELECT 1 FROM ai_verdicts t
+                   WHERE t.domain = v.domain AND t.channel = 'threat'
+                     AND t.status = 'classified' AND t.severity IN ('threat', 'disputed')
+               )
+             ORDER BY observations DESC, domain
+             LIMIT ?3",
+        )?;
+        let collected = stmt
+            .query_map(params![below, now_epoch, limit as i64], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, f32>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(collected)
+    }
+
+    /// Record a page read for the domain's content verdict. With a
+    /// `category`, the page's reading replaces the categorizer's: the
+    /// verdict is marked as the page's (`backend = 'page'`), which keeps it
+    /// out of retraining - a site writes its own page, and the shared model
+    /// must not learn a label from it.
+    pub fn record_category_page(
+        &self,
+        domain: &str,
+        note: &str,
+        category: Option<(&str, f32)>,
+    ) -> Result<bool> {
+        let conn = self.lock()?;
+        let changed = match category {
+            Some((category, confidence)) => conn.execute(
+                "UPDATE ai_verdicts
+                 SET category = ?2, confidence = ?3, status = 'classified', severity = 'info',
+                     backend = 'page', evidence = ?4, page_fetched_at = ?5
+                 WHERE domain = ?1 AND channel = 'content'",
+                params![domain, category, confidence, note, now_epoch()],
+            )?,
+            None => conn.execute(
+                "UPDATE ai_verdicts
+                 SET evidence = CASE
+                         WHEN evidence = '' THEN ?2
+                         WHEN length(evidence) > 2000 THEN evidence
+                         ELSE evidence || char(10) || ?2
+                     END,
+                     page_fetched_at = ?3
+                 WHERE domain = ?1 AND channel = 'content'",
+                params![domain, note, now_epoch()],
+            )?,
+        };
+        Ok(changed > 0)
     }
 
     /// Record what a page said on the domain's threat verdict, optionally
