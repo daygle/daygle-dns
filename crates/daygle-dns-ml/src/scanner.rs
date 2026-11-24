@@ -435,13 +435,16 @@ impl Scanner {
         let timeout = std::time::Duration::from_secs(cfg.llm_timeout_secs.clamp(5, 600));
         let (mut read, mut changed) = (0usize, 0usize);
         for candidate in candidates {
-            if std::time::Instant::now() >= deadline {
+            // Each answer gets the configured limit, but never more than the
+            // stage has left: a slow server cannot hold the scan past it.
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left < std::time::Duration::from_secs(5) {
                 break;
             }
             let reading = match crate::llm::ask(
                 &cfg.llm_url,
                 &cfg.llm_model,
-                timeout,
+                timeout.min(left),
                 &candidate.domain,
                 &candidate.title,
                 &candidate.text,

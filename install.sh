@@ -1043,14 +1043,28 @@ ollama_setup() { # action
         run_as_root sh "$SRC_DIR/crates/daygle-dns-api/src/ollama-setup.sh" "$1"
     fi
 }
+# The console's runtime settings live in the database and win over the
+# config file, so the reader is switched there (with the service stopped:
+# it writes SQLite); the restart below brings the service back.
+set_language_model() { # on|off
+    if have_cmd systemctl && [ -f "$SERVICE_FILE" ]; then
+        systemctl stop daygle-dns 2>/dev/null || true
+    fi
+    if id "$SERVICE_USER" >/dev/null 2>&1 \
+        && run_as_service "$PREFIX/bin/daygle-dns" --config "$CONFIG_FILE" set-language-model "$1" >/dev/null; then
+        log "Turned the AI's language-model reader $1."
+    else
+        log "WARNING: could not turn the language-model reader $1; use AI > Language Model in the console."
+    fi
+    if have_cmd systemctl && [ -f "$SERVICE_FILE" ]; then
+        systemctl start daygle-dns 2>/dev/null || true
+    fi
+}
 case "${DAYGLE_DNS_OLLAMA:-}" in
     1)
         log "Installing Ollama for the AI's language-model reader (DAYGLE_DNS_OLLAMA=1)..."
         if ollama_setup install; then
-            if has_ai_section && ! grep -q '^[[:space:]]*llm_enabled[[:space:]]*=' "$CONFIG_FILE"; then
-                sed -i '/^\[ai\][[:space:]]*$/a llm_enabled = true' "$CONFIG_FILE"
-                log "Turned the language-model reader on in $CONFIG_FILE."
-            fi
+            set_language_model on
             log "Ollama is installed. Manage models under AI > Language Model in the console."
         else
             log "WARNING: Ollama was not installed (see above). Daygle DNS itself is unaffected; retry from the console (AI > Language Model) or re-run with DAYGLE_DNS_OLLAMA=1."
@@ -1060,9 +1074,7 @@ case "${DAYGLE_DNS_OLLAMA:-}" in
         if [ -x /usr/local/bin/ollama ] || [ -x /usr/bin/ollama ] || [ -f /etc/systemd/system/ollama.service ]; then
             log "Removing Ollama (DAYGLE_DNS_OLLAMA=0)..."
             ollama_setup remove || log "WARNING: Ollama could not be removed completely (see above)."
-            if [ -f "$CONFIG_FILE" ]; then
-                sed -i 's/^[[:space:]]*llm_enabled[[:space:]]*=[[:space:]]*true/llm_enabled = false/' "$CONFIG_FILE"
-            fi
+            set_language_model off
         fi
         ;;
 esac
