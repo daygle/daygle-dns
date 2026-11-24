@@ -48,6 +48,12 @@ All are worth offering upstream.
      as an answer; its glue is kept only inside the current zone.
    Strict mode still stops at an NXDOMAIN (RFC 8020).
 
+4. **No deprecation warnings on newer toolchains** (`hickory-resolver`
+   `name_server.rs`, `recursor/handle.rs`). Newer Rust renamed
+   `fetch_update` to `try_update`; the two calls keep the old name, which
+   still builds on the minimum supported Rust (1.95), under
+   `#[allow(deprecated)]`. Drop this once upstream switches.
+
 ## Upgrading hickory
 
 Bump the version in the workspace `Cargo.toml`, replace each directory here

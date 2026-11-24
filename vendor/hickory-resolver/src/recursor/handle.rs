@@ -1060,6 +1060,9 @@ impl RequestLimits {
         }
     }
 
+    // `fetch_update` is `try_update` on newer toolchains; the old name still
+    // builds on the minimum supported Rust (1.95).
+    #[allow(deprecated)]
     fn try_charge_query(&self, query: &Query) -> Result<(), RecursorError> {
         if self
             .req_query_count
