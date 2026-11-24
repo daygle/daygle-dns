@@ -15,7 +15,12 @@ are happy with the verdict log. Set `DAYGLE_DNS_AI=0` when installing to
 leave the scanner off.
 
 - The operator allowlist always wins.
-- Expired verdicts go back into the scan queue.
+- Expired verdicts go back into the scan queue. Threats are re-checked
+  after 14 days and classifications after 90 days
+  (`ai.threat_ttl_secs`, `ai.category_ttl_secs`), and expired verdicts are
+  looked for every hour (`ai.expire_check_secs`). An expired threat stops
+  blocking until it is checked again, so that check stays frequent; it costs
+  one indexed query.
 - Verdicts are available from the REST API under `/api/ai/*` (see
   [API.md](API.md#ai-scanner)).
 

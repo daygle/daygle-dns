@@ -685,8 +685,8 @@ auto_block_categories = ["malware", "phishing", "scam"]
 block_threshold = 0.99
 confidence_floor = 0.2
 category_confidence_floor = 0.2
-category_ttl_secs = 2592000
-threat_ttl_secs = 604800
+category_ttl_secs = 7776000
+threat_ttl_secs = 1209600
 # Verifier: threat-channel verdicts are re-checked against a bundled MiniLM
 # embedding model (all-MiniLM-L6-v2, int8) before they can matter in enforce
 # mode: agreement raises confidence, confident disagreement downgrades to
