@@ -54,9 +54,12 @@
     }
   }
 
-  // `attempt` counts failed polls: the service restarts during apply, so a
-  // poll that fails is retried, but a server that stays unreachable must not
-  // leave this page polling every two seconds for as long as it is open.
+  // `POLL_ATTEMPTS` bounds a failing poll: the service restarts during
+  // apply, and the update service allows that restart up to 90 seconds, so
+  // the page keeps retrying for about two minutes before giving up (and
+  // stops polling for good instead of polling for as long as it stays open).
+  const POLL_EVERY_MS = 2000;
+  const POLL_ATTEMPTS = 60;
   function scheduleModelPoll(attempt = 0) {
     clearTimeout(pollTimer);
     if (destroyed) return;
@@ -72,14 +75,14 @@
           await loadModels();
         }
       } catch {
-        if (attempt < 10) {
+        if (attempt < POLL_ATTEMPTS) {
           scheduleModelPoll(attempt + 1);
         } else {
           modelRun = null;
           error = 'Lost track of the model update: the server is not answering. Reload the page to see the result.';
         }
       }
-    }, 2000);
+    }, POLL_EVERY_MS);
   }
 
   async function updateModels() {

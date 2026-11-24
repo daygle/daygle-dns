@@ -77,11 +77,10 @@
   // round trip (an empty box reads as 0 and failed with a server message
   // about seconds and fractions).
   function problem(body) {
-    // A cleared box is '' and a value the server never sent is NaN; both were
-    // reported as whichever range check happened to run first.
-    const numbers = [...Object.values(aiForm), ai_.workers, ai_.max_domains_per_scan];
-    const blank = numbers.some((v) => v === '' || v == null || !Number.isFinite(Number(v)));
-    if (blank) return 'Fill in every field with a number before saving.';
+    const blank = Object.entries(aiForm).some(([, v]) => v === '' || v == null)
+      || ai_.workers === '' || ai_.workers == null
+      || ai_.max_domains_per_scan === '' || ai_.max_domains_per_scan == null;
+    if (blank) return 'Fill in every field before saving.';
     if (!(body.block_threshold >= 0.5 && body.block_threshold <= 1)) {
       return 'Block Threshold must be between 50 and 100%.';
     }
