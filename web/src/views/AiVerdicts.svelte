@@ -43,6 +43,9 @@
   let statusFilter = $state('');
   let categoryFilter = $state('');
   let categories = $state([]);
+  // The labels ticked as threats: relabelling a domain with one makes it a
+  // threat.
+  let threatLabels = $state([]);
   let exemptionFilter = $state('');
   let labelFilter = $state('');
   let search = $state('');
@@ -60,8 +63,10 @@
     try {
       const status = await api.aiStatus();
       categories = [...new Set(status?.backend_categories || [])].sort();
+      threatLabels = (status?.auto_block_categories || []).map((l) => l.toLowerCase());
     } catch {
       categories = [];
+      threatLabels = [];
     }
   }
 
@@ -145,7 +150,9 @@
     try {
       if (category) {
         await api.aiOverride(row.domain, 'category', '', category);
-        notice = `${row.domain} is now categorized as ${titleCase(category)}.`;
+        notice = threatLabels.includes(category.toLowerCase())
+          ? `${row.domain} is now labelled ${titleCase(category)}, a threat: it appears on the Threats tab and blocks in Enforce mode.`
+          : `${row.domain} is now categorized as ${titleCase(category)}. If the AI had flagged it as a threat, that no longer blocks.`;
       } else {
         await api.aiOverride(row.domain, 'clear_category', '');
         notice = `${row.domain} uses the scanner's category again.`;
@@ -282,8 +289,8 @@
       </div>
     </div>
     <p class="muted" style="margin: 0 0 10px">
-      Relabelling changes a domain's category (used by category blocking).
-      It never makes a domain a threat.
+      Your label is final on both tabs: a threat label makes the domain a
+      threat, any other label stops the AI blocking it as one.
     </p>
     <div class="table-wrap">
     <table>
@@ -318,7 +325,7 @@
                   >
                     <option value="">{r.category_overridden ? "Scanner's Label" : '-'}</option>
                     {#each rowCategories(r) as category (category)}
-                      <option value={category}>{titleCase(category)}</option>
+                      <option value={category}>{titleCase(category)}{threatLabels.includes(category.toLowerCase()) ? ' (Threat)' : ''}</option>
                     {/each}
                   </select>
                   {#if r.category_overridden}

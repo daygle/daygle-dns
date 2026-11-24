@@ -458,14 +458,37 @@ impl AiEngine {
     /// The threat verdict is kept for audit and retraining, but it stops
     /// blocking and leaves the exported threat list until the mark is cleared.
     pub fn set_not_threat_override(&self, domain: &str, reason: &str) -> Result<()> {
+        // A threat label the operator set earlier says the opposite: the
+        // newer decision wins.
+        if self
+            .store
+            .category_override(domain)?
+            .is_some_and(|label| self.settings.load().is_auto_block_category(&label))
+        {
+            self.store.clear_category_override(domain)?;
+        }
         self.store.set_override(domain, "not_threat", reason)?;
         self.refresh_snapshot_now();
         Ok(())
     }
 
-    /// Relabel `domain` as `category` for the console and category blocking.
-    /// The scanner keeps classifying it; the operator's label wins.
+    /// Relabel `domain` as `category`: the operator's word on the domain,
+    /// on both tabs. A label ticked as a threat makes it a threat (it
+    /// blocks in enforce mode, whatever the model said); any other label is
+    /// an ordinary category and stops the model's threat verdict from
+    /// blocking. The scanner keeps classifying the domain underneath.
     pub fn set_category_override(&self, domain: &str, category: &str) -> Result<()> {
+        if self.settings.load().is_auto_block_category(category) {
+            // "Not a threat" says the opposite; the newer decision wins.
+            if self
+                .store
+                .list_overrides()?
+                .iter()
+                .any(|o| o.domain == domain && o.action == "not_threat")
+            {
+                self.store.clear_override(domain)?;
+            }
+        }
         self.store.set_category_override(domain, category)?;
         self.refresh_snapshot_now();
         Ok(())
@@ -643,12 +666,24 @@ impl AiEngine {
         let cfg = self.settings.load_full();
         let now = chrono::Utc::now().timestamp();
         let eligible = self.scanner.eligible_blocks(&cfg, now)?;
-        Ok(self
+        let mut rows: Vec<(String, String, f32, i64)> = self
             .store
             .export_threats(now, cfg.block_threshold)?
             .into_iter()
             .filter(|(domain, ..)| eligible.contains_key(domain))
-            .collect())
+            .collect();
+        // The operator's own threat labels, at full confidence: they block
+        // whatever the model scored, so they are exported first.
+        let listed: std::collections::HashSet<String> =
+            rows.iter().map(|(domain, ..)| domain.clone()).collect();
+        let mut labelled: Vec<(String, String, f32, i64)> = eligible
+            .into_iter()
+            .filter(|(domain, block)| block.expires_at == i64::MAX && !listed.contains(domain))
+            .map(|(domain, block)| (domain, block.category, 1.0, i64::MAX))
+            .collect();
+        labelled.sort_by(|a, b| a.0.cmp(&b.0));
+        labelled.append(&mut rows);
+        Ok(labelled)
     }
 
     /// Categories the loaded backend can emit (model labels or heuristic

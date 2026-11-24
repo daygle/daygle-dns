@@ -1951,7 +1951,13 @@ labels reported in `backend_categories`; `400` otherwise, with the known
 list), and `clear_category` drops the relabel (`404` when there is none).
 A relabel is shown and filtered instead of the model's label, survives
 re-scans, and is what category blocking matches; the row also carries
-`category_overridden` so the console can mark it.
+`category_overridden` so the console can mark it. It also decides the
+threat side: a label in `ai.auto_block_categories` makes the domain a threat
+(listed by `GET /api/ai/threats`, in the block snapshot whatever the model
+scored, exported at confidence 1 with no expiry), and any other label keeps
+the model's threat verdict out of both. A threat label clears a `not_threat`
+mark on the domain, and a `not_threat` mark clears a threat label: the newer
+decision wins. Exemptions (`allow`) still win.
 `POST /api/ai/rescan` wakes the scanner for one immediate cycle.
 
 Outside evidence (see [AI.md](AI.md#outside-evidence)): `GET /api/ai/status`

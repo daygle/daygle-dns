@@ -23,7 +23,7 @@
       id: 'classifications',
       label: 'Classifications',
       tagline:
-        'Every domain the scanner has categorized, newest first. Pick a different category to relabel one; your label sticks and is what category blocking uses.',
+        'Every domain the scanner has categorized, newest first. Pick a different category to relabel one; your label sticks, and a threat label makes it a threat.',
     },
     {
       id: 'threats',

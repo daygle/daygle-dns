@@ -31,6 +31,12 @@ and verdict TTL.
 - **Threat detection** is the only channel that can auto-block, and only
   fresh, high-confidence verdicts. The **AI → Threats** tab lists what it
   blocks.
+  Your own label wins on both tabs: relabelling a domain with a ticked
+  threat label makes it a threat (it blocks in enforce mode whatever the AI
+  scored, and never expires), and relabelling it with any other category
+  stops the AI's detection from blocking it. Exemptions still win, and
+  unticking the label stops your threat labels too. Removing your label
+  lets the AI decide again.
   It reports only the labels in `ai.auto_block_categories` (`malware`,
   `phishing`, `scam` by default).
 

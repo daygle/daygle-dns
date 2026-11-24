@@ -555,6 +555,20 @@ impl Scanner {
                 );
             }
         }
+        // The operator's own threat labels: they block whatever the model's
+        // confidence, and never expire. Exemptions still win, and unticking
+        // the label stops them too.
+        for (domain, category) in self.store.operator_threats()? {
+            if cfg.is_auto_block_category(&category) && !exempt(&domain, overrides) {
+                eligible.insert(
+                    domain,
+                    ActiveBlock {
+                        category,
+                        expires_at: i64::MAX,
+                    },
+                );
+            }
+        }
         Ok(eligible)
     }
 
