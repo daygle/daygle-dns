@@ -2,7 +2,7 @@
   import IconButton from '../IconButton.svelte';
   import { api, formatApiError, getStoredUser } from '../api.js';
   import { formatDate, formatDateTime } from '../datetime.svelte.js';
-  import { backendLabel, percent, STATUS_LABELS, titleCase } from '../aiLabels.js';
+  import { backendLabel, percent, stampTime, STATUS_LABELS, titleCase } from '../aiLabels.js';
   import ColumnPicker from '../ColumnPicker.svelte';
   import { isHidden } from '../columns.svelte.js';
   import AiExemptionDialog from './AiExemptionDialog.svelte';
@@ -208,13 +208,6 @@
     return Number(n || 0).toLocaleString();
   }
 
-  // Unset times come back as the UNIX epoch.
-  function stamp(value, format) {
-    if (!value) return '-';
-    const ms = Date.parse(value);
-    return Number.isNaN(ms) || ms <= 0 ? '-' : format(ms);
-  }
-
   // Reload on mount and whenever a filter changes (back to page 1, since the
   // filter changed the list). Typing in the search box waits for a pause.
   let searchTimer;
@@ -239,10 +232,10 @@
 </script>
 
 {#if notice}
-  <div class="card" style="border-color: var(--ok); margin-bottom: 14px">{notice}</div>
+  <div class="card" role="status" style="border-color: var(--ok); margin-bottom: 14px">{notice}</div>
 {/if}
 {#if error}
-  <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">{error}</div>
+  <div class="card" role="alert" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">{error}</div>
 {/if}
 
 {#if loading}
@@ -262,7 +255,7 @@
     <div class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap">
       <h3 style="margin: 0">Classifications ({fmt(total)})</h3>
       <div class="row" style="gap: 8px; flex-wrap: wrap">
-        <input type="search" placeholder="Search Domains" bind:value={search} style="min-width: 200px" />
+        <input type="search" placeholder="Search Domains" aria-label="Search domains" bind:value={search} style="min-width: 200px" />
         <select bind:value={categoryFilter} aria-label="Filter by category" style="min-width: 150px">
           <option value="">All Categories</option>
           {#each categories as category (category)}
@@ -320,10 +313,13 @@
                     class="category-select"
                     value={r.category || ''}
                     disabled={savingCategory.has(r.domain)}
+                    aria-label={`Category for ${r.domain}`}
                     title={r.category_overridden ? "Your label overrides the scanner's" : "The scanner's label"}
                     onchange={(e) => setCategory(r, e.currentTarget.value, e.currentTarget)}
                   >
-                    <option value="">{r.category_overridden ? "Scanner's Label" : '-'}</option>
+                    <!-- Only a relabelled row has something to clear: choosing
+                         this on a row the scanner labelled did nothing. -->
+                    <option value="" disabled={!r.category_overridden}>{r.category_overridden ? "Scanner's Label" : '-'}</option>
                     {#each rowCategories(r) as category (category)}
                       <option value={category}>{titleCase(category)}{threatLabels.includes(category.toLowerCase()) ? ' (Threat)' : ''}</option>
                     {/each}
@@ -343,7 +339,7 @@
               <span
                 class="pill"
                 class:ok={r.status === 'classified'}
-                title={r.status === 'pending' ? 'Classified on the next scan' : `${stamp(r.classified_at, formatDateTime)} by ${backendLabel(r.backend)}`}
+                title={r.status === 'pending' ? 'Classified on the next scan' : `${stampTime(r.classified_at, formatDateTime)} by ${backendLabel(r.backend)}`}
               >{STATUS_LABELS[r.status] || titleCase(r.status)}</span>
             </td>
             {/if}
@@ -354,7 +350,7 @@
             {/if}
             {#if show('seen')}<td class="num">{fmt(r.observations)}</td>{/if}
             {#if show('evidence')}<td class="muted evidence" title={r.evidence}>{r.evidence || '-'}</td>{/if}
-            {#if show('re-check')}<td class="muted nowrap">{stamp(r.expires_at, formatDate)}</td>{/if}
+            {#if show('re-check')}<td class="muted nowrap">{stampTime(r.expires_at, formatDate)}</td>{/if}
             {#if isAdmin}
               <td class="num">
                 {#if r.overridden}

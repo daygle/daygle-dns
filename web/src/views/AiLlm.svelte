@@ -2,7 +2,7 @@
   import { api, formatApiError, getStoredUser } from '../api.js';
   import { onDestroy } from 'svelte';
   import { formatDateTime } from '../datetime.svelte.js';
-  import { titleCase } from '../aiLabels.js';
+  import { formatBytes, isRunning, percent, titleCase } from '../aiLabels.js';
 
   // The language-model reader (a local Ollama server): connection, models
   // and the Ollama server itself.
@@ -18,8 +18,6 @@
   let destroyed = false;
 
   const isAdmin = getStoredUser()?.role !== 'viewer';
-  // Must match UpdateState::is_running on the server.
-  const RUNNING = ['preparing', 'downloading', 'cloning', 'building', 'installing', 'applying', 'restarting', 'rolling_back'];
 
   const pulling = $derived(!!llm?.pull && !llm.pull.done);
   const testRunning = $derived(!!llm?.test?.running);
@@ -29,23 +27,24 @@
   const ollamaOp = $derived(
     operation && /ollama/i.test(operation.message || '') ? operation : null,
   );
-  const serviceRunning = $derived(!!ollamaOp && RUNNING.includes(ollamaOp.phase));
+  const serviceRunning = $derived(!!ollamaOp && isRunning(ollamaOp.phase));
   const otherUpdateRunning = $derived(
-    !!operation && RUNNING.includes(operation.phase) && !ollamaOp,
+    !!operation && isRunning(operation.phase) && !ollamaOp,
   );
+  // Models are listed, downloaded and deleted on the *saved* address, so an
+  // address typed into the form but not saved yet would manage a different
+  // server from the one this card shows.
+  const urlPending = $derived(!!form && normUrl(form.url) !== normUrl(llm?.url));
 
-  function fmtSize(bytes) {
-    if (!bytes) return '-';
-    if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
-    if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(0)} MB`;
-    return `${(bytes / 1024).toFixed(0)} KB`;
+  function normUrl(url) {
+    return (url || '').trim().replace(/\/+$/, '');
   }
 
   function fill(data) {
     form = {
       enabled: !!data.enabled,
-      url: data.url,
-      model: data.model,
+      url: data.url ?? '',
+      model: data.model ?? '',
       perScan: data.candidates_per_scan,
       timeout: data.timeout_secs,
     };
@@ -71,10 +70,30 @@
     }
   }
 
+  // What the server would refuse, said here first. An empty or half-typed
+  // box reads as 0, which the server quietly clamps to its minimum: the page
+  // would report "saved" for a value nobody chose.
+  function problem() {
+    if (!/^https?:\/\//i.test(form.url.trim())) {
+      return 'The Ollama address must start with http:// or https://.';
+    }
+    if (!form.model.trim()) return 'Choose or type a model name.';
+    const perScan = Number(form.perScan);
+    if (!Number.isInteger(perScan) || perScan < 1 || perScan > 32) {
+      return 'Pages Per Scan must be a whole number between 1 and 32.';
+    }
+    const timeout = Number(form.timeout);
+    if (!Number.isInteger(timeout) || timeout < 5 || timeout > 600) {
+      return 'Answer Time Limit must be between 5 and 600 seconds.';
+    }
+    return null;
+  }
+
   async function save(extra = {}) {
-    busy = true;
     notice = null;
-    error = null;
+    error = problem();
+    if (error) return;
+    busy = true;
     try {
       await api.updateSettings({
         ai: {
@@ -177,8 +196,8 @@
 {:else if !llm || !form}
   <div class="card"><p class="muted" style="margin: 0">Loading...</p></div>
 {:else}
-  {#if notice}<div class="card notice">{notice}</div>{/if}
-  {#if error}<div class="card" style="color: var(--danger)">{error}</div>{/if}
+  {#if notice}<div class="card notice" role="status">{notice}</div>{/if}
+  {#if error}<div class="card" role="alert" style="color: var(--danger)">{error}</div>{/if}
 
   <div class="card">
     <div class="spread" style="margin-bottom: 8px; gap: 10px; flex-wrap: wrap">
@@ -238,7 +257,10 @@
     {#if isAdmin}
       <div class="row" style="margin-top: 10px; gap: 10px; flex-wrap: wrap">
         <button onclick={() => save()} disabled={busy}>{busy ? 'Saving...' : 'Save'}</button>
-        <button class="secondary" onclick={test} disabled={testing || testRunning}>{testing || testRunning ? 'Asking the model (the first answer can take a few minutes)...' : 'Test'}</button>
+        <button class="secondary" onclick={test} disabled={testing || testRunning}>{testing || testRunning ? 'Testing...' : 'Test'}</button>
+        {#if testing || testRunning}
+          <span class="muted small">The first answer can take a few minutes while the model loads.</span>
+        {/if}
       </div>
     {/if}
     {#if shownTest}
@@ -246,7 +268,7 @@
         {#if shownTest.ok}
           {shownTest.model ? `${shownTest.model} answered` : 'Answered'} in {(shownTest.seconds || 0).toFixed(1)}s: a sample careers page reads as
           <strong>{shownTest.category ? titleCase(shownTest.category) : 'no listed category'}</strong>
-          ({Math.round(shownTest.confidence * 100)}%){shownTest.reason ? `, "${shownTest.reason}"` : ''}.
+          ({percent(shownTest.confidence)}){shownTest.reason ? `, "${shownTest.reason}"` : ''}.
           {#if shownTest.seconds > 30}<span class="muted"> That is slow: a smaller model will read more pages per scan.</span>{/if}
         {:else}
           <span style="color: var(--danger)">Test failed: {shownTest.error}</span>
@@ -260,11 +282,21 @@
     {#if !llm.reachable}
       <p class="muted" style="margin: 0">Connect to an Ollama server to manage its models.</p>
     {:else}
+      {#if urlPending}
+        <p class="muted small" style="margin: 0 0 10px">
+          These models belong to the saved address (<code>{llm.url}</code>).
+          Save the address above first to manage the server you typed instead.
+        </p>
+      {/if}
       {#if llm.models?.length}
-        <table>
-          <thead>
-            <tr><th>Model</th><th>Size</th><th>Details</th><th>Updated</th><th></th></tr>
-          </thead>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Model</th><th>Size</th><th>Details</th><th>Updated</th>
+                {#if isAdmin}<th class="num">Actions</th>{/if}
+              </tr>
+            </thead>
           <tbody>
             {#each llm.models as m (m.name)}
               <tr>
@@ -272,22 +304,23 @@
                   <code>{m.name}</code>
                   {#if m.name === llm.model}<span class="pill ok">In Use</span>{/if}
                 </td>
-                <td>{fmtSize(m.size)}</td>
+                <td>{formatBytes(m.size)}</td>
                 <td class="muted">{[m.parameter_size, m.quantization].filter(Boolean).join(', ') || '-'}</td>
                 <td class="muted">{m.modified_at ? formatDateTime(m.modified_at) : '-'}</td>
-                <td class="actions">
-                  {#if isAdmin}
+                {#if isAdmin}
+                  <td class="actions">
                     {#if m.name !== llm.model}
                       <button class="secondary small-btn" onclick={() => useModel(m.name)} disabled={busy}>Use</button>
                     {/if}
                     <button class="secondary small-btn" onclick={() => pull(m.name)} disabled={pulling} title="Download what changed since this model was fetched">Update</button>
                     <button class="secondary small-btn" onclick={() => remove(m.name)} disabled={pulling}>Delete</button>
-                  {/if}
-                </td>
+                  </td>
+                {/if}
               </tr>
             {/each}
           </tbody>
-        </table>
+          </table>
+        </div>
       {:else}
         <p class="muted" style="margin: 0 0 10px">No models downloaded yet.</p>
       {/if}
@@ -297,8 +330,15 @@
           {#if !llm.pull.done}
             <div class="small">Downloading <code>{llm.pull.model}</code>: {llm.pull.status}</div>
             {#if llm.pull.total}
-              <progress max={llm.pull.total} value={llm.pull.completed}></progress>
-              <span class="muted small">{fmtSize(llm.pull.completed)} of {fmtSize(llm.pull.total)}</span>
+              <progress
+                max={llm.pull.total}
+                value={llm.pull.completed}
+                aria-label={`Download progress for ${llm.pull.model}`}
+              ></progress>
+              <span class="muted small">
+                {formatBytes(llm.pull.completed)} of {formatBytes(llm.pull.total)}
+                ({Math.round((llm.pull.completed / llm.pull.total) * 100)}%)
+              </span>
             {/if}
           {:else if llm.pull.error}
             <div class="small" style="color: var(--danger)">Download of {llm.pull.model} failed: {llm.pull.error}</div>

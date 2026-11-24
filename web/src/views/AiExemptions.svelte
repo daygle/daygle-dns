@@ -2,6 +2,7 @@
   import IconButton from '../IconButton.svelte';
   import { api, formatApiError, getStoredUser } from '../api.js';
   import { formatDateTime } from '../datetime.svelte.js';
+  import { stampTime } from '../aiLabels.js';
 
   let rows = $state([]);
   let loading = $state(true);
@@ -52,26 +53,21 @@
     }
   }
 
-  function stamp(value) {
-    const ms = Date.parse(value || '');
-    return Number.isNaN(ms) || ms <= 0 ? '-' : formatDateTime(ms);
-  }
-
   load();
 </script>
 
 {#if notice}
-  <div class="card" style="border-color: var(--ok); margin-bottom: 14px">{notice}</div>
+  <div class="card" role="status" style="border-color: var(--ok); margin-bottom: 14px">{notice}</div>
 {/if}
 {#if error}
-  <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">{error}</div>
+  <div class="card" role="alert" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">{error}</div>
 {/if}
 
 <div class="card">
   <div class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap">
     <h3 style="margin: 0">Exempt Domains ({filtered.length})</h3>
     <div class="row" style="gap: 8px; flex-wrap: wrap">
-      <input type="search" placeholder="Search Domains or Reasons" bind:value={search} style="min-width: 200px" />
+      <input type="search" placeholder="Search Domains or Reasons" aria-label="Search domains or reasons" bind:value={search} style="min-width: 200px" />
       <select bind:value={reasonFilter} aria-label="Filter by reason">
         <option value="">All Reasons</option>
         <option value="provided">Reason Provided</option>
@@ -110,7 +106,7 @@
             <tr>
               <td><code>{row.domain}</code></td>
               <td>{#if row.reason}{row.reason}{:else}<span class="muted">Not provided</span>{/if}</td>
-              <td class="muted nowrap">{stamp(row.created_at)}</td>
+              <td class="muted nowrap">{stampTime(row.created_at, formatDateTime)}</td>
               {#if isAdmin}
                 <td class="num">
                   <IconButton icon="disallow" label={`Remove AI exemption for ${row.domain}`} onclick={() => removeExemption(row.domain)} />

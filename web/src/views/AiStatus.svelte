@@ -2,7 +2,7 @@
   import { api, formatApiError, getStoredUser } from '../api.js';
   import { onDestroy } from 'svelte';
   import { formatDateTime } from '../datetime.svelte.js';
-  import { backendLabel, duration, percent, titleCase } from '../aiLabels.js';
+  import { backendLabel, duration, formatBytes, isRunning, percent, titleCase } from '../aiLabels.js';
 
   // `onOpenThreats()` opens the AI page's Threats tab; null for viewers.
   let { onOpenThreats = null } = $props();
@@ -38,15 +38,6 @@
   // Stops a poll that was in flight when the page closed from scheduling
   // another one (and polling forever in the background).
   let destroyed = false;
-  // Must match UpdateState::is_running on the server.
-  const RUNNING = ['preparing', 'downloading', 'cloning', 'building', 'installing', 'applying', 'restarting', 'rolling_back'];
-
-  function fmtSize(bytes) {
-    if (bytes == null) return '-';
-    if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-    if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-    return `${bytes} B`;
-  }
 
   async function loadModels() {
     modelsError = null;
@@ -54,7 +45,7 @@
       models = await api.aiModelStatus();
       modelRun = models?.state?.phase ? models.state : null;
       // Follow an active run so the button state reflects the server.
-      if (RUNNING.includes(modelRun?.phase)) {
+      if (isRunning(modelRun?.phase)) {
         scheduleModelPoll();
       }
     } catch (e) {
@@ -63,14 +54,17 @@
     }
   }
 
-  function scheduleModelPoll() {
+  // `attempt` counts failed polls: the service restarts during apply, so a
+  // poll that fails is retried, but a server that stays unreachable must not
+  // leave this page polling every two seconds for as long as it is open.
+  function scheduleModelPoll(attempt = 0) {
     clearTimeout(pollTimer);
     if (destroyed) return;
     pollTimer = setTimeout(async () => {
       try {
         const run = (await api.updateStatus())?.state;
         modelRun = run?.phase ? run : null;
-        if (RUNNING.includes(modelRun?.phase)) {
+        if (isRunning(modelRun?.phase)) {
           scheduleModelPoll();
         } else if (modelRun?.phase) {
           // Terminal: surface the result and refresh the file listing.
@@ -78,8 +72,12 @@
           await loadModels();
         }
       } catch {
-        // The service restarts during apply; the next poll continues.
-        scheduleModelPoll();
+        if (attempt < 10) {
+          scheduleModelPoll(attempt + 1);
+        } else {
+          modelRun = null;
+          error = 'Lost track of the model update: the server is not answering. Reload the page to see the result.';
+        }
       }
     }, 2000);
   }
@@ -105,6 +103,8 @@
     destroyed = true;
     clearTimeout(pollTimer);
     clearTimeout(rescanTimer);
+    clearTimeout(scanTimer);
+    clearTimeout(feedsBusyTimer);
     feedTimers.forEach(clearTimeout);
   });
 
@@ -143,6 +143,7 @@
   }
 
   let scanBusy = $state(false);
+  let scanTimer = null;
   async function rescan() {
     notice = null;
     error = null;
@@ -156,13 +157,15 @@
       error = formatApiError(e);
     } finally {
       // Debounce repeated clicks; the scan itself runs in the background.
-      setTimeout(() => (scanBusy = false), 3000);
+      clearTimeout(scanTimer);
+      scanTimer = setTimeout(() => (scanBusy = false), 3000);
     }
   }
 
   // The download runs in the background: re-read the status a few times so
   // the table shows each feed's result as it lands.
   let feedsBusy = $state(false);
+  let feedsBusyTimer = null;
   let feedTimers = [];
   async function updateFeeds() {
     notice = null;
@@ -173,7 +176,8 @@
       notice = 'Downloading the threat feeds. The table below updates as each one finishes.';
       feedTimers.forEach(clearTimeout);
       feedTimers = [5000, 15000, 40000].map((ms) => setTimeout(() => load(true), ms));
-      setTimeout(() => (feedsBusy = false), 15000);
+      clearTimeout(feedsBusyTimer);
+      feedsBusyTimer = setTimeout(() => (feedsBusy = false), 15000);
     } catch (e) {
       error = formatApiError(e);
       feedsBusy = false;
@@ -348,10 +352,10 @@
 </script>
 
 {#if notice}
-  <div class="card" style="border-color: var(--ok); margin-bottom: 14px">{notice}</div>
+  <div class="card" role="status" style="border-color: var(--ok); margin-bottom: 14px">{notice}</div>
 {/if}
 {#if error}
-  <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">{error}</div>
+  <div class="card" role="alert" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">{error}</div>
 {/if}
 
 {#if loading}
@@ -787,11 +791,18 @@
       {/if}
     </div>
     <p class="muted help" style="margin: 0 0 6px">
-      Reads the home page of each flagged domain and records what it says
-      (see Check a Domain), and categorizes domains the AI is unsure of from
-      their page. On by default; turn it off if this server must not contact
-      the sites your network visits.
+      Reads the home page of each flagged domain and records what it says,
+      and categorizes domains the AI is unsure of from their page. On by
+      default; turn it off if this server must not contact the sites your
+      network visits.
     </p>
+    {#if onOpenThreats}
+      <p class="muted help" style="margin: 0 0 6px">
+        To see what the AI made of one domain, check it under
+        <button type="button" class="link" onclick={onOpenThreats}>Check a Domain</button>
+        on the Threats tab.
+      </p>
+    {/if}
     <details class="how" style="margin: 0 0 10px">
       <summary class="muted">How the reading rule works</summary>
       <ul class="how-list muted">
@@ -851,14 +862,14 @@
           {#each models.files as f (f.file)}
             <tr>
               <td><code>{f.file}</code></td>
-              <td class="num">{f.present ? fmtSize(f.size) : 'Missing'}</td>
+              <td class="num">{f.present ? formatBytes(f.size) : 'Missing'}</td>
               <td><code class="muted">{f.sha256 ? f.sha256.slice(0, 16) + '...' : '-'}</code></td>
             </tr>
           {/each}
         </tbody>
       </table>
     {/if}
-    {#if modelRun && RUNNING.includes(modelRun.phase)}
+    {#if modelRun && isRunning(modelRun.phase)}
       <div style="margin-top: 10px">
         <span class="pill">{titleCase(modelRun.phase)}</span>
         <span class="muted">{modelRun.message} This page resumes after the service restart.</span>
@@ -884,6 +895,20 @@
   }
   @media (max-width: 900px) {
     .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  /* One column on a phone: two 1.6rem figures side by side wrap their
+     captions onto three lines. */
+  @media (max-width: 560px) {
+    .grid { grid-template-columns: 1fr; }
+  }
+  .link {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--accent);
+    cursor: pointer;
+    font: inherit;
+    text-decoration: underline;
   }
   .stat .big { font-size: 1.6rem; font-weight: 700; margin-top: 6px; }
   .two-col {

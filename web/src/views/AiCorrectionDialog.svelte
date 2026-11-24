@@ -1,5 +1,6 @@
 <script>
   import { titleCase } from '../aiLabels.js';
+  import { dialogFocus } from '../dialogFocus.js';
 
   const REASONS = [
     'Misclassified',
@@ -17,12 +18,19 @@
 <svelte:window onkeydown={(event) => event.key === 'Escape' && onCancel()} />
 
 <div class="modal-backdrop" role="presentation" onclick={(event) => event.target === event.currentTarget && onCancel()}>
-  <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="correction-title">
+  <div
+    class="modal card"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="correction-title"
+    aria-describedby="correction-desc"
+    use:dialogFocus
+  >
     <div class="spread modal-title">
       <h3 id="correction-title" style="margin: 0">Mark as Not a Threat</h3>
       <button class="secondary" style="padding: 2px 10px" onclick={onCancel} aria-label="Close">✕</button>
     </div>
-    <p class="muted">
+    <p class="muted" id="correction-desc">
       {domain} will stop being blocked. You can restore it later.
     </p>
     <label class="field">

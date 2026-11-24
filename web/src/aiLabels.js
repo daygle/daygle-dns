@@ -81,3 +81,52 @@ export const STATUS_LABELS = {
   classified: 'Classified',
   skipped: 'Skipped',
 };
+
+// The rules the page reader may follow (ai.page_rule), as the console shows
+// them in the Scanner and Threats tabs.
+const PAGE_RULE_LABELS = {
+  evidence: 'Evidence only',
+  corroborate: 'Corroborate',
+  decide: 'Decide',
+};
+
+export function pageRuleLabel(rule) {
+  return PAGE_RULE_LABELS[rule] || rule;
+}
+
+// The phases of an update run (must match UpdateState::is_running on the
+// server). Shared by the Scanner and Language Model tabs, which both follow
+// an operation through the same state.
+const RUNNING_PHASES = [
+  'preparing',
+  'downloading',
+  'cloning',
+  'building',
+  'installing',
+  'applying',
+  'restarting',
+  'rolling_back',
+];
+
+export function isRunning(phase) {
+  return RUNNING_PHASES.includes(phase);
+}
+
+// Bytes as "1.2 GB", "48.1 MB", "12 KB", "512 B". One implementation for
+// the model files, the model sizes and the download progress, which used to
+// round differently from each other.
+export function formatBytes(bytes) {
+  if (bytes == null) return '-';
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${bytes} B`;
+}
+
+// A server timestamp (RFC 3339) as `format(ms)`, or "-" when it is unset:
+// the API sends the UNIX epoch for a time that never happened.
+export function stampTime(value, format) {
+  if (!value) return '-';
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) || ms <= 0 ? '-' : format(ms);
+}
