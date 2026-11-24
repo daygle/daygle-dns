@@ -875,47 +875,6 @@ fn auto_block_categories_decide_what_blocks() {
     assert!(snapshot.contains_key("bet-slip.example"));
 }
 
-/// A dedicated threat model is a detector in its own right: what it reports
-/// blocks without the operator listing the label, which is the whole point of
-/// giving the threat channel its own model.
-#[test]
-fn dedicated_threat_model_blocks_its_own_labels() {
-    let dir = TempDir::new().unwrap();
-    let ai = engine(
-        &dir,
-        AiSettings {
-            // No shared model on purpose: the missing file only degrades the
-            // channel to the heuristic rules, and the *configured* dedicated
-            // path is what moves the label list out of the block decision.
-            model_path: String::new(),
-            threat_model_path: "/nonexistent/threat.bin".to_string(),
-            auto_block_categories: vec!["phishing".to_string()],
-            block_threshold: 0.25,
-            ..settings(AiMode::Enforce)
-        },
-    );
-    ai.store.observe("casino-bonus.example").unwrap();
-    ai.store
-        .save_verdict(
-            Channel::Threat,
-            "casino-bonus.example",
-            "gambling",
-            "threat",
-            "classified",
-            0.8,
-            "heuristic",
-            "ev",
-            3600,
-        )
-        .unwrap();
-    let blockable = ai.blockable_counts().unwrap();
-    assert_eq!(
-        blockable.get("gambling"),
-        Some(&1),
-        "a dedicated model's label blocks without being listed: {blockable:?}"
-    );
-}
-
 /// Without a second model the label list is the only thing separating a threat
 /// from an ordinary category, so an unlisted label still blocks nothing.
 #[test]
@@ -3320,66 +3279,6 @@ fn the_shadow_judge_rejects_on_lost_threats_and_on_floods() {
     assert!(flooded.contains("flagged"), "{flooded}");
 }
 
-/// A dedicated threat model is maintained too: its own learned file, its
-/// own trial, and only threat verdicts as material.
-#[test]
-fn a_dedicated_threat_model_is_retrained_from_threat_verdicts() {
-    let _train = training_guard();
-    let dir = TempDir::new().unwrap();
-    let mut pairs = Vec::new();
-    for i in 0..40 {
-        pairs.push(("phishing".to_string(), format!("secure-login{i}.example")));
-        pairs.push(("benign".to_string(), format!("daily-paper{i}.example")));
-    }
-    let threat_model = dir.path().join("threat.bin");
-    daygle_dns_ml::learn::train(&pairs, &threat_model).unwrap();
-    let ai = engine(
-        &dir,
-        AiSettings {
-            block_threshold: 0.5,
-            threat_model_path: threat_model.display().to_string(),
-            ..settings(AiMode::Train)
-        },
-    );
-    for i in 0..240 {
-        let (label, domain) = if i % 2 == 0 {
-            ("phishing", format!("secure-login-x{i}.example"))
-        } else {
-            ("benign", format!("daily-paper-x{i}.example"))
-        };
-        ai.store.observe(&domain).unwrap();
-        ai.store
-            .save_verdict(
-                Channel::Threat,
-                &domain,
-                label,
-                "threat",
-                "classified",
-                0.95,
-                "fasttext",
-                "ev",
-                3600,
-            )
-            .unwrap();
-    }
-    let stats = ai
-        .retrain_model(daygle_dns_ml::learn::Role::Threat)
-        .unwrap();
-    assert!(stats.verdicts > 0, "{stats:?}");
-    let status = ai.maintained_status(daygle_dns_ml::learn::Role::Threat);
-    assert_eq!(status["active"], true, "{status}");
-    assert!(ai.threat_model_path().ends_with("learned-threat.bin"));
-    assert!(
-        !ai.learned_model_path().exists(),
-        "the shared model was not touched"
-    );
-    ai.rollback_model(daygle_dns_ml::learn::Role::Threat)
-        .unwrap_err();
-}
-
-/// Switching the verifier on or off reloads the threat channel in place: no
-/// restart, and the running pipeline says so.
-#[cfg(feature = "verifier-onnx")]
 #[test]
 fn the_verifier_switches_on_without_a_restart() {
     let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3764,7 +3663,7 @@ fn a_promoted_model_that_blocks_far_more_is_rolled_back() {
     seed_content_verdicts(&ai, 0..240);
     ai.run_due_maintenance().unwrap().unwrap();
     assert!(ai.learned_model_active(), "trials are off: it went live");
-    let status = ai.maintained_status(daygle_dns_ml::learn::Role::Shared);
+    let status = ai.maintained_status();
     let promoted_at = status["watch"]["promoted_at"].as_i64().expect("watched");
 
     // The week before: 1% of scanned domains blocked. Since: 20%.
@@ -3786,7 +3685,7 @@ fn a_promoted_model_that_blocks_far_more_is_rolled_back() {
         "{trial:?}"
     );
     assert!(trial.retry_after.is_some(), "retraining pauses");
-    assert!(ai.maintained_status(daygle_dns_ml::learn::Role::Shared)["watch"].is_null());
+    assert!(ai.maintained_status()["watch"].is_null());
 }
 
 /// Three "not a threat" marks on a watched model's own detections undo it.
@@ -3855,8 +3754,7 @@ fn a_well_behaved_promoted_model_stays_live() {
     );
     seed_content_verdicts(&ai, 0..240);
     ai.run_due_maintenance().unwrap().unwrap();
-    let promoted_at = ai.maintained_status(daygle_dns_ml::learn::Role::Shared)["watch"]
-        ["promoted_at"]
+    let promoted_at = ai.maintained_status()["watch"]["promoted_at"]
         .as_i64()
         .unwrap();
     ai.store
@@ -3867,7 +3765,7 @@ fn a_well_behaved_promoted_model_stays_live() {
         .unwrap();
     ai.run_due_maintenance();
     assert!(ai.learned_model_active());
-    assert!(!ai.maintained_status(daygle_dns_ml::learn::Role::Shared)["watch"].is_null());
+    assert!(!ai.maintained_status()["watch"].is_null());
 }
 
 /// Each threat verdict is looked up once: the age note marks it done, and a

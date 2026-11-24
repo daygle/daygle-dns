@@ -414,9 +414,7 @@ impl Scanner {
                 cfg.page_rule,
                 *confidence,
                 inspection.reading.as_ref(),
-                // Only the block list marks agreement: the page classifier
-                // emits content categories, so a dedicated threat model's
-                // "every label is a threat" rule does not apply to them.
+                // Only the block list marks agreement.
                 |label| cfg.is_auto_block_category(label),
                 cfg.page_confidence_floor,
             );
@@ -530,9 +528,7 @@ impl Scanner {
 
     /// The domains that qualify for auto-blocking right now: fresh verdicts
     /// at or above the block threshold, and not exempted by an allow override
-    /// on the domain or any parent domain. With the shared classifier they
-    /// must also carry an auto-block label; a dedicated threat model is a
-    /// detector in its own right, so everything it reports qualifies.
+    /// on the domain or any parent domain, carrying an auto-block label.
     /// In enforce mode these are blocked; in train mode they are what would
     /// be.
     pub fn eligible_blocks(&self, cfg: &AiSettings, now: i64) -> Result<BlockSnapshot> {
@@ -546,15 +542,10 @@ impl Scanner {
         overrides: &ExemptionSnapshot,
     ) -> Result<BlockSnapshot> {
         let mut eligible = BlockSnapshot::new();
-        // A dedicated threat model already decides what a threat is, so its
-        // detections block without a second label filter. With the shared
-        // classifier the label list is the only thing that separates a threat
-        // from an ordinary category, so it still gates blocking there.
-        let labels_gate = !cfg.dedicated_threat_model();
+        // The label list is what separates a threat from an ordinary
+        // category, so it gates blocking too.
         for (domain, category, expires_at) in self.store.fresh_blocked(now, cfg.block_threshold)? {
-            if (!labels_gate || cfg.is_auto_block_category(&category))
-                && !exempt(&domain, overrides)
-            {
+            if cfg.is_auto_block_category(&category) && !exempt(&domain, overrides) {
                 eligible.insert(
                     domain,
                     ActiveBlock {

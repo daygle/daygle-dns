@@ -31,11 +31,8 @@ and verdict TTL.
 - **Threat detection** is the only channel that can auto-block, and only
   fresh, high-confidence verdicts. The **AI → Threats** tab lists what it
   blocks.
-  - With the shared model, it reports only the labels in
-    `ai.auto_block_categories` (`malware`, `phishing`, `scam` by default).
-  - With a dedicated `ai.threat_model_path`, every label that model produces
-    is a threat and blocks above `ai.block_threshold`, so
-    `ai.auto_block_categories` applies only to the shared classifier.
+  It reports only the labels in `ai.auto_block_categories` (`malware`,
+  `phishing`, `scam` by default).
 
 The model reads only the domain name. When it flags a subdomain, the
 scanner also scores the registered domain above it (by the Public Suffix
@@ -64,7 +61,6 @@ training data.
 |---|---|
 | `ai.model_path` | The shared model (a supervised fastText `.bin`). Empty uses the zero-model heuristic backend. |
 | `ai.category_model_path` | A model for the categorization channel only. |
-| `ai.threat_model_path` | A model for the threat channel only (see above). |
 | `[updates] auto_refresh_models` | Keep the release model bundle, including the starter corpus, up to date. |
 
 A release model bundle is tested on a pinned sample of held-out threat names
@@ -122,8 +118,7 @@ Retrain Now and Restore Previous Model are your own choices and are not
 watched. A threat feed or the popular-sites list that has failed to update
 for 2 days raises an alert too.
 
-A dedicated threat model is maintained the same way. The verifier's
-reference is refreshed from your corrections, never from its own verdicts.
+The verifier's reference is refreshed from your corrections, never from its own verdicts.
 The model that was replaced is kept, so one rollback is always available.
 
 ### Corrections as negatives (`ai.learn_negatives`)
@@ -165,8 +160,7 @@ The downloads name domains and reveal nothing about this network's traffic.
 A stable one in five names is held out of training to test every candidate
 model and trial. The rest train the threat labels, up to 1,000 per label per
 retrain. A feed listing also confirms a threat verdict for training. Only the
-labels the model treats as threats are used: `ai.auto_block_categories` for
-the shared model, or every label of a dedicated threat model. Your
+labels ticked in `ai.auto_block_categories` are used. Your
 corrections win over a feed.
 
 ### Popular sites

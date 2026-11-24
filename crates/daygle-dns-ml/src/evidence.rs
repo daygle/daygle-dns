@@ -115,11 +115,6 @@ impl NetworkEvidence {
             && (intel.is_popular(domain) || self.sighting(domain).is_some_and(|s| s.established()))
     }
 
-    /// Whether a threat label from a feed means "threat" on this install.
-    fn is_threat_label(settings: &AiSettings, label: &str) -> bool {
-        settings.dedicated_threat_model() || settings.is_auto_block_category(label)
-    }
-
     /// Apply the evidence to one verdict (see the module table).
     pub fn judge(&self, domain: &str, base: Verdict) -> Verdict {
         if !matches!(base.severity, Severity::Threat | Severity::Disputed) {
@@ -130,7 +125,7 @@ impl NetworkEvidence {
             return base;
         }
         if let Some(feed) = self.intel().feed_for(domain) {
-            if Self::is_threat_label(&settings, feed.label) {
+            if settings.is_auto_block_category(feed.label) {
                 return Verdict {
                     confidence: base.confidence.max(LISTED_CONFIDENCE),
                     severity: Severity::Threat,

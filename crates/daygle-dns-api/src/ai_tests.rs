@@ -565,10 +565,6 @@ async fn status_reports_trials_and_retrain_takes_a_model() {
         "{status}"
     );
     assert_eq!(status["learned_model"]["candidate"], false, "{status}");
-    assert!(
-        status["learned_threat_model"].is_null(),
-        "no dedicated threat model: {status}"
-    );
     assert_eq!(status["verifier_enabled"], false, "{status}");
     assert_eq!(
         status["verifier_supported"],
@@ -599,12 +595,7 @@ async fn status_reports_trials_and_retrain_takes_a_model() {
         assert!(body.contains("not installed"), "{body}");
     }
 
-    let (code, _, body) = call(state.clone(), "POST", "/api/ai/retrain?model=bogus", None).await;
-    assert_eq!(code, StatusCode::BAD_REQUEST, "{body}");
-    // Without a dedicated threat model there is nothing to retrain there.
-    let (code, _, body) = call(state, "POST", "/api/ai/retrain?model=threat", None).await;
-    assert_ne!(code, StatusCode::OK, "{body}");
-    assert!(body.contains("dedicated threat model"), "{body}");
+    drop(state);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

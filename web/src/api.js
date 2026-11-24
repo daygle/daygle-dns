@@ -328,8 +328,8 @@ export const api = {
     ),
   aiRescan: () => request('POST', '/ai/rescan'),
   aiUpdateThreatFeeds: () => request('POST', '/ai/threat-feeds/update'),
-  aiRetrain: (model = 'shared') => request('POST', `/ai/retrain?model=${encodeURIComponent(model)}`),
-  aiRollback: (model = 'shared') => request('POST', `/ai/rollback?model=${encodeURIComponent(model)}`),
+  aiRetrain: () => request('POST', '/ai/retrain'),
+  aiRollback: () => request('POST', '/ai/rollback'),
   aiModelStatus: () => request('GET', '/ai/model-status'),
   aiUpdateModels: () => request('POST', '/ai/update-models'),
 };

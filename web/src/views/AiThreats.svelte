@@ -2,7 +2,7 @@
   import IconButton from '../IconButton.svelte';
   import { api, formatApiError, getStoredUser } from '../api.js';
   import { formatDate } from '../datetime.svelte.js';
-  import { backendLabel, percent, titleCase } from '../aiLabels.js';
+  import { percent, titleCase } from '../aiLabels.js';
   import ColumnPicker from '../ColumnPicker.svelte';
   import { isHidden } from '../columns.svelte.js';
   import AiExemptionDialog from './AiExemptionDialog.svelte';
@@ -67,14 +67,6 @@
   let explainError = $state(null);
   let explaining = $state(false);
   let exporting = $state('');
-  // The threat channel's own model, when it has one, against the shared one.
-  let threatModelPath = $state('');
-  let sharedModelPath = $state('');
-  let modelDedicated = $state(false);
-  let threatBackendName = $state('');
-  let savingModel = $state(false);
-  let modelNotice = $state(null);
-  let modelError = $state(null);
   let severityFilter = $state('');
   let exemptionFilter = $state('');
   let loading = $state(true);
@@ -96,10 +88,6 @@
       threatCounts = status?.threat_counts || {};
       labelsText = threatLabels.join(', ');
       categories = modelLabels;
-      threatModelPath = status?.threat_model_path || '';
-      sharedModelPath = status?.model_path || '';
-      modelDedicated = !!status?.threat_model_dedicated;
-      threatBackendName = status?.threat_backend || status?.backend || '';
     } catch {
       modelLabels = [];
       categories = [];
@@ -110,10 +98,6 @@
         threatLabels = [...(config?.ai?.auto_block_categories || [])];
         savedLabels = [...threatLabels];
         labelsText = threatLabels.join(', ');
-        threatModelPath = config?.ai?.threat_model_path || '';
-        sharedModelPath = config?.ai?.model_path || '';
-        modelDedicated =
-          !!threatModelPath.trim() && threatModelPath.trim() !== sharedModelPath.trim();
       } catch {
         threatLabels = [];
         savedLabels = [];
@@ -150,25 +134,6 @@
     threatLabels = threatLabels.includes(label)
       ? threatLabels.filter((l) => l !== label)
       : [...threatLabels, label];
-  }
-
-  async function saveThreatModel() {
-    savingModel = true;
-    modelNotice = null;
-    modelError = null;
-    try {
-      const path = threatModelPath.trim();
-      await api.updateSettings({ ai: { threat_model_path: path } });
-      modelDedicated = !!path && path !== sharedModelPath.trim();
-      modelNotice = path
-        ? 'Threat model saved. It is loaded at the next restart.'
-        : 'Threat model cleared: the threat channel goes back to the shared model at the next restart.';
-      await loadCategories();
-    } catch (e) {
-      modelError = formatApiError(e);
-    } finally {
-      savingModel = false;
-    }
   }
 
   async function saveThreatLabels(list = threatLabels) {
@@ -392,43 +357,6 @@
   <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">{error}</div>
 {/if}
 
-{#if !loading}
-  <div class="card" style="margin-bottom: 14px">
-    <div class="spread" style="margin-bottom: 8px; gap: 10px; flex-wrap: wrap">
-      <h3 style="margin: 0">Threat Model</h3>
-      {#if isAdmin}
-        <button onclick={saveThreatModel} disabled={savingModel}>
-          {savingModel ? 'Saving...' : 'Save Model'}
-        </button>
-      {/if}
-    </div>
-    <p class="muted help" style="margin: 0 0 10px">
-      Leave empty to use the shared model with the labels you tick below.
-      Advanced: name a separate threat model, and every label it reports
-      counts as a threat. Applies after a restart.
-    </p>
-    <div class="grid2">
-      <label>
-        Threat Model Path
-        <input bind:value={threatModelPath} placeholder="Empty: use the shared model" spellcheck="false" disabled={!isAdmin} />
-      </label>
-      <div class="model-detail">
-        <span class="detail-label">Threat Channel</span>
-        <span class="muted">
-          {backendLabel(threatBackendName)}
-          <span class="pill">{modelDedicated ? 'Own Model' : 'Shared Model'}</span>
-        </span>
-      </div>
-      <div class="model-detail">
-        <span class="detail-label">Shared Model</span>
-        <span class="muted"><code>{sharedModelPath || 'Built-in heuristic rules'}</code></span>
-      </div>
-    </div>
-    {#if modelNotice}<p class="muted" style="color: var(--ok); margin: 8px 0 0">{modelNotice}</p>{/if}
-    {#if modelError}<p class="dialog-error" style="margin: 8px 0 0">{modelError}</p>{/if}
-  </div>
-{/if}
-
 {#if loading}
   <div class="card">
     <p class="muted">Loading...</p>
@@ -463,26 +391,19 @@
   <div class="card" style="margin-bottom: 14px">
     <div class="spread" style="margin-bottom: 8px; gap: 10px; flex-wrap: wrap">
       <h3 style="margin: 0">Labels Treated as Threats</h3>
-      {#if isAdmin && !modelDedicated}
+      {#if isAdmin}
         <button onclick={() => saveThreatLabels()} disabled={savingLabels}>
           {savingLabels ? 'Saving...' : 'Save Labels'}
         </button>
       {/if}
     </div>
-    {#if modelDedicated}
-      <p class="muted help" style="margin: 0 0 10px">
-        A separate threat model is in use, so it decides what a threat is.
-        This list only applies if you go back to the shared model.
-      </p>
-    {:else}
-      <p class="muted help" style="margin: 0 0 10px">
-        Only ticked labels count as threats. In Enforce mode they block once
-        confident enough; unticked labels never block.
-      </p>
-    {/if}
+    <p class="muted help" style="margin: 0 0 10px">
+      Only ticked labels count as threats. In Enforce mode they block once
+      confident enough; unticked labels never block.
+    </p>
     {#if labelsNotice}<p class="muted" style="color: var(--ok); margin: 0 0 8px">{labelsNotice}</p>{/if}
     {#if labelsError}<p class="dialog-error">{labelsError}</p>{/if}
-    {#if !modelDedicated && removedLabels.length}
+    {#if removedLabels.length}
       {#if removedVerdictTotal > 0}
         <p class="warn" role="alert">
           Saving deletes {fmt(removedVerdictTotal)} stored threat
@@ -505,7 +426,7 @@
               type="checkbox"
               checked={threatLabels.includes(label)}
               onchange={() => toggleThreatLabel(label)}
-              disabled={!isAdmin || modelDedicated}
+              disabled={!isAdmin}
             />
             <span>{titleCase(label)}{#if !modelLabels.includes(label)}<span class="muted"> (not in the loaded model)</span>{/if}</span>
           </label>
@@ -545,7 +466,7 @@
             <span class="pill">Not Blocked</span>
           {/if}
           <span class="muted small">
-            {explainResult.mode} mode, block threshold {percent(explainResult.block_threshold)}{#if explainResult.threat_model_dedicated}, own threat model{/if}
+            {explainResult.mode} mode, block threshold {percent(explainResult.block_threshold)}
           </span>
         </div>
         <ul>
@@ -737,10 +658,6 @@
 {/if}
 
 <style>
-  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-  .grid2 label,
-  .grid2 .model-detail { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
-  .detail-label { font-weight: 600; }
   .explain { margin-top: 12px; }
   .explain ul { margin: 8px 0; padding-left: 18px; font-size: 0.85rem; }
   .explain li { margin: 2px 0; }
@@ -752,7 +669,4 @@
   .check input { width: auto; }
   .nowrap { white-space: nowrap; }
   .evidence { max-width: 200px; font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  @media (max-width: 640px) {
-    .grid2 { grid-template-columns: 1fr; }
-  }
 </style>

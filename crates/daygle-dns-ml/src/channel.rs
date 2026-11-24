@@ -2,15 +2,15 @@
 //! jobs, so a label can never mean two things at once.
 //!
 //! The scanner runs a [`Channel::Content`] pass and a [`Channel::Threat`]
-//! pass over every domain. Each pass can have its own model
-//! (`ai.category_model_path` / `ai.threat_model_path`), its own confidence
-//! floor and its own verdict TTL. This wrapper is what makes the two passes
+//! pass over every domain. The content pass can have its own model
+//! (`ai.category_model_path`); each pass has its own confidence floor and
+//! verdict TTL. This wrapper is what makes the two passes
 //! mean different things:
 //!
 //! | Channel   | Verdict it reports                                      |
 //! |-----------|---------------------------------------------------------|
 //! | `Content` | whatever the categorizer said, always severity `Info`   |
-//! | `Threat`  | with the shared model, only the labels in `ai.auto_block_categories`; with a dedicated `ai.threat_model_path`, every label that model produces (severity `Threat` either way) |
+//! | `Threat`  | only the labels in `ai.auto_block_categories`, severity `Threat` |
 //!
 //! The threat channel reads its category list from the *live* settings, so
 //! editing `auto_block_categories` changes what the next scan treats as a
@@ -100,22 +100,17 @@ impl DomainClassifier for ChannelBackend {
             }),
             Channel::Threat => {
                 // "Not a threat" is the one negative the model can carry: a
-                // learned label, never a finding - not even from a dedicated
-                // threat model or an auto-block list that names it.
+                // learned label, never a finding - not even from an
+                // auto-block list that names it.
                 if verdict.category == BENIGN_LABEL {
                     return None;
                 }
                 // Settings are always present for this channel; no settings
                 // means no declared threats, which is the safe reading.
                 let settings = self.settings.as_ref()?.load();
-                // A dedicated threat model is a detector in its own right: it
-                // reports every label it produces, and the block snapshot
-                // applies `auto_block_categories` later. With the shared
-                // classifier there is no second opinion to report, so the
-                // operator's list stays a filter and nothing else is a threat.
-                if !settings.dedicated_threat_model()
-                    && !settings.is_auto_block_category(&verdict.category)
-                {
+                // The operator's list decides what a threat is: nothing else
+                // is reported.
+                if !settings.is_auto_block_category(&verdict.category) {
                     return None;
                 }
                 let verdict = Verdict {
@@ -172,12 +167,9 @@ impl ChannelBackend {
         let reading = self
             .inner
             .classify(&ClassificationInput::domain_only(parent.to_string()))?;
-        // With the shared classifier any label outside the block list is an
-        // ordinary site. A dedicated threat model reports only threats, so
-        // there only the learned `benign` label clears the parent.
-        let ordinary = reading.category == BENIGN_LABEL
-            || (!settings.dedicated_threat_model()
-                && !settings.is_auto_block_category(&reading.category));
+        // Any label outside the block list is an ordinary site.
+        let ordinary =
+            reading.category == BENIGN_LABEL || !settings.is_auto_block_category(&reading.category);
         (ordinary && reading.confidence >= PARENT_CLEAR_FLOOR).then(|| ParentReading {
             domain: parent.to_string(),
             category: reading.category,
@@ -294,10 +286,10 @@ mod tests {
     fn the_threat_channel_never_reports_the_benign_label() {
         // Learned from `not_threat` corrections, `benign` says "this is not a
         // threat". Reporting it as one would turn the operator's correction
-        // into a block, and a dedicated threat model does not change that.
+        // into a block, even with `benign` on the list.
         let backend = ChannelBackend::threat(
             Box::new(Fixed(Some(verdict("benign", 0.99, Severity::Info)))),
-            dedicated_settings(&["benign"]),
+            settings_with(&["benign"]),
         );
         assert!(backend.classify(&input()).is_none());
 
@@ -335,45 +327,6 @@ mod tests {
         let backend = ChannelBackend::threat(
             Box::new(Fixed(Some(verdict("malware", 1.0, Severity::Threat)))),
             settings_with(&[]),
-        );
-        assert!(backend.classify(&input()).is_none());
-    }
-
-    fn dedicated_settings(declared: &[&str]) -> Arc<ArcSwap<AiSettings>> {
-        Arc::new(ArcSwap::from_pointee(AiSettings {
-            model_path: "/m/shared.bin".to_string(),
-            threat_model_path: "/m/threat.bin".to_string(),
-            auto_block_categories: declared.iter().map(|c| c.to_string()).collect(),
-            ..AiSettings::default()
-        }))
-    }
-
-    #[test]
-    fn dedicated_threat_model_reports_undeclared_labels() {
-        // The detector's own label is a finding even when the operator did
-        // not list it: this list now decides what blocks, not what is seen.
-        let backend = ChannelBackend::threat(
-            Box::new(Fixed(Some(verdict("malware", 0.8, Severity::Info)))),
-            dedicated_settings(&["phishing"]),
-        );
-        let v = backend.classify(&input()).unwrap();
-        assert_eq!(v.category, "malware");
-        assert_eq!(v.severity, Severity::Threat);
-    }
-
-    #[test]
-    fn naming_the_shared_model_is_not_a_dedicated_one() {
-        // Pointing threat_model_path at the shared file is the way to spell
-        // "no second model", so the label list keeps its filtering job.
-        let settings = Arc::new(ArcSwap::from_pointee(AiSettings {
-            model_path: "/m/shared.bin".to_string(),
-            threat_model_path: "/m/shared.bin".to_string(),
-            auto_block_categories: vec!["phishing".to_string()],
-            ..AiSettings::default()
-        }));
-        let backend = ChannelBackend::threat(
-            Box::new(Fixed(Some(verdict("news", 0.9, Severity::Info)))),
-            settings,
         );
         assert!(backend.classify(&input()).is_none());
     }
@@ -454,25 +407,6 @@ mod tests {
                 .unwrap();
             assert_eq!(v.severity, Severity::Threat, "{name}");
         }
-    }
-
-    #[test]
-    fn a_dedicated_model_clears_a_parent_only_as_benign() {
-        // A dedicated detector's labels are all threats, so `scam` on the
-        // parent does not clear it; its learned `benign` does.
-        let backend = ChannelBackend::threat(
-            Box::new(ByName(&[
-                ("a.one.com", "phishing", 0.99),
-                ("one.com", "scam", 0.9),
-                ("a.two.com", "phishing", 0.99),
-                ("two.com", "benign", 0.9),
-            ])),
-            dedicated_settings(&["phishing"]),
-        );
-        let one = backend.classify(&ClassificationInput::domain_only("a.one.com"));
-        assert_eq!(one.unwrap().severity, Severity::Threat);
-        let two = backend.classify(&ClassificationInput::domain_only("a.two.com"));
-        assert_eq!(two.unwrap().severity, Severity::Disputed);
     }
 
     #[test]

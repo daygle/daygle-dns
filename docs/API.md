@@ -1666,12 +1666,10 @@ POST /api/ai/update-models
 Available when `[ai] enabled = true`. The scanner runs two independent
 channels: `content` categorizes sites (`news`, `shopping`, ...) and stores a
 label only, `threat` reports detected threats and is the only channel that
-can block on its own. With the shared classifier `threat` reports only the
-labels in `ai.auto_block_categories`; with a dedicated
-`ai.threat_model_path` every label that model produces is a threat and blocks
-above `ai.block_threshold`, so `ai.auto_block_categories` only applies to the
-shared classifier. Each channel has its own model, confidence floor and
-verdict TTL. Blocking a *content* category is an
+can block on its own. `threat` reports only the labels in
+`ai.auto_block_categories`. Both channels run `ai.model_path` (the content
+channel can have its own `ai.category_model_path`); each has its own
+confidence floor and verdict TTL. Blocking a *content* category is an
 operator rule on a client group (`blocked_categories`, see Advanced
 blocking) - the label comes from the scanner, the decision does not.
 
@@ -1688,10 +1686,7 @@ label deletes) and the current block-snapshot size.
 
 A domain qualifies for auto-blocking when its *threat-channel* verdict is at
 or above `ai.block_threshold`, neither it nor a parent domain is exempt, and
-- with the shared classifier - its label is one of `ai.auto_block_categories`.
-A dedicated `ai.threat_model_path` is a detector in its own right: everything
-it reports at or above the threshold qualifies, whatever the label. A
-content-channel verdict never qualifies, whatever it is called. A threat
+its label is one of `ai.auto_block_categories`. A content-channel verdict never qualifies, whatever it is called. A threat
 verdict the MiniLM verifier disagreed with (severity `disputed`, decided at
 `ai.verifier_threshold`) never qualifies.
 The built-in heuristic rules score at most 0.35, so they never auto-block on
@@ -1723,8 +1718,7 @@ later re-tick does not bring them back - only a fresh classification (the
 domain is seen again and re-detected) reports it again. Declaring a label a
 threat re-queues the threat-channel verdicts of the domains whose
 categorization already carries it, so the next scan cycle reports them
-instead of waiting for their verdict TTL. A dedicated `ai.threat_model_path` lists every
-label its model produced. Each row
+instead of waiting for their verdict TTL. Each row
 also carries `blocked`, whether the domain is in the *current* block
 snapshot - actually auto-blocked in enforce mode (in train mode the snapshot
 is empty, so every row is `false`). The console's AI → Threats tab renders
@@ -1845,12 +1839,6 @@ Three things keep the self-maintained model honest without an operator:
   discarding any candidate. `GET /api/ai/status` reports each model's
   `trial` (`started_at`, `ends_at`, `retry_after`, `last_outcome`, and the
   last 20 outcomes as `history`) and whether a `candidate` is waiting.
-* **Both models.** With a dedicated `ai.threat_model_path`, that model is
-  maintained the same way as `learned-threat.bin`, from threat verdicts and
-  "not a threat" corrections only, with the threat model as its reference;
-  the shared model then leaves threat verdicts out. Status reports it as
-  `learned_threat_model`, and `?model=threat` selects it for
-  `POST /api/ai/retrain` and `POST /api/ai/rollback`.
 * **Verifier reference.** With the MiniLM verifier on and no pinned
   `ai.verifier_reference_path`, the verifier's category centroids are
   rebuilt from the starter corpus and the operator's category corrections
@@ -1902,8 +1890,7 @@ on each redirect.
 `ai.page_rule` decides whether a reading may move the verdict:
 `evidence` (default) records it only; `corroborate` lets agreement raise the
 threat confidence to the page's own score and ignores disagreement (agreement
-means the label is in `auto_block_categories`; a dedicated threat model's
-"every label is a threat" rule does not apply to page categories); `decide`
+means the label is in `auto_block_categories`); `decide`
 also caps a verdict at `1 - page confidence` when the page reads as an
 ordinary category, which can drop it below `block_threshold` and stop a
 name-only block. A reading below `ai.page_confidence_floor` (0.6, clamped
@@ -1925,8 +1912,7 @@ A `not_threat` domain never trains under the machine label the operator
 denied, whether or not negatives are learned: the flag only decides whether it
 also trains as `benign`. With `ai.learn_negatives` on, `not_threat`
 corrections are training data too: they become a `benign` label (reported as `negatives` in the retrain response
-and in the model record). The threat channel never reports `benign` - even a
-dedicated threat model's `benign` verdict is dropped - and the auto-block label
+and in the model record). The threat channel never reports `benign`, and the auto-block label
 picker does not offer it. The trade-off is the usual one for a negative class
 in a small single-label model: it can over-generalise and miss a threat, so it
 is off by default. `allow` corrections are not negatives and stay out.

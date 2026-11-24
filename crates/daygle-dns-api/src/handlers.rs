@@ -1324,24 +1324,6 @@ fn bundled_verifier(model_path: &str) -> Option<String> {
         .map(|path| path.display().to_string())
 }
 
-/// `POST /api/ai/retrain` and `/api/ai/rollback` query params.
-#[derive(Debug, Default, serde::Deserialize)]
-pub struct AiModelQuery {
-    /// `shared` (the default) or `threat` (the dedicated threat model).
-    model: Option<String>,
-}
-
-impl AiModelQuery {
-    /// The model named, or `None` for an unknown name.
-    fn role(&self) -> Option<daygle_dns_ml::learn::Role> {
-        match self.model.as_deref().map(str::trim).unwrap_or("shared") {
-            "" | "shared" => Some(daygle_dns_ml::learn::Role::Shared),
-            "threat" => Some(daygle_dns_ml::learn::Role::Threat),
-            _ => None,
-        }
-    }
-}
-
 /// `GET /api/ai/explain` query params.
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct AiExplainQuery {
@@ -1531,8 +1513,6 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         // whether the threat channel runs a model of its own.
         "model_path": settings.model_path,
         "category_model_path": settings.category_model_path,
-        "threat_model_path": settings.threat_model_path,
-        "threat_model_dedicated": settings.dedicated_threat_model(),
         // Self-maintained model: automatic retraining and what the last run
         // achieved. An accepted retrain is loaded at once, without a restart.
         "auto_retrain": settings.auto_retrain,
@@ -1556,10 +1536,7 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         "page_model": ai.page_model_status(),
         // Each maintained model: its learned file, whether it is live, the
         // candidate on trial and the trial history.
-        "learned_model": ai.maintained_status(daygle_dns_ml::learn::Role::Shared),
-        "learned_threat_model": settings
-            .dedicated_threat_model()
-            .then(|| ai.maintained_status(daygle_dns_ml::learn::Role::Threat)),
+        "learned_model": ai.maintained_status(),
         "trial_new_models": settings.trial_new_models,
         // The MiniLM second opinion: whether this build can run it, whether
         // it is configured, whether its bundled file is there to switch on,
@@ -1662,9 +1639,8 @@ pub async fn ai_verdicts(
 /// `GET /api/ai/threats?q=&category=&severity=&exemption=&page=&per_page=` - paginated list of the
 /// scanner's *detected* threat verdicts (`threat` and `disputed` severity),
 /// highest confidence first: what the threat channel reported, not merely what
-/// blocks. A dedicated `ai.threat_model_path` reports every label its model
-/// produces; with the shared model only the labels in
-/// `ai.auto_block_categories` are reported, so the list follows that list
+/// blocks. Only the labels in `ai.auto_block_categories` are reported, so
+/// the list follows that list
 /// live: unticking a label deletes its stored verdicts, so its rows go at
 /// once and a later re-tick does not bring them back - only a fresh
 /// detection reports the domain again. Each row carries `blocked`:
@@ -1691,15 +1667,7 @@ pub async fn ai_threats(
     };
     // The list shows the labels treated as threats right now, read from the
     // live settings: the operator's edit applies to the list immediately.
-    // A dedicated threat model is a detector in its own right and reports
-    // every label it produces, so its list is not label-filtered.
-    let settings = ai.settings.load();
-    let threat_labels = if settings.dedicated_threat_model() {
-        None
-    } else {
-        Some(settings.auto_block_categories.clone())
-    };
-    drop(settings);
+    let threat_labels = Some(ai.settings.load().auto_block_categories.clone());
     let listed = run_blocking({
         let ai = ai.clone();
         move || {
@@ -2141,9 +2109,7 @@ pub async fn ai_explain(
                                 explain_pct(settings.block_threshold)
                             ));
                         }
-                        if !settings.dedicated_threat_model()
-                            && !settings.is_auto_block_category(&t.category)
-                        {
+                        if !settings.is_auto_block_category(&t.category) {
                             reasons.push(format!(
                                 "The label '{}' is not ticked in AI → Threats, so it cannot block.",
                                 t.category
@@ -2185,7 +2151,6 @@ pub async fn ai_explain(
                 "domain": domain,
                 "mode": mode,
                 "block_threshold": settings.block_threshold,
-                "threat_model_dedicated": settings.dedicated_threat_model(),
                 "auto_block_categories": settings.auto_block_categories.clone(),
                 "blocked": blocked_category.is_some(),
                 "blocked_category": blocked_category,
@@ -2211,8 +2176,7 @@ pub async fn ai_explain(
                     "evidence": t.evidence,
                     "observations": t.observations,
                     "over_threshold": t.confidence >= settings.block_threshold,
-                    "label_treated_as_threat": settings.dedicated_threat_model()
-                        || settings.is_auto_block_category(&t.category),
+                    "label_treated_as_threat": settings.is_auto_block_category(&t.category),
                     "classified_at": stamp(t.classified_at),
                     "expires_at": stamp(t.expires_at),
                 })),
@@ -2322,22 +2286,16 @@ pub async fn ai_corrections(
     .into_response()
 }
 
-/// `POST /api/ai/rollback[?model=threat]` - restore the model the last
+/// `POST /api/ai/rollback` - restore the model the last
 /// promotion or retrain replaced,
 /// live. The model it replaces is kept, so a rollback can itself be undone.
-pub async fn ai_rollback(
-    State(state): State<AppState>,
-    Query(query): Query<AiModelQuery>,
-) -> Response {
+pub async fn ai_rollback(State(state): State<AppState>) -> Response {
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
-    let Some(role) = query.role() else {
-        return error_response(StatusCode::BAD_REQUEST, "model must be shared or threat");
-    };
     let outcome = run_blocking({
         let ai = ai.clone();
-        move || ai.rollback_model(role)
+        move || ai.rollback_learned_model()
     })
     .await;
     match outcome {
@@ -2357,25 +2315,19 @@ pub async fn ai_rollback(
     }
 }
 
-/// `POST /api/ai/retrain[?model=threat]` - retrain the shared classifier (or
-/// the dedicated threat model) from the scanner's confirmed verdicts, the
+/// `POST /api/ai/retrain` - retrain the classifier from the scanner's
+/// confirmed verdicts, the threat feeds, the
 /// operator's corrections and the starter corpus, and put it live at once:
 /// the operator's explicit choice, so no shadow trial (a candidate on trial
 /// is discarded). A retrain with too little data, or one that fails any of
 /// its gates, leaves the current model in place.
-pub async fn ai_retrain(
-    State(state): State<AppState>,
-    Query(query): Query<AiModelQuery>,
-) -> Response {
+pub async fn ai_retrain(State(state): State<AppState>) -> Response {
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
-    let Some(role) = query.role() else {
-        return error_response(StatusCode::BAD_REQUEST, "model must be shared or threat");
-    };
     let outcome = run_blocking({
         let ai = ai.clone();
-        move || ai.retrain_model(role)
+        move || ai.retrain_learned_model()
     })
     .await;
     match outcome {
@@ -2388,7 +2340,7 @@ pub async fn ai_retrain(
                     stats.examples, stats.labels
                 ),
             );
-            let record = ai.maintained_status(role).get("last").cloned();
+            let record = ai.maintained_status().get("last").cloned();
             let validation = record
                 .as_ref()
                 .and_then(|r| r.get("validation_examples"))
@@ -2785,7 +2737,7 @@ pub async fn ai_model_health(State(state): State<AppState>) -> Response {
         return model_health_unavailable("the AI subsystem is disabled");
     };
     let settings = ai.settings.load_full();
-    let model = ai.threat_model_path();
+    let model = ai.live_model_path();
     let probed = run_blocking({
         let ai = ai.clone();
         let settings = settings.clone();
@@ -2839,7 +2791,7 @@ pub async fn ai_model_health_probe(
         sample.push((label, domain));
     }
     let settings = ai.settings.load_full();
-    let model = ai.threat_model_path();
+    let model = ai.live_model_path();
     let probed = run_blocking({
         let settings = settings.clone();
         let model = model.clone();
@@ -6741,10 +6693,6 @@ pub struct AiUpdate {
     pub model_path: Option<String>,
     /// fastText model for content categorisation; empty uses `model_path`.
     pub category_model_path: Option<String>,
-    /// fastText model for threat detection; empty uses `model_path`. A model
-    /// named here is a detector in its own right: every label it reports is a
-    /// threat.
-    pub threat_model_path: Option<String>,
     pub workers: Option<u32>,
     pub scan_interval_secs: Option<u64>,
     pub expire_check_secs: Option<u64>,
@@ -7681,9 +7629,6 @@ pub async fn update_settings(
         }
         if let Some(v) = &a.category_model_path {
             config.ai.category_model_path = v.trim().to_string();
-        }
-        if let Some(v) = &a.threat_model_path {
-            config.ai.threat_model_path = v.trim().to_string();
         }
         if let Some(v) = a.workers {
             config.ai.workers = v;

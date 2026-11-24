@@ -150,34 +150,10 @@ pub fn collect_dataset(store: &AiStore, settings: &AiSettings) -> Result<Dataset
     collect_dataset_with(store, settings, &Sources::default())
 }
 
-/// Which model a retrain maintains.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Role {
-    /// The shared classifier (`ai.model_path`): categorization, and threat
-    /// detection too unless a dedicated threat model is configured.
-    #[default]
-    Shared,
-    /// A dedicated threat model (`ai.threat_model_path`): every label it
-    /// produces except `benign` is a threat.
-    Threat,
-}
-
-impl Role {
-    /// The stable name used in file names, logs and the API.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Shared => "shared",
-            Self::Threat => "threat",
-        }
-    }
-
-    /// Whether `label` counts as a threat for the model this role maintains.
-    pub fn is_threat_label(self, settings: &AiSettings, label: &str) -> bool {
-        match self {
-            Self::Threat => !label.is_empty() && label != BENIGN_LABEL,
-            Self::Shared => label != BENIGN_LABEL && settings.is_auto_block_category(label),
-        }
-    }
+/// Whether `label` counts as a threat: ticked under Labels Treated as
+/// Threats, and never `benign`.
+pub fn is_threat_label(settings: &AiSettings, label: &str) -> bool {
+    label != BENIGN_LABEL && settings.is_auto_block_category(label)
 }
 
 /// The fixed reference a live retrain checks the scanner's own verdicts
@@ -213,9 +189,6 @@ impl Anchor<'_> {
 /// What a retrain draws on beyond the store itself.
 #[derive(Default)]
 pub struct Sources<'a> {
-    /// Which model is being maintained; decides which channels and
-    /// corrections are its material.
-    pub role: Role,
     /// The labels of the model in use: starter examples outside them are left
     /// out, so a custom model's label space is not widened by the starter's.
     pub known: Option<&'a HashSet<String>>,
@@ -244,19 +217,10 @@ pub fn collect_dataset_with(
     sources: &Sources<'_>,
 ) -> Result<Dataset> {
     let known = sources.known;
-    let role = sources.role;
     // Two labels agree when they are the same, or both are threats: a
     // phishing verdict confirmed as scam is still a confirmed threat.
     let agrees = |left: &str, right: &str| {
-        left == right
-            || (role.is_threat_label(settings, left) && role.is_threat_label(settings, right))
-    };
-    // The channels whose verdicts are this model's material: a dedicated
-    // threat model learns from threat verdicts only, and the shared model
-    // leaves them out when another model produced them.
-    let wants_channel = |channel: &str| match role {
-        Role::Threat => channel == "threat",
-        Role::Shared => !(channel == "threat" && settings.dedicated_threat_model()),
+        left == right || (is_threat_label(settings, left) && is_threat_label(settings, right))
     };
     let now = chrono::Utc::now().timestamp();
     let mut pairs: Vec<(String, String)> = Vec::new();
@@ -288,9 +252,7 @@ pub fn collect_dataset_with(
         match correction.action.as_str() {
             "category" if !label.is_empty() => {
                 corrected.insert(domain.clone());
-                // A relabel names a content category: material for the
-                // shared model, not for a threat detector.
-                if !superseded && role == Role::Shared {
+                if !superseded {
                     corrections.push((label, domain));
                 }
             }
@@ -336,16 +298,10 @@ pub fn collect_dataset_with(
     // Threat-feed names: a stable one in five is held out to judge the
     // result, the rest train. A name the operator corrected is theirs to
     // decide, whatever a feed says.
-    // Only a model that detects threats learns threat names: the shared
-    // model leaves them to a dedicated threat model when there is one.
-    let learns_threats = match role {
-        Role::Threat => true,
-        Role::Shared => !settings.dedicated_threat_model(),
-    };
-    let (intel_training, intel_validation) = match sources.intel.filter(|_| learns_threats) {
+    let (intel_training, intel_validation) = match sources.intel {
         Some(index) => {
             let (training, probe) =
-                index.sample(|label| crate::intel::wanted_label(role, settings, known, label));
+                index.sample(|label| crate::intel::wanted_label(settings, known, label));
             let keep = |pairs: Vec<(String, String)>| -> Vec<(String, String)> {
                 pairs
                     .into_iter()
@@ -366,9 +322,6 @@ pub fn collect_dataset_with(
         now,
         MAX_VERDICTS,
     )? {
-        if !wants_channel(&channel) {
-            continue;
-        }
         let label = label.trim().to_ascii_lowercase();
         let domain = domain.trim().trim_matches('.').to_ascii_lowercase();
         // A corrected domain never contributes its machine label, whether the
@@ -584,7 +537,6 @@ pub fn model_labels(model: &Path) -> Option<HashSet<String>> {
 /// a detector that has forgotten `malware` will never report it again, and
 /// no held-out score notices a label that never comes up.
 pub(crate) fn refuse_forgotten_threats(
-    role: Role,
     settings: &AiSettings,
     current: Option<&HashSet<String>>,
     candidate: &HashSet<String>,
@@ -594,7 +546,7 @@ pub(crate) fn refuse_forgotten_threats(
     };
     let mut missing: Vec<&str> = current
         .iter()
-        .filter(|label| role.is_threat_label(settings, label) && !candidate.contains(*label))
+        .filter(|label| is_threat_label(settings, label) && !candidate.contains(*label))
         .map(String::as_str)
         .collect();
     if missing.is_empty() {
@@ -1013,8 +965,7 @@ pub fn probe_threat_names(
         )));
     }
     let predicted = predict_all(model, sample)?;
-    let is_threat =
-        |label: &str| settings.dedicated_threat_model() || settings.is_auto_block_category(label);
+    let is_threat = |label: &str| is_threat_label(settings, label);
     let (mut checked, mut benign, mut downgraded, mut skipped) = (0, 0, 0, 0);
     for ((label, _), got) in sample.iter().zip(&predicted) {
         if !is_threat(label) {
@@ -1181,26 +1132,17 @@ mod tests {
         };
         let current = set(&["malware", "phishing", "news"]);
         assert!(
-            refuse_forgotten_threats(
-                Role::Shared,
-                &settings,
-                Some(&current),
-                &set(&["malware", "phishing"])
-            )
-            .is_ok(),
+            refuse_forgotten_threats(&settings, Some(&current), &set(&["malware", "phishing"]))
+                .is_ok(),
             "an ordinary label may come and go"
         );
-        let refused = refuse_forgotten_threats(
-            Role::Shared,
-            &settings,
-            Some(&current),
-            &set(&["phishing", "news"]),
-        )
-        .unwrap_err()
-        .to_string();
+        let refused =
+            refuse_forgotten_threats(&settings, Some(&current), &set(&["phishing", "news"]))
+                .unwrap_err()
+                .to_string();
         assert!(refused.contains("malware"), "{refused}");
         assert!(
-            refuse_forgotten_threats(Role::Shared, &settings, None, &set(&[])).is_ok(),
+            refuse_forgotten_threats(&settings, None, &set(&[])).is_ok(),
             "no model in use (heuristic): nothing to forget"
         );
     }
