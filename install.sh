@@ -58,8 +58,15 @@ CONFIG_FILE="$CONFIG_DIR/daygle-dns.toml"
 SERVICE_FILE="/etc/systemd/system/daygle-dns.service"
 PRIV_LIB_DIR="${PRIV_LIB_DIR:-$PREFIX/lib/daygle-dns}"
 APPLY_HELPER="$PRIV_LIB_DIR/update-apply.sh"
+OLLAMA_HELPER="$PRIV_LIB_DIR/ollama-setup.sh"
 # DAYGLE_DNS_AI=0 keeps the AI scanner off (the bundled starter model is
 # still copied to the config dir; the [ai] section is simply not enabled).
+# DAYGLE_DNS_OLLAMA=1 also installs (or updates) a local Ollama server for
+# the AI's language-model reader, kept on 127.0.0.1 at low priority, and
+# downloads DAYGLE_DNS_OLLAMA_MODEL (default qwen2.5:1.5b); =0 removes it.
+# It needs about 3.5 GB of memory in total (DAYGLE_DNS_OLLAMA_FORCE=1 skips
+# the check). It can also be installed later from the console (AI >
+# Language Model) or by re-running this installer with the flag.
 
 # Detect the installation mode before changing anything. A config file is the
 # strongest signal, while the binary/unit checks also catch interrupted or
@@ -250,6 +257,11 @@ install_update_service() {
     run_as_root install -m 0700 "$SRC_DIR/crates/daygle-dns-api/src/update-apply.sh" "$APPLY_HELPER" || return 1
     run_as_root chown root:root "$APPLY_HELPER" || return 1
     run_as_root sed -i "s|__DAYGLE_DNS_EXE__|$PREFIX/bin/daygle-dns|; s|__DAYGLE_DNS_UPDATES_DIR__|$DATA_DIR/updates|; s|__DAYGLE_DNS_MODELS_DIR__|$CONFIG_DIR/models|; s|__DAYGLE_DNS_USER__|$SERVICE_USER|" "$APPLY_HELPER" || return 1
+    # The Ollama setup helper the apply step runs when the console asks to
+    # install, update or remove a local Ollama (root-owned, never taken from
+    # a service-writable path).
+    run_as_root install -m 0700 "$SRC_DIR/crates/daygle-dns-api/src/ollama-setup.sh" "$OLLAMA_HELPER" || return 1
+    run_as_root chown root:root "$OLLAMA_HELPER" || return 1
     run_as_root tee /etc/systemd/system/daygle-dns-update.service > /dev/null <<EOF
 [Unit]
 Description=Daygle DNS update apply step (root oneshot)
@@ -1022,6 +1034,50 @@ console_url() {
         fi
     done
 }
+
+# ---- optional local Ollama (language-model reader) ---------------------
+ollama_setup() { # action
+    if [ -f "$OLLAMA_HELPER" ]; then
+        run_as_root sh "$OLLAMA_HELPER" "$1"
+    else
+        run_as_root sh "$SRC_DIR/crates/daygle-dns-api/src/ollama-setup.sh" "$1"
+    fi
+}
+# The console's runtime settings live in the database and win over the
+# config file, so the reader is switched there (with the service stopped:
+# it writes SQLite); the restart below brings the service back.
+set_language_model() { # on|off
+    if have_cmd systemctl && [ -f "$SERVICE_FILE" ]; then
+        systemctl stop daygle-dns 2>/dev/null || true
+    fi
+    if id "$SERVICE_USER" >/dev/null 2>&1 \
+        && run_as_service "$PREFIX/bin/daygle-dns" --config "$CONFIG_FILE" set-language-model "$1" >/dev/null; then
+        log "Turned the AI's language-model reader $1."
+    else
+        log "WARNING: could not turn the language-model reader $1; use AI > Language Model in the console."
+    fi
+    if have_cmd systemctl && [ -f "$SERVICE_FILE" ]; then
+        systemctl start daygle-dns 2>/dev/null || true
+    fi
+}
+case "${DAYGLE_DNS_OLLAMA:-}" in
+    1)
+        log "Installing Ollama for the AI's language-model reader (DAYGLE_DNS_OLLAMA=1)..."
+        if ollama_setup install; then
+            set_language_model on
+            log "Ollama is installed. Manage models under AI > Language Model in the console."
+        else
+            log "WARNING: Ollama was not installed (see above). Daygle DNS itself is unaffected; retry from the console (AI > Language Model) or re-run with DAYGLE_DNS_OLLAMA=1."
+        fi
+        ;;
+    0)
+        if [ -x /usr/local/bin/ollama ] || [ -x /usr/bin/ollama ] || [ -f /etc/systemd/system/ollama.service ]; then
+            log "Removing Ollama (DAYGLE_DNS_OLLAMA=0)..."
+            ollama_setup remove || log "WARNING: Ollama could not be removed completely (see above)."
+            set_language_model off
+        fi
+        ;;
+esac
 
 # Run only when the installer is run by hand: a GUI-driven update has its
 # own health check and rollback, and its output goes to the journal.

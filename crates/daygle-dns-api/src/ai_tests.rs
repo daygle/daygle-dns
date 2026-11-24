@@ -914,3 +914,95 @@ async fn explain_reports_outside_evidence() {
     assert!(unseen["sighting"].is_null());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn the_language_model_status_reports_an_unreachable_server() {
+    let dir = scratch_dir("llm-status");
+    let ai = engine(&dir);
+    let mut settings = (*ai.settings.load_full()).clone();
+    // A port nothing listens on.
+    settings.llm_url = "http://127.0.0.1:9".to_string();
+    ai.apply_settings(&settings);
+    let status = json(AppState::for_tests(Some(ai)), "/api/ai/llm").await;
+    assert_eq!(status["reachable"], false);
+    assert_eq!(status["enabled"], false);
+    assert_eq!(status["model"], "qwen2.5:1.5b");
+    assert!(status["error"].as_str().is_some_and(|e| !e.is_empty()));
+    assert_eq!(status["service"]["local"], true);
+    assert!(status["suggested_models"]
+        .as_array()
+        .is_some_and(|s| !s.is_empty()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn language_model_requests_are_validated() {
+    let dir = scratch_dir("llm-validate");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai.clone()));
+    for bad in ["", "../../etc/passwd", "qwen; rm -rf /", "-flag"] {
+        let (code, _, body) = call(
+            state.clone(),
+            "POST",
+            "/api/ai/llm/pull",
+            Some(serde_json::json!({ "model": bad })),
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{bad}: {body}");
+    }
+    let (code, _, _) = call(
+        state.clone(),
+        "POST",
+        "/api/ai/llm/service",
+        Some(serde_json::json!({ "action": "reboot" })),
+    )
+    .await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    // A server on another machine is managed where it runs.
+    let mut settings = (*ai.settings.load_full()).clone();
+    settings.llm_url = "http://10.0.0.5:11434".to_string();
+    ai.apply_settings(&settings);
+    let (code, _, body) = call(
+        state,
+        "POST",
+        "/api/ai/llm/service",
+        Some(serde_json::json!({ "action": "install" })),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CONFLICT, "{body}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn language_model_settings_are_saved_and_bad_ones_refused() {
+    let dir = scratch_dir("llm-settings");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai.clone()));
+    let (code, _, body) = call(
+        state.clone(),
+        "PUT",
+        "/api/config",
+        Some(serde_json::json!({ "ai": {
+            "llm_enabled": true,
+            "llm_url": "http://127.0.0.1:11434/",
+            "llm_model": "llama3.2:3b",
+            "llm_candidates_per_scan": 500
+        }})),
+    )
+    .await;
+    assert!(code.is_success(), "{body}");
+    let applied = ai.settings.load_full();
+    assert!(applied.llm_enabled);
+    assert_eq!(applied.llm_url, "http://127.0.0.1:11434");
+    assert_eq!(applied.llm_model, "llama3.2:3b");
+    assert_eq!(applied.llm_candidates_per_scan, 32);
+    let (code, _, body) = call(
+        state,
+        "PUT",
+        "/api/config",
+        Some(serde_json::json!({ "ai": { "llm_url": "file:///etc/passwd" } })),
+    )
+    .await;
+    assert_eq!(code, StatusCode::BAD_REQUEST, "{body}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

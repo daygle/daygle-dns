@@ -6,6 +6,7 @@
   import AiExemptions from './AiExemptions.svelte';
   import AiVerdicts from './AiVerdicts.svelte';
   import AiSettings from './AiSettings.svelte';
+  import AiLlm from './AiLlm.svelte';
 
   // `canEdit` is false for read-only accounts, who get no Settings tab.
   let { canEdit = true } = $props();
@@ -38,6 +39,12 @@
         'Domains the AI will never block. Remove one when it is no longer needed.',
     },
     {
+      id: 'llm',
+      label: 'Language Model',
+      tagline:
+        'An optional local language model (Ollama) that reads the pages the AI fetched, for the domains it is least sure of. Install it, pick and update models, and update Ollama here.',
+    },
+    {
       id: 'settings',
       label: 'Settings',
       tagline:
@@ -67,6 +74,8 @@
   <AiThreats />
 {:else if current.id === 'exemptions'}
   <AiExemptions />
+{:else if current.id === 'llm'}
+  <AiLlm />
 {:else}
   <AiVerdicts />
 {/if}

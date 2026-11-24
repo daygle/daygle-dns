@@ -332,6 +332,11 @@ export const api = {
   aiRollback: () => request('POST', '/ai/rollback'),
   aiModelStatus: () => request('GET', '/ai/model-status'),
   aiUpdateModels: () => request('POST', '/ai/update-models'),
+  aiLlm: () => request('GET', '/ai/llm'),
+  aiLlmTest: (body) => request('POST', '/ai/llm/test', body),
+  aiLlmPull: (model) => request('POST', '/ai/llm/pull', { model }),
+  aiLlmDelete: (model) => request('POST', '/ai/llm/delete', { model }),
+  aiLlmService: (action) => request('POST', '/ai/llm/service', { action }),
 };
 
  

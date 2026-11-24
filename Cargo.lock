@@ -923,6 +923,7 @@ dependencies = [
  "psl",
  "reqwest",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "tokenizers",

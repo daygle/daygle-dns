@@ -46,6 +46,7 @@ pub mod fasttext_backend;
 pub mod heuristic;
 pub mod intel;
 pub mod learn;
+pub mod llm;
 pub mod maintain;
 pub mod page;
 pub mod page_model;
@@ -141,6 +142,8 @@ pub struct AiEngine {
     page_model: Arc<page_model::PageModel>,
     /// Registration-date lookups for new threats.
     domain_age: Arc<age::DomainAge>,
+    /// The language-model server's management side (models, downloads).
+    llm: Arc<llm::LlmManager>,
 }
 
 impl AiEngine {
@@ -369,6 +372,7 @@ impl AiEngine {
             intel,
             page_model,
             domain_age,
+            llm: llm::LlmManager::new(),
         }))
     }
 
@@ -398,6 +402,11 @@ impl AiEngine {
     }
 
     /// Each threat feed with its download state, for the status API.
+    /// The language-model server's management side, for the console.
+    pub fn llm(&self) -> Arc<llm::LlmManager> {
+        self.llm.clone()
+    }
+
     pub fn intel_status(&self) -> Vec<serde_json::Value> {
         self.intel.status()
     }

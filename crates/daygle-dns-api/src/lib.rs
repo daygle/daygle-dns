@@ -71,6 +71,11 @@
 //! | `GET`    | `/api/ai/model-health`            | loaded threat model scored on held-out threat names |
 //! | `POST`   | `/api/ai/model-health`            | score the same pinned sample after a model change |
 //! | `POST`   | `/api/ai/update-models`           | begin a models-only update from the latest release |
+//! | `GET`    | `/api/ai/llm`                     | the language-model reader: settings, Ollama server, models, downloads |
+//! | `POST`   | `/api/ai/llm/test`                | ask the language model about a sample page |
+//! | `POST`   | `/api/ai/llm/pull`                | download or update a model on the Ollama server |
+//! | `POST`   | `/api/ai/llm/delete`              | delete a model from the Ollama server |
+//! | `POST`   | `/api/ai/llm/service`             | install, update or remove a local Ollama (root update service) |
 //!
 //! Auth endpoints: `POST /api/auth/login`, `POST /api/auth/logout`,
 //! `GET /api/auth/me`, plus the one-time first-run setup
@@ -710,6 +715,11 @@ pub fn router(state: AppState) -> Router {
             get(handlers::ai_model_health).post(handlers::ai_model_health_probe),
         )
         .route("/ai/update-models", post(handlers::ai_update_models))
+        .route("/ai/llm", get(handlers::ai_llm_status))
+        .route("/ai/llm/test", post(handlers::ai_llm_test))
+        .route("/ai/llm/pull", post(handlers::ai_llm_pull))
+        .route("/ai/llm/delete", post(handlers::ai_llm_delete))
+        .route("/ai/llm/service", post(handlers::ai_llm_service))
         .route(
             "/config",
             get(handlers::config)

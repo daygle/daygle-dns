@@ -278,3 +278,55 @@ site to game.
 
 The page stage gets at most 90 seconds per scan cycle. Private, loopback and
 link-local addresses are refused, and redirects are checked the same way.
+
+## Language model (`ai.llm_enabled`)
+
+Off by default. An optional local language model, served by
+[Ollama](https://ollama.com), reads the pages the page stage already kept,
+for the verdicts the AI is least sure of. It never contacts a site itself.
+
+| Verdict | What the language model may do |
+|---|---|
+| A threat below the block threshold, not on a threat feed | Raise it: to 99% (blocks) when the verdict is at least 50% and the model reads the page as a threat at 85% or more; otherwise by 10%, never above 95%. Never lower it. With `ai.page_rule = "evidence"` it is only recorded. |
+| A category below 50% | Replace it with the category the model names, when the model is surer than the name was and the label is an ordinary category the categorizer knows. |
+
+The page is written by the site being judged, and a language model can be
+talked into things by what it reads. So the model is told the page is
+untrusted, its answer is constrained to a JSON schema with the label list as
+an enum, it can only strengthen a threat, and its labels (`backend = llm`)
+are never used for retraining. Your own labels and exemptions win.
+
+Each answer takes seconds on a CPU, so at most `ai.llm_candidates_per_scan`
+(6) pages are read per scan cycle, threats first, within 3 minutes and
+`ai.llm_timeout_secs` (60) per answer. An unreachable server is skipped
+until the next cycle.
+
+| Setting | Default |
+|---|---|
+| `ai.llm_enabled` | `false` |
+| `ai.llm_url` | `http://127.0.0.1:11434` |
+| `ai.llm_model` | `qwen2.5:1.5b` |
+| `ai.llm_candidates_per_scan` | `6` (1-32) |
+| `ai.llm_timeout_secs` | `60` (5-600) |
+
+### Installing and managing Ollama
+
+- **From the console**: AI > Language Model > Install Ollama. It goes
+  through the same root update service as a server update, runs Ollama's
+  official installer, keeps the server on `127.0.0.1` (its API has no
+  login) at low CPU and disk priority, and downloads the default model. It
+  needs about 3.5 GB of memory in total. The same page updates Ollama
+  (models are kept) and removes it.
+- **From the installer**: `DAYGLE_DNS_OLLAMA=1` installs or updates it,
+  `DAYGLE_DNS_OLLAMA_MODEL` picks the model, `DAYGLE_DNS_OLLAMA=0` removes it.
+- **Bring your own**: point `ai.llm_url` at an Ollama running elsewhere, for
+  example a more powerful machine on your network. Manage that server where
+  it runs; the console still lists, downloads, updates and deletes its
+  models.
+
+Models are downloaded, updated (pulling the same name again fetches only
+what changed) and deleted on the same page, with a progress bar. Smaller
+models answer faster: `qwen2.5:0.5b` (about 0.4 GB) on slow or older CPUs,
+`qwen2.5:1.5b` (about 1 GB) as the default, `qwen2.5:3b` or `llama3.2:3b`
+(about 2 GB) where the CPU is fast enough. Ollama runs on CPUs without AVX2,
+more slowly. Test on that page shows how long one answer takes.

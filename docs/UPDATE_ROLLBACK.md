@@ -11,7 +11,14 @@ suite. They exercise the production apply script with stubbed `systemctl` and
 ```bash
 cargo test -p daygle-dns-api --test models_update_apply
 cargo test -p daygle-dns-api --test install_update_apply
+cargo test -p daygle-dns-api --test ollama_update_apply
 ```
+
+The same service also runs a third kind, `ollama`, when an admin installs,
+updates or removes a local Ollama from AI > Language Model. Its `apply.bin`
+holds only the action word (`install`, `update` or `remove`), and the root
+step runs the root-owned `ollama-setup.sh` the installer put beside
+`update-apply.sh`. It never restarts or rolls back the DNS service.
 
 A host rehearsal is still the only check of the real systemd unit, the real
 health endpoint, and privilege separation through `runuser`.
@@ -22,7 +29,7 @@ health endpoint, and privilege separation through `runuser`.
 | --- | --- |
 | `/var/lib/daygle-dns/updates` | Service-writable hand-off directory watched by `daygle-dns-update.path` |
 | `/var/lib/daygle-dns/updates/staging/apply.json` | Staged manifest (`kind`, `version`, `sha256`) |
-| `/var/lib/daygle-dns/updates/staging/apply.bin` | Staged installer payload or models tar.gz |
+| `/var/lib/daygle-dns/updates/staging/apply.bin` | Staged installer payload, models tar.gz, or an Ollama action word |
 | `/tmp/daygle-dns-update/state.json` | Current phase the console polls |
 | `/tmp/daygle-dns-update/update.log` | Service-side download and build log |
 | `/tmp/daygle-dns-update/apply.log` | Root apply log, including probe and rollback lines |

@@ -70,6 +70,17 @@ pub struct VerdictPage {
     pub offset: u32,
 }
 
+/// One verdict for the language model to read, with its page.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LlmCandidate {
+    pub domain: String,
+    pub channel: String,
+    pub category: String,
+    pub confidence: f32,
+    pub title: String,
+    pub text: String,
+}
+
 /// One stored verdict row.
 #[derive(Debug, Clone)]
 pub struct VerdictRow {
@@ -175,6 +186,7 @@ const VERDICTS_TABLE: &str = "CREATE TABLE IF NOT EXISTS ai_verdicts (
     expires_at    INTEGER NOT NULL DEFAULT 0,
     last_seen     INTEGER NOT NULL DEFAULT 0,
     page_fetched_at INTEGER NOT NULL DEFAULT 0,
+    llm_checked_at INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (domain, channel)
 )";
 
@@ -347,6 +359,13 @@ impl AiStore {
         if !has_column("page_fetched_at")? {
             conn.execute(
                 "ALTER TABLE ai_verdicts ADD COLUMN page_fetched_at INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        // When the language model last read this verdict's page.
+        if !has_column("llm_checked_at")? {
+            conn.execute(
+                "ALTER TABLE ai_verdicts ADD COLUMN llm_checked_at INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
         }
@@ -919,7 +938,7 @@ impl AiStore {
         let mut stmt = conn.prepare(
             "SELECT channel, category, domain FROM ai_verdicts v
              WHERE status = 'classified' AND severity != 'disputed' AND category != ''
-               AND backend != 'page'
+               AND backend NOT IN ('page', 'llm')
                AND expires_at > ?3
                AND confidence >= CASE channel WHEN 'threat' THEN ?2 ELSE ?1 END
                AND NOT EXISTS (
@@ -997,6 +1016,95 @@ impl AiStore {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(collected)
+    }
+
+    /// Verdicts for the language model to read, threats first: a threat
+    /// below `block_threshold` that no feed lists, or a content verdict
+    /// below `below`, whose page text is kept and which the model has not
+    /// read since the verdict was made. Overridden and relabelled domains
+    /// are settled and left out.
+    pub fn llm_candidates(
+        &self,
+        now_epoch: i64,
+        block_threshold: f32,
+        below: f32,
+        limit: u32,
+    ) -> Result<Vec<LlmCandidate>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT v.domain, v.channel, v.category, v.confidence, p.title, p.text
+             FROM ai_verdicts v JOIN ai_page_texts p ON p.domain = v.domain
+             WHERE v.expires_at > ?1 AND v.llm_checked_at < v.classified_at
+               AND (
+                   (v.channel = 'threat' AND v.status = 'classified' AND v.severity = 'threat'
+                    AND v.confidence < ?2 AND instr(v.evidence, ?5) = 0)
+                OR (v.channel = 'content' AND v.status IN ('classified', 'skipped')
+                    AND v.confidence < ?3 AND v.backend != 'page')
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM ai_overrides o
+                   WHERE o.domain = v.domain AND o.action IN ('allow', 'not_threat')
+               )
+               AND NOT EXISTS (SELECT 1 FROM ai_category_overrides c WHERE c.domain = v.domain)
+             ORDER BY v.channel = 'content', v.observations DESC, v.domain
+             LIMIT ?4",
+        )?;
+        let rows = stmt
+            .query_map(
+                params![
+                    now_epoch,
+                    block_threshold,
+                    below,
+                    limit as i64,
+                    crate::evidence::LISTED_NOTE
+                ],
+                |r| {
+                    Ok(LlmCandidate {
+                        domain: r.get(0)?,
+                        channel: r.get(1)?,
+                        category: r.get(2)?,
+                        confidence: r.get(3)?,
+                        title: r.get(4)?,
+                        text: r.get(5)?,
+                    })
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Record what the language model said on one verdict: always a note in
+    /// the evidence and the read time; with `confidence`, a threat's raised
+    /// confidence; with `category`, a content verdict's new label, marked
+    /// as the language model's (`backend = 'llm'`) so it is never trained
+    /// on.
+    pub fn record_llm_reading(
+        &self,
+        domain: &str,
+        channel: &str,
+        note: &str,
+        confidence: Option<f32>,
+        category: Option<&str>,
+    ) -> Result<bool> {
+        let conn = self.lock()?;
+        let changed = conn.execute(
+            "UPDATE ai_verdicts
+             SET evidence = CASE
+                     WHEN ?5 IS NOT NULL THEN ?3
+                     WHEN evidence = '' THEN ?3
+                     WHEN length(evidence) > 2000 THEN evidence
+                     ELSE evidence || char(10) || ?3
+                 END,
+                 confidence = COALESCE(?4, confidence),
+                 category = COALESCE(?5, category),
+                 status = CASE WHEN ?5 IS NOT NULL THEN 'classified' ELSE status END,
+                 severity = CASE WHEN ?5 IS NOT NULL THEN 'info' ELSE severity END,
+                 backend = CASE WHEN ?5 IS NOT NULL THEN 'llm' ELSE backend END,
+                 llm_checked_at = ?6
+             WHERE domain = ?1 AND channel = ?2",
+            params![domain, channel, note, confidence, category, now_epoch()],
+        )?;
+        Ok(changed > 0)
     }
 
     /// Domains whose category the categorizer is unsure of (below `below`

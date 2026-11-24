@@ -69,6 +69,11 @@ const PATHS: &[(&str, &[Operation])] = &[
         ],
     ),
     ("/ai/update-models", &[("post", "Ai update models")]),
+    ("/ai/llm", &[("get", "Ai llm status")]),
+    ("/ai/llm/test", &[("post", "Ai llm test")]),
+    ("/ai/llm/pull", &[("post", "Ai llm pull")]),
+    ("/ai/llm/delete", &[("post", "Ai llm delete")]),
+    ("/ai/llm/service", &[("post", "Ai llm service")]),
     (
         "/config",
         &[
@@ -2976,6 +2981,128 @@ fn ai_schemas() -> Value {
                 "started": { "type": "boolean" },
                 "pid": { "type": "integer", "description": "The privileged apply process." }
             }
+        },
+        "AiLlmModel": {
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" },
+                "size": { "type": "integer", "description": "Bytes on disk." },
+                "modified_at": { "type": "string" },
+                "parameter_size": { "type": "string" },
+                "quantization": { "type": "string" }
+            }
+        },
+        "AiLlmPull": {
+            "type": "object",
+            "description": "A model download in progress, or the last one.",
+            "properties": {
+                "model": { "type": "string" },
+                "status": { "type": "string" },
+                "completed": { "type": "integer" },
+                "total": { "type": "integer" },
+                "done": { "type": "boolean" },
+                "error": { "type": ["string", "null"] },
+                "started_at": { "type": "integer" },
+                "finished_at": { "type": ["integer", "null"] }
+            }
+        },
+        "AiLlmStatus": {
+            "type": "object",
+            "properties": {
+                "enabled": { "type": "boolean" },
+                "url": { "type": "string" },
+                "model": { "type": "string" },
+                "candidates_per_scan": { "type": "integer" },
+                "timeout_secs": { "type": "integer" },
+                "reachable": { "type": "boolean" },
+                "version": { "type": ["string", "null"] },
+                "error": { "type": ["string", "null"] },
+                "models": {
+                    "type": ["array", "null"],
+                    "items": schema_ref("AiLlmModel")
+                },
+                "model_present": { "type": "boolean" },
+                "pull": { "oneOf": [schema_ref("AiLlmPull"), { "type": "null" }] },
+                "latest_version": { "type": ["string", "null"] },
+                "update_available": { "type": "boolean" },
+                "service": {
+                    "type": "object",
+                    "properties": {
+                        "local": { "type": "boolean" },
+                        "manageable": {
+                            "type": "boolean",
+                            "description": "The console can install, update or remove this Ollama."
+                        },
+                        "installed": { "type": "boolean" },
+                        "operation": {
+                            "type": "object",
+                            "description": "The shared update state; Ollama work reports here."
+                        }
+                    }
+                },
+                "suggested_models": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string" },
+                            "note": { "type": "string" }
+                        }
+                    }
+                }
+            }
+        },
+        "AiLlmTestInput": {
+            "type": "object",
+            "properties": {
+                "url": { "type": "string", "description": "Try this address instead of the saved one." },
+                "model": { "type": "string", "description": "Try this model instead of the saved one." }
+            }
+        },
+        "AiLlmTest": {
+            "type": "object",
+            "required": ["ok"],
+            "properties": {
+                "ok": { "type": "boolean" },
+                "version": { "type": "string" },
+                "seconds": { "type": "number", "description": "How long the answer took." },
+                "category": { "type": ["string", "null"] },
+                "threat": { "type": "boolean" },
+                "confidence": { "type": "number" },
+                "reason": { "type": "string" },
+                "error": { "type": "string" }
+            }
+        },
+        "AiLlmModelInput": {
+            "type": "object",
+            "required": ["model"],
+            "properties": {
+                "model": { "type": "string", "description": "An Ollama model name, e.g. `qwen2.5:1.5b`." }
+            }
+        },
+        "AiLlmServiceInput": {
+            "type": "object",
+            "required": ["action"],
+            "properties": {
+                "action": { "type": "string", "enum": ["install", "update", "remove"] }
+            }
+        },
+        "AiLlmStarted": {
+            "type": "object",
+            "required": ["started"],
+            "properties": {
+                "started": { "type": "boolean" },
+                "model": { "type": "string" },
+                "action": { "type": "string" }
+            }
+        },
+        "AiLlmDeleted": {
+            "type": "object",
+            "required": ["deleted"],
+            "properties": {
+                "deleted": { "type": "boolean" },
+                "model": { "type": "string" }
+            }
         }
     })
 }
@@ -3734,6 +3861,98 @@ fn ai_operation(path: &str, method: &str) -> Option<Value> {
                 ),
                 "400": json!({
                     "description": "The sample is empty, too large, or not a pair of label and domain.",
+                    "content": { "application/json": { "schema": error } }
+                })
+            }
+        })),
+        ("get", "/ai/llm") => Some(json!({
+            "responses": {
+                "200": json_response(
+                    "The language-model reader: settings, the Ollama server, its models, \
+                        the download in progress and what the console can manage.",
+                    schema_ref("AiLlmStatus"),
+                ),
+                "404": ai_unavailable
+            }
+        })),
+        ("post", "/ai/llm/test") => Some(json!({
+            "requestBody": request_body(
+                schema_ref("AiLlmTestInput"),
+                "Optional address and model to try instead of the saved ones.",
+                false,
+            ),
+            "responses": {
+                "200": json_response(
+                    "What the model said about a sample page, or why it could not answer.",
+                    schema_ref("AiLlmTest"),
+                ),
+                "400": json!({
+                    "description": "Not an address or model name.",
+                    "content": { "application/json": { "schema": error } }
+                }),
+                "404": ai_unavailable
+            }
+        })),
+        ("post", "/ai/llm/pull") => Some(json!({
+            "requestBody": request_body(
+                schema_ref("AiLlmModelInput"),
+                "The model to download or update.",
+                true,
+            ),
+            "responses": {
+                "202": json_response(
+                    "The download started; `GET /ai/llm` reports its progress.",
+                    schema_ref("AiLlmStarted"),
+                ),
+                "400": json!({
+                    "description": "Not a model name.",
+                    "content": { "application/json": { "schema": error } }
+                }),
+                "404": ai_unavailable,
+                "409": json!({
+                    "description": "Another download is still running.",
+                    "content": { "application/json": { "schema": error } }
+                })
+            }
+        })),
+        ("post", "/ai/llm/delete") => Some(json!({
+            "requestBody": request_body(
+                schema_ref("AiLlmModelInput"),
+                "The model to delete.",
+                true,
+            ),
+            "responses": {
+                "200": json_response("The model was deleted.", schema_ref("AiLlmDeleted")),
+                "400": json!({
+                    "description": "Not a model name.",
+                    "content": { "application/json": { "schema": error } }
+                }),
+                "404": ai_unavailable,
+                "502": json!({
+                    "description": "The Ollama server refused or could not be reached.",
+                    "content": { "application/json": { "schema": error } }
+                })
+            }
+        })),
+        ("post", "/ai/llm/service") => Some(json!({
+            "requestBody": request_body(
+                schema_ref("AiLlmServiceInput"),
+                "What to do with the local Ollama server.",
+                true,
+            ),
+            "responses": {
+                "202": json_response(
+                    "Handed to the root update service; `GET /ai/llm` reports \
+                        `service.operation` until `done`/`error`.",
+                    schema_ref("AiLlmStarted"),
+                ),
+                "400": json!({
+                    "description": "Not install, update or remove.",
+                    "content": { "application/json": { "schema": error } }
+                }),
+                "404": ai_unavailable,
+                "409": json!({
+                    "description": "The address is not on this machine, or an update is running.",
                     "content": { "application/json": { "schema": error } }
                 })
             }

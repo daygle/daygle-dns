@@ -60,6 +60,13 @@ enum Command {
     /// AI settings are only replaced when they are still exactly the
     /// defaults - anything the console actively edited is left alone.
     SeedAiSettings,
+    /// Turn the AI's language-model reader (Ollama) on or off in the
+    /// database overlay, which wins over the config file. `install.sh` runs
+    /// it for `DAYGLE_DNS_OLLAMA=1`/`0`. Stop the service first.
+    SetLanguageModel {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
     /// Put web console access back to plain HTTP on `api.port`.
     ///
     /// For when a Settings change (HTTPS only, a port, a certificate) left
@@ -176,6 +183,38 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        return;
+    }
+
+    if let Some(Command::SetLanguageModel { state }) = &args.command {
+        let config = load_config_or_exit(&args.config);
+        let store = match ZoneStore::open(&config.authoritative.database) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "daygle-dns: cannot open zone database '{}': {e}",
+                    config.authoritative.database
+                );
+                std::process::exit(1);
+            }
+        };
+        let mut overlay = match store.get_runtime_settings::<RuntimeSettings>() {
+            Ok(Some(overlay)) => overlay,
+            Ok(None) => RuntimeSettings::capture(&config),
+            Err(e) => {
+                eprintln!("daygle-dns: cannot read runtime settings: {e}");
+                std::process::exit(1);
+            }
+        };
+        let ai = overlay
+            .ai
+            .get_or_insert_with(|| AiUpdate::capture_ai(&config.ai));
+        ai.llm_enabled = Some(state == "on");
+        if let Err(e) = store.put_runtime_settings(&overlay) {
+            eprintln!("daygle-dns: cannot write runtime settings: {e}");
+            std::process::exit(1);
+        }
+        println!("language model reader turned {state}");
         return;
     }
 

@@ -150,11 +150,12 @@ jobs:
           install.sh
           crates/daygle-dns-api/src/update.sh
           crates/daygle-dns-api/src/update-apply.sh
+          crates/daygle-dns-api/src/ollama-setup.sh
 
       - name: Parse the scripts as POSIX sh
         run: |
           set -eu
-          for script in install.sh crates/daygle-dns-api/src/update.sh crates/daygle-dns-api/src/update-apply.sh; do
+          for script in install.sh crates/daygle-dns-api/src/update.sh crates/daygle-dns-api/src/update-apply.sh crates/daygle-dns-api/src/ollama-setup.sh; do
             sh -n "$script"
             echo "sh -n $script: ok"
           done

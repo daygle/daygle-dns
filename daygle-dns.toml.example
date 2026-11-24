@@ -683,6 +683,16 @@ auto_block_categories = ["malware", "phishing", "scam"]
 # threat_feeds = true
 # network_evidence = true
 # domain_age = true
+# Language model (docs/AI.md): a local Ollama server reads the pages kept
+# above, for the verdicts the AI is least sure of. It can raise a threat or
+# name an unsure domain's category, never clear a threat, and its labels are
+# never trained on. Install Ollama from the console (AI > Language Model) or
+# with the installer's DAYGLE_DNS_OLLAMA=1.
+# llm_enabled = false
+# llm_url = "http://127.0.0.1:11434"
+# llm_model = "qwen2.5:1.5b"
+# llm_candidates_per_scan = 6
+# llm_timeout_secs = 60
 block_threshold = 0.99
 confidence_floor = 0.2
 category_confidence_floor = 0.2
