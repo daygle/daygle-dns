@@ -1570,7 +1570,7 @@ impl Default for AiSettings {
             llm_url: DEFAULT_LLM_URL.to_string(),
             llm_model: DEFAULT_LLM_MODEL.to_string(),
             llm_candidates_per_scan: 6,
-            llm_timeout_secs: 60,
+            llm_timeout_secs: 120,
         }
     }
 }

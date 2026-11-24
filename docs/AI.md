@@ -298,7 +298,7 @@ are never used for retraining. Your own labels and exemptions win.
 
 Each answer takes seconds on a CPU, so at most `ai.llm_candidates_per_scan`
 (6) pages are read per scan cycle, threats first, within 3 minutes and
-`ai.llm_timeout_secs` (60) per answer. An unreachable server is skipped
+`ai.llm_timeout_secs` (120) per answer. An unreachable server is skipped
 until the next cycle.
 
 | Setting | Default |
@@ -307,7 +307,7 @@ until the next cycle.
 | `ai.llm_url` | `http://127.0.0.1:11434` |
 | `ai.llm_model` | `qwen2.5:1.5b` |
 | `ai.llm_candidates_per_scan` | `6` (1-32) |
-| `ai.llm_timeout_secs` | `60` (5-600) |
+| `ai.llm_timeout_secs` | `120` (5-600) |
 
 ### Installing and managing Ollama
 
@@ -330,3 +330,14 @@ models answer faster: `qwen2.5:0.5b` (about 0.4 GB) on slow or older CPUs,
 `qwen2.5:1.5b` (about 1 GB) as the default, `qwen2.5:3b` or `llama3.2:3b`
 (about 2 GB) where the CPU is fast enough. Ollama runs on CPUs without AVX2,
 more slowly. Test on that page shows how long one answer takes.
+
+The first answer after Ollama starts (or after the model has been idle for
+10 minutes) also loads the model into memory, which can take minutes on a
+CPU. Test allows 5 minutes for it; scans use the answer time limit. If Test
+reports no answer in time, run it again once the model is loaded, raise the
+limit, or pick a smaller model. If it reports the server dropped the
+request, check `journalctl -u ollama` (often too little memory). The
+console installs Ollama as the first process the kernel ends when memory
+runs out, so a model that does not fit never takes the DNS server down;
+re-run Update on the Language Model tab to apply that to an existing
+install.

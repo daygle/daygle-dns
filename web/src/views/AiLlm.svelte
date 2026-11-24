@@ -22,6 +22,7 @@
   const RUNNING = ['preparing', 'downloading', 'cloning', 'building', 'installing', 'applying', 'restarting', 'rolling_back'];
 
   const pulling = $derived(!!llm?.pull && !llm.pull.done);
+  const testRunning = $derived(!!llm?.test?.running);
   const operation = $derived(llm?.service?.operation || null);
   // The shared update state also reports server updates: only show it here
   // when it is about Ollama.
@@ -65,7 +66,7 @@
   function schedule() {
     clearTimeout(pollTimer);
     if (destroyed) return;
-    if (pulling || serviceRunning) {
+    if (pulling || serviceRunning || testRunning) {
       pollTimer = setTimeout(() => load(true), 2000);
     }
   }
@@ -94,17 +95,20 @@
     }
   }
 
+  // The question runs on the server; the page checks back for the answer.
   async function test() {
     testing = true;
     testResult = null;
     try {
-      testResult = await api.aiLlmTest({ url: form.url.trim(), model: form.model.trim() });
+      await api.aiLlmTest({ url: form.url.trim(), model: form.model.trim() });
+      await load(true);
     } catch (e) {
       testResult = { ok: false, error: formatApiError(e) };
     } finally {
       testing = false;
     }
   }
+  const shownTest = $derived(testResult || (llm?.test && !llm.test.running ? llm.test : null));
 
   async function pull(model) {
     const name = (model || '').trim();
@@ -234,18 +238,18 @@
     {#if isAdmin}
       <div class="row" style="margin-top: 10px; gap: 10px; flex-wrap: wrap">
         <button onclick={() => save()} disabled={busy}>{busy ? 'Saving...' : 'Save'}</button>
-        <button class="secondary" onclick={test} disabled={testing}>{testing ? 'Asking the model...' : 'Test'}</button>
+        <button class="secondary" onclick={test} disabled={testing || testRunning}>{testing || testRunning ? 'Asking the model (the first answer can take a few minutes)...' : 'Test'}</button>
       </div>
     {/if}
-    {#if testResult}
+    {#if shownTest}
       <p class="small" style="margin: 10px 0 0">
-        {#if testResult.ok}
-          Answered in {testResult.seconds.toFixed(1)}s: a sample careers page reads as
-          <strong>{testResult.category ? titleCase(testResult.category) : 'no listed category'}</strong>
-          ({Math.round(testResult.confidence * 100)}%){testResult.reason ? `, "${testResult.reason}"` : ''}.
-          {#if testResult.seconds > 30}<span class="muted"> That is slow: a smaller model will read more pages per scan.</span>{/if}
+        {#if shownTest.ok}
+          {shownTest.model ? `${shownTest.model} answered` : 'Answered'} in {(shownTest.seconds || 0).toFixed(1)}s: a sample careers page reads as
+          <strong>{shownTest.category ? titleCase(shownTest.category) : 'no listed category'}</strong>
+          ({Math.round(shownTest.confidence * 100)}%){shownTest.reason ? `, "${shownTest.reason}"` : ''}.
+          {#if shownTest.seconds > 30}<span class="muted"> That is slow: a smaller model will read more pages per scan.</span>{/if}
         {:else}
-          <span style="color: var(--danger)">Test failed: {testResult.error}</span>
+          <span style="color: var(--danger)">Test failed: {shownTest.error}</span>
         {/if}
       </p>
     {/if}
