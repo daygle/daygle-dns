@@ -1766,9 +1766,11 @@ The language-model reader talks to an Ollama server at `ai.llm_url`.
 model is among them (`model_present`), the model download in progress or the
 last one (`pull`: `model`, `status`, `completed`, `total`, `done`, `error`),
 the newest Ollama release (`latest_version`, `update_available`; looked up on
-GitHub at most every 6 hours, and only while a server answers), a few
-`suggested_models`, and `service`: whether the address is this machine
-(`local`), whether the console can install, update or remove it
+GitHub at most every 6 hours, and only while a server answers, with a lookup
+that found nothing retried after 10 minutes so an outage does not hide the
+badge for the rest of the day), a few `suggested_models`, and `service`:
+whether the address is this machine (`local`), whether the console can
+install, update or remove it
 (`manageable`: a local address on a host with the update service),
 `installed`, and the shared update state as `operation`.
 
