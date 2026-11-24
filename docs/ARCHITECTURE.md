@@ -323,14 +323,9 @@ see [AI.md](AI.md).
   separate passes rather than one label that has to serve both:
   `Channel::Content` categorizes (`news`, `shopping`, ...) and stores a
   label only, and `Channel::Threat` reports detected threats and is the
-  only channel that can block on its own. With the shared model it reports
-  only the labels in `ai.auto_block_categories`; with a dedicated
-  `ai.threat_model_path` every label that model produces is a threat, so
-  detection and blocking are separate decisions (the block snapshot applies
-  `block_threshold`, and `auto_block_categories` only to the shared
-  classifier). Each
-  has its own model (`ai.category_model_path` / `ai.threat_model_path`,
-  falling back to `ai.model_path`), its own confidence floor
+  only channel that can block on its own. It reports only the labels in
+  `ai.auto_block_categories`. Both run `ai.model_path` (the content channel
+  can have its own `ai.category_model_path`); each has its own confidence floor
   (`ai.category_confidence_floor` / `ai.confidence_floor`) and its own
   verdict TTL (`ai.category_ttl_secs` / `ai.threat_ttl_secs`).
   `channel::ChannelBackend` is what scopes a classifier to one job; a
@@ -367,10 +362,7 @@ see [AI.md](AI.md).
   fresh *threat-channel* verdicts (disputed ones excluded) whose confidence
   meets `block_threshold`, is not vetoed by an operator override (`allow`
   exempts it, `not_threat` records a correction that suppresses it while
-  keeping the verdict), and - when the threat channel shares the classifier
-  - whose category is in `auto_block_categories`; a dedicated
-  `threat_model_path` is a detector of its own, so every label it produces
-  qualifies.
+  keeping the verdict), and whose category is in `auto_block_categories`.
   Content-channel rows never reach this snapshot, whatever they are called.
   Whether the snapshot applies is decided per client: the global `ai.mode`,
   unless the first enabled filtering group covering the client sets

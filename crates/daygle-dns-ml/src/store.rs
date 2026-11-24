@@ -58,9 +58,8 @@ pub struct VerdictFilter<'a> {
     /// threat channel.
     pub channel: Option<&'a str>,
     /// The labels the threat list may show: those currently treated as
-    /// threats. `None` applies no label filter (a dedicated threat model
-    /// reports whatever it produces); an empty slice matches nothing (no
-    /// label is a threat). Only the threat channel reads it.
+    /// threats. `None` applies no label filter; an empty slice matches
+    /// nothing (no label is a threat). Only the threat channel reads it.
     pub threat_labels: Option<&'a [String]>,
 }
 

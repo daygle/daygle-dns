@@ -130,10 +130,8 @@ pub struct AiEngine {
     categories: Arc<ArcSwap<CategorySnapshot>>,
     plugin: Arc<plugin::AiBlockPlugin>,
     query_store: Arc<daygle_dns_authoritative::ZoneStore>,
-    /// The shared classifier the scanner maintains for itself.
+    /// The classifier the scanner maintains for itself.
     shared: Maintained,
-    /// The dedicated threat model it maintains, when one is configured.
-    threat: Maintained,
     maintenance: Arc<maintain::Maintenance>,
     /// Rebuilds the threat channel (live model, current verifier settings).
     reload_threat: Arc<ReloadThreat>,
@@ -181,7 +179,6 @@ impl AiEngine {
         // never silently ignored, and a damaged learned file never stops the
         // AI from starting.
         let learned_shared = learn::learned_model_path(&database_path);
-        let learned_threat = database_path.with_file_name("learned-threat.bin");
         let learned_reference = database_path.with_file_name(LEARNED_REFERENCE_FILE);
         let pick = |learned: &Path, configured: &str, what: &str| -> bool {
             if !prefer_learned(learned, configured) {
@@ -209,24 +206,13 @@ impl AiEngine {
             true
         };
         let shared_learned = pick(&learned_shared, &settings.model_path, "classifier");
-        let threat_learned = settings.dedicated_threat_model()
-            && pick(&learned_threat, &settings.threat_model_path, "threat model");
         let shared_path = if shared_learned {
             learned_shared.to_string_lossy().into_owned()
         } else {
             settings.model_path.clone()
         };
-        let threat_path = if !settings.dedicated_threat_model() {
-            shared_path.clone()
-        } else if threat_learned {
-            learned_threat.to_string_lossy().into_owned()
-        } else {
-            settings.threat_model_path.clone()
-        };
-        // One model per channel: each channel uses its own path when
-        // configured and falls back to the shared model, so a deployment can
-        // run a wide categorizer and a narrow, high-precision threat detector
-        // side by side - or one model for both.
+        // The threat channel always runs the shared model; the content
+        // channel can run a categorizer of its own.
         let content_path = if dedicated_category_model(settings) {
             settings.category_model_path.clone()
         } else {
@@ -234,7 +220,7 @@ impl AiEngine {
         };
         let content = content_channel(&content_path, &logs)?;
         let threat = threat_channel(
-            &threat_path,
+            &shared_path,
             settings,
             &settings_swap,
             &logs,
@@ -249,55 +235,22 @@ impl AiEngine {
         let snapshot = Arc::new(ArcSwap::from_pointee(BlockSnapshot::new()));
         let categories = Arc::new(ArcSwap::from_pointee(CategorySnapshot::new()));
 
-        let new_maintained = |role: learn::Role, learned: &Path, live: String, active: bool| {
-            let model = Arc::new(ArcSwap::from_pointee(live));
+        let shared = {
+            let model = Arc::new(ArcSwap::from_pointee(shared_path));
             Maintained {
-                learned: learned.to_path_buf(),
-                active: Arc::new(std::sync::atomic::AtomicBool::new(active)),
+                learned: learned_shared.clone(),
+                active: Arc::new(std::sync::atomic::AtomicBool::new(shared_learned)),
                 retrainer: Arc::new(maintain::Retrainer::new(
-                    role,
                     store.clone(),
                     settings_swap.clone(),
                     logs.clone(),
-                    learned.to_path_buf(),
+                    learned_shared.clone(),
                     model.clone(),
                 )),
                 model,
             }
         };
-        let shared = new_maintained(
-            learn::Role::Shared,
-            &learned_shared,
-            shared_path,
-            shared_learned,
-        );
-        let threat = new_maintained(
-            learn::Role::Threat,
-            &learned_threat,
-            if settings.dedicated_threat_model() {
-                threat_path
-            } else {
-                String::new()
-            },
-            threat_learned,
-        );
         shared.retrainer.set_evidence(network.clone());
-        threat.retrainer.set_evidence(network.clone());
-
-        // The live threat model, whichever role holds it: what a reload of
-        // the threat channel (a new verifier reference) loads again.
-        let live_threat_model = {
-            let settings = settings_swap.clone();
-            let shared_model = shared.model.clone();
-            let threat_model = threat.model.clone();
-            move || {
-                if settings.load().dedicated_threat_model() {
-                    threat_model.load_full().to_string()
-                } else {
-                    shared_model.load_full().to_string()
-                }
-            }
-        };
 
         // Every model that goes live - a promotion, a manual retrain or a
         // rollback - goes through these.
@@ -319,45 +272,18 @@ impl AiEngine {
                 let content = (!dedicated_category_model(&current))
                     .then(|| content_channel(&file, &logs))
                     .transpose()?;
-                let threat = (!current.dedicated_threat_model())
-                    .then(|| {
-                        threat_channel(&file, &current, &settings, &logs, &reference, &network)
-                    })
-                    .transpose()?;
+                let threat =
+                    threat_channel(&file, &current, &settings, &logs, &reference, &network)?;
                 if let Some(content) = content {
                     content_swap.replace(content);
                 }
-                if let Some(threat) = threat {
-                    threat_swap.replace(threat);
-                }
+                threat_swap.replace(threat);
                 announce(&logs, path == learned, "classifier", &file);
                 model.store(Arc::new(file));
                 active.store(path == learned, std::sync::atomic::Ordering::Relaxed);
                 Ok(())
             })
         });
-        threat.retrainer.set_installer({
-            let settings = settings_swap.clone();
-            let logs = logs.clone();
-            let threat_swap = threat_swap.clone();
-            let model = threat.model.clone();
-            let active = threat.active.clone();
-            let learned = learned_threat.clone();
-            let reference = learned_reference.clone();
-            let network = network.clone();
-            Box::new(move |path: &Path| {
-                let current = settings.load_full();
-                let file = path.to_string_lossy().into_owned();
-                let channel =
-                    threat_channel(&file, &current, &settings, &logs, &reference, &network)?;
-                threat_swap.replace(channel);
-                announce(&logs, path == learned, "threat model", &file);
-                model.store(Arc::new(file));
-                active.store(path == learned, std::sync::atomic::Ordering::Relaxed);
-                Ok(())
-            })
-        });
-
         // Rebuild the threat channel from the live threat model and the
         // current settings: a new verifier reference, or the verifier
         // switched on or off, takes effect without a restart.
@@ -367,10 +293,11 @@ impl AiEngine {
             let threat_swap = threat_swap.clone();
             let reference = learned_reference.clone();
             let network = network.clone();
+            let live_model = shared.model.clone();
             Arc::new(move || {
                 let current = settings.load_full();
                 let channel = threat_channel(
-                    &live_threat_model(),
+                    &live_model.load_full(),
                     &current,
                     &settings,
                     &logs,
@@ -408,7 +335,6 @@ impl AiEngine {
         };
         let maintenance = Arc::new(maintain::Maintenance::new(
             shared.retrainer.clone(),
-            threat.retrainer.clone(),
             refresh_reference,
         ));
 
@@ -442,7 +368,6 @@ impl AiEngine {
             plugin,
             query_store,
             shared,
-            threat,
             maintenance,
             reload_threat,
             intel,
@@ -512,7 +437,7 @@ impl AiEngine {
         self.shared.record()
     }
 
-    /// The shared model's trials: a candidate in progress, a pause after a
+    /// The model's trials: a candidate in progress, a pause after a
     /// rejection, and past outcomes.
     pub fn learned_model_trial(&self) -> learn::Trial {
         self.shared.retrainer.trial()
@@ -523,27 +448,15 @@ impl AiEngine {
         self.shared.retrainer.has_previous()
     }
 
-    /// The maintenance state of one model, for the status API.
-    pub fn maintained_status(&self, role: learn::Role) -> serde_json::Value {
-        self.maintained(role).status()
-    }
-
-    fn maintained(&self, role: learn::Role) -> &Maintained {
-        match role {
-            learn::Role::Shared => &self.shared,
-            learn::Role::Threat => &self.threat,
-        }
-    }
-
-    /// The trials of `role`'s model.
-    pub fn model_trial(&self, role: learn::Role) -> learn::Trial {
-        self.maintained(role).retrainer.trial()
+    /// The model's maintenance state, for the status API.
+    pub fn maintained_status(&self) -> serde_json::Value {
+        self.shared.status()
     }
 
     /// Run the scheduled maintenance step now - judge a candidate whose
-    /// trial ended, or build one when due, for each maintained model, then
-    /// refresh the verifier reference. The scan loop calls the same step
-    /// after each cycle. Returns the shared model's build, if one ran.
+    /// trial ended, or build one when due, then refresh the verifier
+    /// reference. The scan loop calls the same step after each cycle.
+    /// Returns the build, if one ran.
     pub fn run_due_maintenance(&self) -> Option<Result<learn::TrainingStats>> {
         self.maintenance.run()
     }
@@ -554,20 +467,10 @@ impl AiEngine {
         self.shared.retrainer.rollback()
     }
 
-    /// Roll back `role`'s model.
-    pub fn rollback_model(&self, role: learn::Role) -> Result<()> {
-        self.maintained(role).retrainer.rollback()
-    }
-
-    /// Retrain the shared classifier now and put it live at once (the
+    /// Retrain the classifier now and put it live at once (the
     /// operator's explicit choice, so no shadow trial).
     pub fn retrain_learned_model(&self) -> Result<learn::TrainingStats> {
         self.shared.retrainer.retrain()
-    }
-
-    /// Retrain `role`'s model now and put it live at once.
-    pub fn retrain_model(&self, role: learn::Role) -> Result<learn::TrainingStats> {
-        self.maintained(role).retrainer.retrain()
     }
 
     /// Kick the scanner for one immediate cycle (used by the rescan API).
@@ -649,48 +552,45 @@ impl AiEngine {
         // already carries it, since while it was an ordinary category the
         // threat channel stored a `skipped` row. Both are bounded to the
         // domains in question and start the moment the list changes rather
-        // than at each verdict's TTL. A dedicated threat model reports every
-        // label it produces already, so nothing is withheld or stale there.
-        if !new.dedicated_threat_model() {
-            let removed: Vec<String> = old
-                .auto_block_categories
-                .iter()
-                .filter(|label| !new.is_auto_block_category(label))
-                .cloned()
-                .collect();
-            if !removed.is_empty() {
-                match self.store.delete_threats_for_labels(&removed) {
-                    Ok(deleted) if deleted > 0 => tracing::info!(
-                        labels = ?removed,
-                        deleted,
-                        "deleted threat verdicts for labels no longer treated as threats"
-                    ),
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(
-                        error = %e,
-                        "could not delete threat verdicts for removed labels"
-                    ),
-                }
+        // than at each verdict's TTL.
+        let removed: Vec<String> = old
+            .auto_block_categories
+            .iter()
+            .filter(|label| !new.is_auto_block_category(label))
+            .cloned()
+            .collect();
+        if !removed.is_empty() {
+            match self.store.delete_threats_for_labels(&removed) {
+                Ok(deleted) if deleted > 0 => tracing::info!(
+                    labels = ?removed,
+                    deleted,
+                    "deleted threat verdicts for labels no longer treated as threats"
+                ),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "could not delete threat verdicts for removed labels"
+                ),
             }
-            let added: Vec<String> = new
-                .auto_block_categories
-                .iter()
-                .filter(|label| !old.is_auto_block_category(label))
-                .cloned()
-                .collect();
-            if !added.is_empty() {
-                match self.store.requeue_threats_for_labels(&added) {
-                    Ok(queued) if queued > 0 => tracing::info!(
-                        labels = ?added,
-                        queued,
-                        "re-queued threat verdicts for newly declared threat labels"
-                    ),
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(
-                        error = %e,
-                        "could not re-queue threat verdicts for newly declared labels"
-                    ),
-                }
+        }
+        let added: Vec<String> = new
+            .auto_block_categories
+            .iter()
+            .filter(|label| !old.is_auto_block_category(label))
+            .cloned()
+            .collect();
+        if !added.is_empty() {
+            match self.store.requeue_threats_for_labels(&added) {
+                Ok(queued) if queued > 0 => tracing::info!(
+                    labels = ?added,
+                    queued,
+                    "re-queued threat verdicts for newly declared threat labels"
+                ),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "could not re-queue threat verdicts for newly declared labels"
+                ),
             }
         }
         self.refresh_snapshot_now();
@@ -722,14 +622,9 @@ impl AiEngine {
     }
 
     /// The model file the threat channel classifies with: the learned model
-    /// when one is active, otherwise the configured shared or dedicated model.
-    pub fn threat_model_path(&self) -> String {
-        let cfg = self.settings.load();
-        if cfg.dedicated_threat_model() {
-            self.threat.model.load_full().to_string()
-        } else {
-            self.shared.model.load_full().to_string()
-        }
+    /// when one is active, otherwise the configured one.
+    pub fn live_model_path(&self) -> String {
+        self.shared.model.load_full().to_string()
     }
 
     /// Snapshot accessor for the category snapshot (tests and diagnostics).
@@ -799,7 +694,6 @@ impl AiEngine {
 fn needs_restart(old: &AiSettings, new: &AiSettings) -> bool {
     old.model_path != new.model_path
         || old.category_model_path != new.category_model_path
-        || old.threat_model_path != new.threat_model_path
         || old.database != new.database
 }
 
@@ -812,8 +706,7 @@ fn verifier_changed(old: &AiSettings, new: &AiSettings) -> bool {
 }
 
 /// Whether the content channel runs a model of its own. Naming the shared
-/// model explicitly is the same as leaving the field empty, as for
-/// [`AiSettings::dedicated_threat_model`].
+/// model explicitly is the same as leaving the field empty.
 fn dedicated_category_model(settings: &AiSettings) -> bool {
     let category = settings.category_model_path.trim();
     !category.is_empty() && category != settings.model_path.trim()
@@ -1072,7 +965,6 @@ mod tests {
         live.auto_block_categories = vec!["scam".to_string()];
         assert!(!needs_restart(&old, &live));
         for change in [
-            |s: &mut AiSettings| s.threat_model_path = "/m/threat.bin".to_string(),
             |s: &mut AiSettings| s.category_model_path = "/m/cat.bin".to_string(),
             |s: &mut AiSettings| s.database = "/d/ai.db".to_string(),
         ] {

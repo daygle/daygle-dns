@@ -1405,20 +1405,13 @@ pub struct AiSettings {
     /// authoritative zone database.
     pub database: String,
     /// fastText supervised model (.bin) used for classification; empty uses
-    /// the built-in heuristic keyword backend. The default model for both
-    /// channels: `category_model_path` and `threat_model_path` override it
-    /// per channel.
+    /// the built-in heuristic keyword backend. The model for both channels;
+    /// `category_model_path` can give categorization a model of its own.
     pub model_path: String,
     /// Content-categorization model (`.bin`). Empty uses `model_path`, and
     /// the heuristic keyword rules when that is empty too. This channel only
     /// labels sites (`news`, `shopping`, ...): it never auto-blocks.
     pub category_model_path: String,
-    /// Threat-detection model (`.bin`). Empty uses `model_path`, and the
-    /// heuristic keyword rules when that is empty too. This channel only
-    /// looks for the categories in `auto_block_categories`; the MiniLM
-    /// verifier second-checks its verdicts and content labels are not its
-    /// business.
-    pub threat_model_path: String,
     /// Background classification workers (off the DNS path).
     pub workers: u32,
     /// How often the scanner harvests unseen query-log domains, in seconds.
@@ -1428,10 +1421,8 @@ pub struct AiSettings {
     /// Domains per scan cycle (older ones are picked up on later cycles).
     pub max_domains_per_scan: u32,
     /// The labels that make a domain a *threat* (lowercase, e.g. `malware`,
-    /// `phishing`, `scam`). With the shared classifier the threat channel
-    /// reports these and nothing else; with a dedicated `threat_model_path` it
-    /// reports every label that model produces and they all block above
-    /// `block_threshold`, so this list only applies to the shared classifier. Ordinary categories (news, gambling, ...) never
+    /// `phishing`, `scam`). The threat channel reports these and nothing
+    /// else. Ordinary categories (news, gambling, ...) never
     /// appear here - blocking those is a per-group `blocked_categories` policy
     /// in the console, not a config decision.
     pub auto_block_categories: Vec<String>,
@@ -1534,7 +1525,6 @@ impl Default for AiSettings {
             database: String::new(),
             model_path: String::new(),
             category_model_path: String::new(),
-            threat_model_path: String::new(),
             workers: 2,
             scan_interval_secs: 300,
             expire_check_secs: 3600,
@@ -1581,16 +1571,6 @@ impl AiSettings {
         self.auto_block_categories
             .iter()
             .any(|c| c.eq_ignore_ascii_case(category))
-    }
-
-    /// Whether the threat channel runs a model of its own instead of the
-    /// shared one. A dedicated model reports every label it produces, so the
-    /// threat list records what was detected and `auto_block_categories`
-    /// decides only what may block. Naming the shared model explicitly is the
-    /// same as leaving the field empty: no second model, no change.
-    pub fn dedicated_threat_model(&self) -> bool {
-        let threat = self.threat_model_path.trim();
-        !threat.is_empty() && threat != self.model_path.trim()
     }
 }
 
@@ -2544,8 +2524,6 @@ pub struct AiUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category_model_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub threat_model_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category_confidence_floor: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verifier_model_path: Option<String>,
@@ -2601,7 +2579,6 @@ impl AiUpdate {
             category_ttl_secs: Some(settings.category_ttl_secs),
             threat_ttl_secs: Some(settings.threat_ttl_secs),
             category_model_path: Some(settings.category_model_path.clone()),
-            threat_model_path: Some(settings.threat_model_path.clone()),
             category_confidence_floor: Some(settings.category_confidence_floor),
             verifier_model_path: Some(settings.verifier_model_path.clone()),
             verifier_reference_path: Some(settings.verifier_reference_path.clone()),
@@ -2649,9 +2626,6 @@ impl AiUpdate {
         }
         if let Some(v) = &self.category_model_path {
             ai.category_model_path = v.trim().to_string();
-        }
-        if let Some(v) = &self.threat_model_path {
-            ai.threat_model_path = v.trim().to_string();
         }
         if let Some(v) = self.workers {
             ai.workers = v;
@@ -3495,11 +3469,34 @@ fn resolv_conf_domain(text: &str) -> Option<String> {
     search
 }
 
+/// Settings a release removed, as `(section, key)`. A config file written
+/// for an older release may still carry them (the shipped example set
+/// `ai.threat_model_path = ""`), and the sections refuse unknown keys, so
+/// they are dropped before parsing instead of stopping the server.
+const REMOVED_SETTINGS: &[(&str, &str)] = &[("ai", "threat_model_path")];
+
+fn drop_removed_settings(table: &mut toml::Table) {
+    for (section, key) in REMOVED_SETTINGS {
+        let Some(toml::Value::Table(section_table)) = table.get_mut(*section) else {
+            continue;
+        };
+        if let Some(value) = section_table.remove(*key) {
+            if value.as_str().is_none_or(|v| !v.trim().is_empty()) {
+                tracing::warn!("{section}.{key} is no longer supported and is ignored");
+            }
+        }
+    }
+}
+
 impl DaygleConfig {
     /// Parse a TOML document into a validated configuration.
     pub fn parse(text: &str) -> Result<Self> {
-        let mut cfg: DaygleConfig =
+        let mut table: toml::Table =
             toml::from_str(text).map_err(|e| DaygleError::Config(format!("invalid TOML: {e}")))?;
+        drop_removed_settings(&mut table);
+        let mut cfg: DaygleConfig = table
+            .try_into()
+            .map_err(|e| DaygleError::Config(format!("invalid TOML: {e}")))?;
         cfg.authoritative.clear_legacy_placeholders();
         cfg.clamp_recursor_timeout();
         cfg.validate()?;
@@ -6094,7 +6091,6 @@ mod tests {
         ai.category_ttl_secs += 1;
         ai.threat_ttl_secs += 1;
         ai.category_model_path = s("/srv/category.bin");
-        ai.threat_model_path = s("/srv/threat.bin");
         ai.category_confidence_floor = 0.33;
         ai.verifier_model_path = s("/srv/verifier.onnx");
         ai.verifier_reference_path = s("/srv/centroids.json");
@@ -7336,6 +7332,17 @@ scope = "groups"
             cfg.policy.blocklist_sources[2].scope,
             BlocklistScope::Groups
         );
+    }
+
+    #[test]
+    fn a_removed_setting_in_an_old_config_file_is_ignored() {
+        let cfg = DaygleConfig::parse(
+            "[ai]\nenabled = false\nthreat_model_path = \"\"\nmodel_path = \"/m/a.bin\"\n",
+        )
+        .expect("an old config file still loads");
+        assert_eq!(cfg.ai.model_path, "/m/a.bin");
+        // Unknown keys are still refused.
+        assert!(DaygleConfig::parse("[ai]\nno_such_setting = 1\n").is_err());
     }
 
     #[test]

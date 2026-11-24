@@ -41,7 +41,7 @@ use daygle_dns_core::config::{AiSettings, BlocklistFormat};
 use daygle_dns_core::{LogLevel, LogStore};
 use tokio_util::sync::CancellationToken;
 
-use crate::learn::{hash_selected, Role};
+use crate::learn::hash_selected;
 use crate::scanner::looks_like_domain;
 use crate::store::{AiStore, FeedState};
 
@@ -269,14 +269,13 @@ fn spread<'a, T>(items: &[&'a T], n: usize) -> Vec<&'a T> {
     (0..n).map(|i| items[i * items.len() / n]).collect()
 }
 
-/// Whether `label` is a threat for `role` and the model knows it.
+/// Whether `label` is a threat and the model knows it.
 pub fn wanted_label(
-    role: Role,
     settings: &AiSettings,
     known: Option<&std::collections::HashSet<String>>,
     label: &str,
 ) -> bool {
-    role.is_threat_label(settings, label) && known.is_none_or(|k| k.contains(label))
+    crate::learn::is_threat_label(settings, label) && known.is_none_or(|k| k.contains(label))
 }
 
 /// The feeds, their download state and the in-memory index.

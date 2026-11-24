@@ -288,12 +288,12 @@
     );
   }
 
-  async function rollbackModel(model = 'shared') {
+  async function rollbackModel() {
     rollingBack = true;
     error = null;
     notice = null;
     try {
-      const result = await api.aiRollback(model);
+      const result = await api.aiRollback();
       notice = result?.message || 'The previous model is in use again.';
       await load(true);
     } catch (e) {
@@ -303,12 +303,12 @@
     }
   }
 
-  async function retrain(model = 'shared') {
+  async function retrain() {
     retraining = true;
     error = null;
     notice = null;
     try {
-      const result = await api.aiRetrain(model);
+      const result = await api.aiRetrain();
       notice = `Retrained from ${fmt(result.examples)} examples. The new model is in use now.`;
       await load(true);
     } catch (e) {
@@ -439,18 +439,7 @@
               {/if}
             </td>
           </tr>
-          <tr><td class="muted">Classifier</td><td>{backendLabel(status.backend)}</td></tr>
-          <tr>
-            <td class="muted">Threat Channel</td>
-            <td>
-              {backendLabel(status.threat_backend)}
-              <span class="pill" title={status.threat_model_dedicated
-                ? 'The threat channel runs its own model: every label it reports is a threat'
-                : 'Both channels use the shared classifier, so the label list defines threats'}>
-                {status.threat_model_dedicated ? 'Own Model' : 'Shared Model'}
-              </span>
-            </td>
-          </tr>
+          <tr><td class="muted">Classifier</td><td>{backendLabel(status.threat_backend || status.backend)}</td></tr>
           <tr><td class="muted">Scans</td><td>Every {duration(status.scan_interval_secs)} · {status.workers} Worker{status.workers === 1 ? '' : 's'}</td></tr>
           <tr><td class="muted">Block Threshold</td><td>{percent(status.block_threshold)} Confidence</td></tr>
           <tr>
@@ -606,10 +595,7 @@
           <strong>Restore Previous Model</strong> undoes it.</li>
       </ul>
     </details>
-    {@render maintained('Shared Classifier', status.learned_model, 'shared')}
-    {#if status.learned_threat_model}
-      {@render maintained('Threat Model', status.learned_threat_model, 'threat')}
-    {/if}
+    {@render maintained('Classifier', status.learned_model)}
     {#if isAdmin}
       <p class="muted" style="font-size: 0.8rem; margin: 6px 0 0">
         Scheduled retrains run at most every {duration(status.retrain_interval_secs)} when automatic retraining is on.
@@ -617,7 +603,7 @@
     {/if}
   </div>
 
-  {#snippet maintained(title, m, model)}
+  {#snippet maintained(title, m)}
     {#if m}
       <div style="border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px">
         <p style="margin: 0 0 6px; font-size: 0.9rem"><strong>{title}</strong>
@@ -662,11 +648,11 @@
         {/if}
         {#if isAdmin}
           <div class="row" style="gap: 8px; flex-wrap: wrap">
-            <button class="secondary" onclick={() => retrain(model)} disabled={retraining}>
+            <button class="secondary" onclick={retrain} disabled={retraining}>
               {retraining ? 'Retraining...' : 'Retrain Now'}
             </button>
             {#if m.previous}
-              <button class="secondary" onclick={() => rollbackModel(model)} disabled={rollingBack} title="Restore the model the last retrain or promotion replaced">
+              <button class="secondary" onclick={rollbackModel} disabled={rollingBack} title="Restore the model the last retrain or promotion replaced">
                 {rollingBack ? 'Restoring...' : 'Restore Previous Model'}
               </button>
             {/if}

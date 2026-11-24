@@ -1,9 +1,7 @@
 //! The scanner's own model maintenance: retraining, shadow trials, promotion
 //! and rollback.
 //!
-//! A [`Retrainer`] looks after one model - the shared classifier, or a
-//! dedicated threat model when one is configured ([`Role`]). Its scheduled
-//! step ([`Retrainer::maybe_retrain`]) works in two stages:
+//! A [`Retrainer`] looks after the classifier. Its scheduled step ([`Retrainer::maybe_retrain`]) works in two stages:
 //!
 //! 1. **Candidate.** When a retrain is due it trains a candidate from the
 //!    store ([`crate::learn`]) and runs the offline gates against the model
@@ -36,11 +34,10 @@ use crate::backend::{ClassificationInput, DomainClassifier};
 use crate::evidence::NetworkEvidence;
 use crate::intel::wanted_label;
 use crate::learn::{
-    bundled_starter_corpus, collect_dataset_with, held_out_variant, model_labels, predict_all,
-    previous_model_path, previous_stats_path, probe_accuracy, probe_threat_model,
+    bundled_starter_corpus, collect_dataset_with, held_out_variant, is_threat_label, model_labels,
+    predict_all, previous_model_path, previous_stats_path, probe_accuracy, probe_threat_model,
     refuse_forgotten_threats, refuse_lost_threats, stats_path, top_label, train, Anchor, Dataset,
-    Role, Sources, TrainingStats, BENIGN_LABEL, MIN_ACCURACY, MIN_EXAMPLES, MIN_LABELS,
-    VALIDATION_SLACK,
+    Sources, TrainingStats, BENIGN_LABEL, MIN_ACCURACY, MIN_EXAMPLES, MIN_LABELS, VALIDATION_SLACK,
 };
 use crate::store::AiStore;
 
@@ -55,29 +52,23 @@ pub type AfterPromotion = Box<dyn Fn() + Send + Sync>;
 /// A maintenance step with nothing to report (the verifier refresh).
 pub type Step = Box<dyn Fn() + Send + Sync>;
 
-/// Everything the scan loop runs after a cycle: each maintained model's
-/// scheduled step, then the verifier reference refresh.
+/// Everything the scan loop runs after a cycle: the model's scheduled step,
+/// then the verifier reference refresh.
 pub struct Maintenance {
-    shared: Arc<Retrainer>,
-    threat: Arc<Retrainer>,
+    retrainer: Arc<Retrainer>,
     after: Step,
 }
 
 impl Maintenance {
-    pub fn new(shared: Arc<Retrainer>, threat: Arc<Retrainer>, after: Step) -> Self {
-        Self {
-            shared,
-            threat,
-            after,
-        }
+    pub fn new(retrainer: Arc<Retrainer>, after: Step) -> Self {
+        Self { retrainer, after }
     }
 
-    /// Run every due step. Returns the shared model's build, if one ran.
+    /// Run every due step. Returns the build, if one ran.
     pub fn run(&self) -> Option<Result<TrainingStats>> {
-        let shared = self.shared.maybe_retrain();
-        let _ = self.threat.maybe_retrain();
+        let built = self.retrainer.maybe_retrain();
         (self.after)();
-        shared
+        built
     }
 }
 
@@ -285,7 +276,6 @@ impl Built {
 /// Maintains one model: builds candidates, trials them in the shadow of the
 /// live model, promotes or rejects them, and rolls back on request.
 pub struct Retrainer {
-    role: Role,
     store: Arc<AiStore>,
     settings: Arc<ArcSwap<AiSettings>>,
     logs: Arc<LogStore>,
@@ -306,7 +296,6 @@ pub struct Retrainer {
 
 impl Retrainer {
     pub fn new(
-        role: Role,
         store: Arc<AiStore>,
         settings: Arc<ArcSwap<AiSettings>>,
         logs: Arc<LogStore>,
@@ -314,7 +303,6 @@ impl Retrainer {
         current_model: Arc<ArcSwap<String>>,
     ) -> Self {
         Self {
-            role,
             store,
             settings,
             logs,
@@ -347,35 +335,18 @@ impl Retrainer {
         let _ = self.after_promotion.set(hook);
     }
 
-    pub fn role(&self) -> Role {
-        self.role
-    }
-
     /// The model file this retrainer maintains.
     pub fn learned_model(&self) -> &Path {
         &self.learned
     }
 
-    /// The model the operator configured for this role: the fixed reference.
+    /// The model the operator configured: the fixed reference.
     fn configured_model(&self, settings: &AiSettings) -> String {
-        match self.role {
-            Role::Shared => settings.model_path.trim().to_string(),
-            Role::Threat => settings.threat_model_path.trim().to_string(),
-        }
+        settings.model_path.trim().to_string()
     }
 
     fn log(&self, level: LogLevel, message: String) {
-        let message = match self.role {
-            Role::Shared => message,
-            Role::Threat => format!("[threat model] {message}"),
-        };
         self.logs.push(level, "ai", message);
-    }
-
-    /// Whether this retrainer has anything to maintain: the threat role only
-    /// exists while a dedicated threat model is configured.
-    fn applies(&self, settings: &AiSettings) -> bool {
-        self.role == Role::Shared || settings.dedicated_threat_model()
     }
 
     // ── Building a candidate ────────────────────────────────────────────
@@ -419,7 +390,6 @@ impl Retrainer {
             &self.store,
             settings,
             &Sources {
-                role: self.role,
                 known: current_labels.as_ref(),
                 starter: corpus.as_deref(),
                 // No configured model: the keyword rules are the fixed
@@ -495,7 +465,7 @@ impl Retrainer {
 
         // A candidate that forgot a threat label can never report it again.
         let candidate_labels = model_labels(temp).unwrap_or_default();
-        refuse_forgotten_threats(self.role, settings, current_labels, &candidate_labels)?;
+        refuse_forgotten_threats(settings, current_labels, &candidate_labels)?;
 
         let mut validation_accuracy = None;
         if validation.is_empty() {
@@ -537,7 +507,7 @@ impl Retrainer {
                 .map(|(label, domain)| (label.clone(), held_out_variant(domain)))
                 .collect();
             let predicted = predict_all(temp, &probe)?;
-            let is_threat = |label: &str| self.role.is_threat_label(settings, label);
+            let is_threat = |label: &str| is_threat_label(settings, label);
             let (mut benign, mut downgraded, mut checked) = (0usize, 0usize, 0usize);
             for ((label, _), got) in probe.iter().zip(&predicted) {
                 if !is_threat(label) {
@@ -567,14 +537,14 @@ impl Retrainer {
         // held out of training, and domains this network has relied on for
         // weeks. The candidate may not detect fewer of the first or flag more
         // of the second than the model in use.
-        if detects_threats(self.role, settings) && !probes.is_empty() {
+        if !probes.is_empty() {
             let candidate = Predictor::load(&temp.to_string_lossy())?;
             let live = Predictor::load(
                 &current_model
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_default(),
             )?;
-            let is_threat = |label: &str| self.role.is_threat_label(settings, label);
+            let is_threat = |label: &str| is_threat_label(settings, label);
             probes.judge(&candidate, &live, &is_threat).map_err(|why| {
                 DaygleError::Config(format!("{why}, so the current model was kept"))
             })?;
@@ -645,11 +615,6 @@ impl Retrainer {
     pub fn retrain(&self) -> Result<TrainingStats> {
         let _running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         let settings = self.settings.load_full();
-        if !self.applies(&settings) {
-            return Err(DaygleError::Config(
-                "no dedicated threat model is configured".to_string(),
-            ));
-        }
         let built = self.build(&settings)?;
         if self.discard_candidate() {
             self.write_trial(
@@ -785,7 +750,7 @@ impl Retrainer {
     /// disturb the scan loop.
     pub fn maybe_retrain(&self) -> Option<Result<TrainingStats>> {
         let settings = self.settings.load_full();
-        if !settings.enabled || !self.applies(&settings) {
+        if !settings.enabled {
             return None;
         }
         let now = chrono::Utc::now().timestamp();
@@ -899,7 +864,6 @@ impl Retrainer {
         // a manual restore): the candidate has to beat whatever is live now,
         // including keeping every threat label it can report.
         let verdict = refuse_forgotten_threats(
-            self.role,
             settings,
             Path::new(live.trim())
                 .is_file()
@@ -913,7 +877,6 @@ impl Retrainer {
             judge_shadow(
                 &self.store,
                 settings,
-                self.role,
                 &candidate,
                 &live,
                 started,
@@ -993,11 +956,10 @@ impl Retrainer {
         };
         daygle_dns_core::alerts::raise(
             daygle_dns_core::alerts::AlertKind::AiModel,
-            format!("ai-model:{}:{now}", self.role.as_str()),
+            format!("ai-model:{now}"),
             title,
             format!(
-                "The {} model the AI retrained did worse than the live model during its shadow trial ({why}), so it was set aside. Nothing changed for your clients.{detail}",
-                self.role.as_str(),
+                "The model the AI retrained did worse than the live model during its shadow trial ({why}), so it was set aside. Nothing changed for your clients.{detail}",
             ),
         );
         self.write_trial(&trial.concluded(format!("rejected: {why}"), Some(now + pause)));
@@ -1054,9 +1016,6 @@ impl Retrainer {
                     WATCH_SECS / 86_400
                 ),
             );
-            return false;
-        }
-        if !detects_threats(self.role, settings) {
             return false;
         }
         match self.watch_verdict(promoted_at, now) {
@@ -1142,11 +1101,10 @@ impl Retrainer {
         );
         daygle_dns_core::alerts::raise(
             daygle_dns_core::alerts::AlertKind::AiModel,
-            format!("ai-model-rollback:{}:{now}", self.role.as_str()),
+            format!("ai-model-rollback:{now}"),
             "AI rolled back a new model",
             format!(
-                "The {} model the AI put live misbehaved within its first days ({why}), so the model before it is back in use. Nothing else is needed; retraining resumes in {}h.",
-                self.role.as_str(),
+                "The model the AI put live misbehaved within its first days ({why}), so the model before it is back in use. Nothing else is needed; retraining resumes in {}h.",
                 pause / 3600
             ),
         );
@@ -1173,16 +1131,7 @@ pub fn judge_for_tests(
     started: i64,
     ends: i64,
 ) -> std::result::Result<String, String> {
-    judge_shadow(
-        store,
-        settings,
-        Role::Shared,
-        candidate,
-        live,
-        started,
-        ends,
-        None,
-    )
+    judge_shadow(store, settings, candidate, live, started, ends, None)
 }
 
 /// [`judge_shadow`] with network evidence, for integration tests.
@@ -1199,7 +1148,6 @@ pub fn judge_with_evidence_for_tests(
     judge_shadow(
         store,
         settings,
-        Role::Shared,
         candidate,
         live,
         started,
@@ -1218,11 +1166,6 @@ fn rejection_pause(interval_secs: u64, streak: usize) -> i64 {
     }
     let doublings = (streak + 1 - REJECTION_STREAK).min(8) as u32;
     base.saturating_mul(1 << doublings).min(MAX_PAUSE_SECS)
-}
-
-/// Whether `role`'s model is the one that detects threats.
-fn detects_threats(role: Role, settings: &AiSettings) -> bool {
-    role == Role::Threat || !settings.dedicated_threat_model()
 }
 
 /// Allowed shortfall on an automatic probe of `n` names: noise, not a
@@ -1321,7 +1264,6 @@ impl Probes<'_> {
 fn judge_shadow(
     store: &AiStore,
     settings: &AiSettings,
-    role: Role,
     candidate: &Path,
     live: &str,
     started: i64,
@@ -1331,59 +1273,54 @@ fn judge_shadow(
     let candidate_model =
         Predictor::load(&candidate.to_string_lossy()).map_err(|e| e.to_string())?;
     let live_model = Predictor::load(live).map_err(|e| e.to_string())?;
-    let detects_threats = detects_threats(role, settings);
-    let is_threat = |label: &str| role.is_threat_label(settings, label);
+    let is_threat = |label: &str| is_threat_label(settings, label);
     let mut notes: Vec<String> = Vec::new();
     let intel = evidence.map(|e| e.intel());
 
-    if detects_threats {
-        if let Some(evidence) = evidence {
-            let (_, intel_probe) = intel
-                .as_deref()
-                .map(|index| index.sample(|label| wanted_label(role, settings, None, label)))
-                .unwrap_or_default();
-            let established = evidence.established_sample();
-            notes.extend(
-                Probes {
-                    intel: &intel_probe,
-                    established: &established,
-                }
-                .judge(&candidate_model, &live_model, &is_threat)?,
-            );
-        }
+    if let Some(evidence) = evidence {
+        let (_, intel_probe) = intel
+            .as_deref()
+            .map(|index| index.sample(|label| wanted_label(settings, None, label)))
+            .unwrap_or_default();
+        let established = evidence.established_sample();
+        notes.extend(
+            Probes {
+                intel: &intel_probe,
+                established: &established,
+            }
+            .judge(&candidate_model, &live_model, &is_threat)?,
+        );
     }
 
-    if detects_threats {
-        if let Ok(probe) = probe_threat_model(store, settings, candidate) {
-            let live_lost = probe
-                .sample
-                .iter()
-                .filter(|(label, domain)| {
-                    let got = live_model.label(domain);
-                    is_threat(label) && (got == BENIGN_LABEL || !is_threat(&got))
-                })
-                .count();
-            if probe.lost() > live_lost {
-                return Err(format!(
-                    "it lost {} of {} held-out threat names against {live_lost} for the live model",
-                    probe.lost(),
-                    probe.checked
-                ));
-            }
-            if probe.checked > 0 {
-                notes.push(format!(
-                    "{} of {} held-out threats lost (live {live_lost})",
-                    probe.lost(),
-                    probe.checked
-                ));
-            }
+    if let Ok(probe) = probe_threat_model(store, settings, candidate) {
+        let live_lost = probe
+            .sample
+            .iter()
+            .filter(|(label, domain)| {
+                let got = live_model.label(domain);
+                is_threat(label) && (got == BENIGN_LABEL || !is_threat(&got))
+            })
+            .count();
+        if probe.lost() > live_lost {
+            return Err(format!(
+                "it lost {} of {} held-out threat names against {live_lost} for the live model",
+                probe.lost(),
+                probe.checked
+            ));
+        }
+        if probe.checked > 0 {
+            notes.push(format!(
+                "{} of {} held-out threats lost (live {live_lost})",
+                probe.lost(),
+                probe.checked
+            ));
         }
     }
 
     let domains = store
         .domains_classified_between(started, ends, TRIAL_DOMAINS)
         .unwrap_or_default();
-    if detects_threats && !domains.is_empty() {
+    if !domains.is_empty() {
         let count = |model: &Predictor| {
             domains
                 .iter()
@@ -1422,7 +1359,7 @@ fn judge_shadow(
             .trim_matches('.')
             .to_ascii_lowercase();
         match correction.action.as_str() {
-            "category" if role == Role::Shared => truths.push((
+            "category" => truths.push((
                 domain,
                 Truth::Label(correction.category.trim().to_ascii_lowercase()),
             )),
@@ -1449,14 +1386,12 @@ fn judge_shadow(
         .into_iter()
         .filter(|(domain, _)| seen.contains(domain))
         .collect();
-    if detects_threats {
-        if let Some(index) = intel.as_deref() {
-            for domain in &domains {
-                if let Some(label) = index.label_for(domain).filter(|l| is_threat(l)) {
-                    confirmed
-                        .entry(domain.clone())
-                        .or_insert_with(|| label.to_string());
-                }
+    if let Some(index) = intel.as_deref() {
+        for domain in &domains {
+            if let Some(label) = index.label_for(domain).filter(|l| is_threat(l)) {
+                confirmed
+                    .entry(domain.clone())
+                    .or_insert_with(|| label.to_string());
             }
         }
     }
@@ -1476,23 +1411,21 @@ fn judge_shadow(
 
     // Established domains looked up during the trial: plentiful on any
     // network, so there is always something to judge a threat detector on.
-    if detects_threats {
-        if let Some(evidence) = evidence {
-            let established: Vec<(String, Truth)> = domains
-                .iter()
-                .filter(|domain| evidence.is_known_ordinary(domain))
-                .map(|domain| (domain.clone(), Truth::NotThreat))
-                .collect();
-            score_with_slack(
-                "ordinary domains (established or popular) looked up during the trial",
-                &established,
-                &candidate_model,
-                &live_model,
-                &is_threat,
-                slack(established.len()),
-                &mut notes,
-            )?;
-        }
+    if let Some(evidence) = evidence {
+        let established: Vec<(String, Truth)> = domains
+            .iter()
+            .filter(|domain| evidence.is_known_ordinary(domain))
+            .map(|domain| (domain.clone(), Truth::NotThreat))
+            .collect();
+        score_with_slack(
+            "ordinary domains (established or popular) looked up during the trial",
+            &established,
+            &candidate_model,
+            &live_model,
+            &is_threat,
+            slack(established.len()),
+            &mut notes,
+        )?;
     }
 
     if notes.is_empty() {
