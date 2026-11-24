@@ -3023,6 +3023,7 @@ fn ai_schemas() -> Value {
                 },
                 "model_present": { "type": "boolean" },
                 "pull": { "oneOf": [schema_ref("AiLlmPull"), { "type": "null" }] },
+                "test": { "oneOf": [schema_ref("AiLlmTest"), { "type": "null" }] },
                 "latest_version": { "type": ["string", "null"] },
                 "update_available": { "type": "boolean" },
                 "service": {
@@ -3061,16 +3062,18 @@ fn ai_schemas() -> Value {
         },
         "AiLlmTest": {
             "type": "object",
-            "required": ["ok"],
+            "description": "The test question in the background, or its outcome.",
             "properties": {
+                "running": { "type": "boolean" },
                 "ok": { "type": "boolean" },
-                "version": { "type": "string" },
-                "seconds": { "type": "number", "description": "How long the answer took." },
+                "model": { "type": "string" },
+                "started_at": { "type": "integer" },
+                "seconds": { "type": ["number", "null"], "description": "How long the answer took." },
                 "category": { "type": ["string", "null"] },
                 "threat": { "type": "boolean" },
                 "confidence": { "type": "number" },
                 "reason": { "type": "string" },
-                "error": { "type": "string" }
+                "error": { "type": ["string", "null"] }
             }
         },
         "AiLlmModelInput": {
@@ -3882,15 +3885,23 @@ fn ai_operation(path: &str, method: &str) -> Option<Value> {
                 false,
             ),
             "responses": {
-                "200": json_response(
-                    "What the model said about a sample page, or why it could not answer.",
-                    schema_ref("AiLlmTest"),
+                "202": json_response(
+                    "The question was asked in the background; `GET /ai/llm` reports `test`.",
+                    schema_ref("AiLlmStarted"),
                 ),
                 "400": json!({
                     "description": "Not an address or model name.",
                     "content": { "application/json": { "schema": error } }
                 }),
-                "404": ai_unavailable
+                "404": ai_unavailable,
+                "409": json!({
+                    "description": "A test is already running.",
+                    "content": { "application/json": { "schema": error } }
+                }),
+                "502": json!({
+                    "description": "The Ollama server could not be reached.",
+                    "content": { "application/json": { "schema": error } }
+                })
             }
         })),
         ("post", "/ai/llm/pull") => Some(json!({

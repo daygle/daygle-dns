@@ -1773,8 +1773,10 @@ GitHub at most every 6 hours, and only while a server answers), a few
 `installed`, and the shared update state as `operation`.
 
 `POST /api/ai/llm/test` asks the model about a sample page, with the saved
-address and model or the ones given, and returns the answer and the seconds
-it took. `POST /api/ai/llm/pull` downloads a model (`202`; follow `pull`);
+address and model or the ones given. It checks the server answers (`502`
+otherwise), then asks in the background (`202`), since an answer can take
+minutes on a CPU: `GET /api/ai/llm` reports `test` (`running`, `ok`,
+`seconds`, `category`, `threat`, `confidence`, `reason`, `error`). `POST /api/ai/llm/pull` downloads a model (`202`; follow `pull`);
 pulling a name the server has updates it, fetching only what changed. One
 download runs at a time (`409` otherwise). `POST /api/ai/llm/delete` removes
 one. Model names are letters, digits and `._:-/` (`400` otherwise).

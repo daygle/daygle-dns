@@ -2912,6 +2912,7 @@ pub async fn ai_llm_status(State(state): State<AppState>) -> Response {
         "models": models.as_ref().ok(),
         "model_present": model_present,
         "pull": manager.pull_state(),
+        "test": manager.test_state(),
         "latest_version": latest,
         "update_available": update_available,
         "service": {
@@ -2941,8 +2942,10 @@ pub struct LlmTestRequest {
 }
 
 /// `POST /api/ai/llm/test` - ask the model about a sample page, with the
-/// saved settings or the `url`/`model` given (to try them before saving),
-/// and report the answer and how long it took.
+/// saved settings or the `url`/`model` given (to try them before saving).
+/// The question runs in the background (`202`): an answer can take minutes
+/// on a CPU. `GET /api/ai/llm` reports `test` with the answer and the
+/// seconds it took. Checks the server answers first.
 pub async fn ai_llm_test(
     State(state): State<AppState>,
     body: Option<Json<LlmTestRequest>>,
@@ -2969,51 +2972,20 @@ pub async fn ai_llm_test(
     if !daygle_dns_core::config::valid_llm_model(&model) {
         return error_response(StatusCode::BAD_REQUEST, "not an Ollama model name");
     }
-    let version = match ai.llm().version(&url).await {
-        Ok(version) => version,
-        Err(e) => {
-            return Json(serde_json::json!({ "ok": false, "error": e })).into_response();
-        }
-    };
+    let manager = ai.llm();
+    if let Err(e) = manager.version(&url).await {
+        return error_response(StatusCode::BAD_GATEWAY, &e);
+    }
     // A test is often the model's first answer, which also loads it into
     // memory: give it at least 5 minutes whatever the per-answer limit.
     let timeout = Duration::from_secs(settings.llm_timeout_secs.clamp(300, 600));
-    let labels: Vec<String> = ["news", "shopping", "jobs", "education", "phishing", "scam"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    let started = std::time::Instant::now();
-    let answer = run_blocking(move || {
-        daygle_dns_ml::llm::ask(
-            &url,
-            &model,
-            timeout,
-            "careers.example",
-            "Careers at Example Co",
-            "Browse our open roles in engineering and sales. Apply online in minutes.",
-            &labels,
+    match manager.start_test(&url, &model, timeout) {
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "started": true, "model": model })),
         )
-    })
-    .await;
-    let seconds = started.elapsed().as_secs_f64();
-    match answer {
-        Ok(reading) => Json(serde_json::json!({
-            "ok": true,
-            "version": version,
-            "seconds": seconds,
-            "category": reading.category,
-            "threat": reading.threat,
-            "confidence": reading.confidence,
-            "reason": reading.reason,
-        }))
-        .into_response(),
-        Err(e) => Json(serde_json::json!({
-            "ok": false,
-            "version": version,
-            "seconds": seconds,
-            "error": e,
-        }))
-        .into_response(),
+            .into_response(),
+        Err(e) => error_response(StatusCode::CONFLICT, &e),
     }
 }
 
