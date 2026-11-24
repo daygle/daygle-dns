@@ -770,12 +770,12 @@
             onchange={(event) => setSwitch('fetch_pages', event.currentTarget.checked)}
             disabled={switching}
           />
-          <span>Read Pages for Threats</span>
+          <span>Read Pages</span>
         </label>
         <label class="row" style="gap: 6px; align-items: center; font-size: 0.85rem">
           <span>Reading rule</span>
           <select
-            value={status.page_rule || 'evidence'}
+            value={status.page_rule || 'corroborate'}
             onchange={(event) => setPageRule(event.currentTarget.value)}
             disabled={switching}
           >
@@ -788,15 +788,17 @@
     </div>
     <p class="muted help" style="margin: 0 0 6px">
       Reads the home page of each flagged domain and records what it says
-      (see Check a Domain). Off by default, because it contacts the site.
+      (see Check a Domain), and categorizes domains the AI is unsure of from
+      their page. On by default; turn it off if this server must not contact
+      the sites your network visits.
     </p>
     <details class="how" style="margin: 0 0 10px">
       <summary class="muted">How the reading rule works</summary>
       <ul class="how-list muted">
-        <li><strong>Evidence only</strong> (default): records what the page says.
+        <li><strong>Evidence only:</strong> records what the page says.
           Nothing else changes.</li>
-        <li><strong>Corroborate:</strong> a page that looks like a threat raises
-          the confidence. It never lowers it.</li>
+        <li><strong>Corroborate</strong> (default): a page that looks like a threat
+          raises the confidence. It never lowers it.</li>
         <li><strong>Decide:</strong> also lowers the confidence when the page
           looks ordinary. The site writes its own page, so it can fool this.</li>
         <li>Readings below {Math.round((status.page_confidence_floor ?? 0.6) * 100)}%
@@ -805,6 +807,9 @@
           private and local addresses are never fetched.</li>
         <li>Page text is kept to train a page model that learns what threat
           pages look like. It can only strengthen a threat reading, never hide one.</li>
+        <li>A domain the AI is unsure how to categorize (below 50%) takes the
+          category its page clearly states. Those labels are never trained on,
+          and never make or clear a threat.</li>
       </ul>
     </details>
     {#if status.page_model?.last}

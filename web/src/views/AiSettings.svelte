@@ -183,8 +183,9 @@
       <label><span>Look for Expired Entries Every (Minutes)</span><input type="number" min="0.17" step="any" bind:value={aiForm.expireMinutes} /></label>
     </div>
     <p class="muted help">
-      Domains are re-checked after this long. An expired threat stops
-      blocking until it is checked again.
+      Domains are re-checked after this long (14 and 90 days by default). An
+      expired threat stops blocking until it is checked again, so keep the
+      expiry check frequent: it is cheap.
     </p>
   </div>
 </SettingsForm>

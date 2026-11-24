@@ -60,6 +60,10 @@ CREATE TABLE IF NOT EXISTS ai_threat_rate (
     threats    INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ai_threat_rate_at ON ai_threat_rate (at);
+CREATE TABLE IF NOT EXISTS ai_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 ";
 
 /// How long a domain whose registration date could not be found waits
@@ -302,6 +306,79 @@ impl AiStore {
         Ok(queued)
     }
 
+    /// Send back to the scan queue the threats that now block a domain this
+    /// network has come to rely on: established since the verdict was made,
+    /// so the next cycle disputes them (see [`crate::evidence`]). A feed
+    /// listing outranks being established, so listed verdicts stay. Returns
+    /// how many were re-queued.
+    pub fn requeue_newly_established(&self) -> Result<usize> {
+        let established: std::collections::HashSet<String> =
+            self.established_domains(u32::MAX)?.into_iter().collect();
+        if established.is_empty() {
+            return Ok(0);
+        }
+        let threats: Vec<String> = {
+            let conn = self.lock()?;
+            let mut stmt = conn.prepare(
+                "SELECT domain FROM ai_verdicts
+                 WHERE channel = 'threat' AND status = 'classified' AND severity = 'threat'
+                   AND instr(evidence, ?1) = 0",
+            )?;
+            let rows = stmt
+                .query_map(params![crate::evidence::LISTED_NOTE], |r| r.get(0))?
+                .collect::<std::result::Result<Vec<String>, _>>()?;
+            rows
+        };
+        let now_established: Vec<String> = threats
+            .into_iter()
+            .filter(|domain| established.contains(domain))
+            .collect();
+        self.requeue_threat_domains(&now_established)
+    }
+
+    /// A value the engine keeps between restarts (e.g. which model file was
+    /// live), or `None`.
+    pub fn meta(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(
+                "SELECT value FROM ai_meta WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO ai_meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = ?2",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// After the model changes, bring forward the re-check of every verdict
+    /// on a domain still in use, spread over `window_secs` (starting an
+    /// hour from `now`) so the new model reaches old verdicts in days, not
+    /// at the end of a 90-day lifetime, without a backlog that would leave
+    /// threats waiting unblocked. A verdict due sooner keeps its time, and
+    /// one on a domain nobody looked up again is left to its lifetime.
+    /// Returns how many verdicts were brought forward.
+    pub fn stagger_rechecks(&self, now: i64, window_secs: i64) -> Result<usize> {
+        let hours = (window_secs / 3600).max(1);
+        let conn = self.lock()?;
+        Ok(conn.execute(
+            "UPDATE ai_verdicts
+             SET expires_at = ?1 + 3600 + (rowid % ?2) * 3600
+             WHERE status IN ('classified', 'skipped')
+               AND last_seen > classified_at
+               AND expires_at > ?1 + 3600 + (rowid % ?2) * 3600",
+            params![now, hours],
+        )?)
+    }
+
     // ── Domain age ──────────────────────────────────────────────────────
 
     /// Threat verdicts whose domain age has not been looked up yet, newest
@@ -538,6 +615,117 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let store = AiStore::open(&dir.path().join("ai.db")).unwrap();
         (dir, store)
+    }
+
+    fn threat(store: &AiStore, domain: &str, evidence: &str) {
+        store.observe(domain).unwrap();
+        store
+            .save_verdict(
+                crate::backend::Channel::Threat,
+                domain,
+                "phishing",
+                "threat",
+                "classified",
+                0.995,
+                "fasttext",
+                evidence,
+                86_400,
+            )
+            .unwrap();
+    }
+
+    fn status(store: &AiStore, domain: &str) -> String {
+        store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM ai_verdicts WHERE domain = ?1 AND channel = 'threat'",
+                params![domain],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    /// A threat on a domain that has since become established goes back to
+    /// the queue (to be disputed); a listed one stays, a feed outranks it.
+    #[test]
+    fn threats_on_newly_established_domains_are_rechecked() {
+        let (_dir, store) = store();
+        let now = now_epoch();
+        let clients: Vec<String> = (0..4).map(|i| format!("10.0.0.{i}")).collect();
+        for domain in ["relied-on.example", "listed.example", "rare.example"] {
+            let days = if domain == "rare.example" {
+                2
+            } else {
+                ESTABLISHED_DAYS
+            };
+            for d in 0..days {
+                store
+                    .record_sightings_at(
+                        &[(domain.to_string(), clients.clone())],
+                        now - (days - d) * 86_400,
+                    )
+                    .unwrap();
+            }
+        }
+        threat(&store, "relied-on.example", "model");
+        threat(
+            &store,
+            "listed.example",
+            "model, listed by Phishing Army as phishing",
+        );
+        threat(&store, "rare.example", "model");
+        assert_eq!(store.requeue_newly_established().unwrap(), 1);
+        assert_eq!(status(&store, "relied-on.example"), "pending");
+        assert_eq!(status(&store, "listed.example"), "classified");
+        assert_eq!(status(&store, "rare.example"), "classified");
+    }
+
+    /// After a model change, verdicts on domains still in use are re-checked
+    /// within the window; one nobody looked up again keeps its lifetime.
+    #[test]
+    fn a_model_change_brings_rechecks_forward_for_domains_in_use() {
+        let (_dir, store) = store();
+        let now = now_epoch();
+        threat(&store, "in-use.example", "model");
+        threat(&store, "forgotten.example", "model");
+        {
+            let conn = store.lock().unwrap();
+            conn.execute(
+                "UPDATE ai_verdicts SET classified_at = ?1 - 100, expires_at = ?1 + 90 * 86400",
+                params![now],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE ai_verdicts SET last_seen = ?1 WHERE domain = 'in-use.example'",
+                params![now],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE ai_verdicts SET last_seen = ?1 - 200 WHERE domain = 'forgotten.example'",
+                params![now],
+            )
+            .unwrap();
+        }
+        let window = 3 * 86_400;
+        assert_eq!(store.stagger_rechecks(now, window).unwrap(), 1);
+        let expiry = |domain: &str| -> i64 {
+            store
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT expires_at FROM ai_verdicts WHERE domain = ?1 AND channel = 'threat'",
+                    params![domain],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let brought = expiry("in-use.example");
+        assert!(brought > now && brought <= now + window + 3600, "{brought}");
+        assert_eq!(expiry("forgotten.example"), now + 90 * 86_400);
+        // Running it again does not push a verdict later.
+        store.stagger_rechecks(now, window).unwrap();
+        assert_eq!(expiry("in-use.example"), brought);
     }
 
     #[test]

@@ -1874,7 +1874,7 @@ front of the scanner immediately. The model it replaces becomes the previous
 one, so a rollback can itself be undone. `GET /api/ai/status` reports
 `learned_model.previous`.
 
-`ai.fetch_pages` (off by default) makes the scan cycle fetch the home page of
+`ai.fetch_pages` (on by default) makes the scan cycle fetch the home page of
 each new threat candidate - classified, fresh, not disputed, above
 `ai.confidence_floor`, not exempted, and not already read for this
 classification - and appends one bounded evidence line to the threat verdict
@@ -1886,8 +1886,19 @@ responses, IP-literal hosts, non-default ports, and any host that resolves to a
 private, loopback, link-local, CGNAT, multicast or reserved address, including
 on each redirect.
 
+In whatever is left of the same 90-second budget, it also reads the page of
+each domain the categorizer is unsure of: a content verdict below 50%
+confidence (or with no category), not relabelled, not a threat candidate, most
+looked-up first. When the page's text names an ordinary category the
+categorizer knows (`jobs`, `news`, `shopping`, ...) at
+`ai.page_confidence_floor` or more, and more surely than the name did, the
+verdict takes that category with `backend` set to `page`. Page-set categories
+are never used for retraining, and a page never makes or clears a threat this
+way. Otherwise a note is appended to the evidence. Either way the page is read
+once per verdict.
+
 `ai.page_rule` decides whether a reading may move the verdict:
-`evidence` (default) records it only; `corroborate` lets agreement raise the
+`evidence` records it only; `corroborate` (default) lets agreement raise the
 threat confidence to the page's own score and ignores disagreement (agreement
 means the label is in `auto_block_categories`); `decide`
 also caps a verdict at `1 - page confidence` when the page reads as an
@@ -1951,7 +1962,13 @@ labels reported in `backend_categories`; `400` otherwise, with the known
 list), and `clear_category` drops the relabel (`404` when there is none).
 A relabel is shown and filtered instead of the model's label, survives
 re-scans, and is what category blocking matches; the row also carries
-`category_overridden` so the console can mark it.
+`category_overridden` so the console can mark it. It also decides the
+threat side: a label in `ai.auto_block_categories` makes the domain a threat
+(listed by `GET /api/ai/threats`, in the block snapshot whatever the model
+scored, exported at confidence 1 with no expiry), and any other label keeps
+the model's threat verdict out of both. A threat label clears a `not_threat`
+mark on the domain, and a `not_threat` mark clears a threat label: the newer
+decision wins. Exemptions (`allow`) still win.
 `POST /api/ai/rescan` wakes the scanner for one immediate cycle.
 
 Outside evidence (see [AI.md](AI.md#outside-evidence)): `GET /api/ai/status`

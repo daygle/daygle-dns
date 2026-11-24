@@ -28,6 +28,9 @@ fn settings(mode: AiMode) -> AiSettings {
     AiSettings {
         enabled: true,
         mode,
+        // Page reading is on by default; tests that read pages turn it on
+        // with a reader of their own, so no test reaches the network.
+        fetch_pages: false,
         ..AiSettings::default()
     }
 }
@@ -1540,8 +1543,8 @@ impl daygle_dns_ml::page::PageReader for WeakReads {
     }
 }
 
-/// The default rule records the reading only: agreement cannot raise the
-/// confidence and disagreement cannot lower it.
+/// The `evidence` rule records the reading only: agreement cannot raise
+/// the confidence and disagreement cannot lower it.
 #[test]
 fn an_evidence_reading_never_moves_confidence() {
     let dir = TempDir::new().unwrap();
@@ -1550,6 +1553,7 @@ fn an_evidence_reading_never_moves_confidence() {
         &dir,
         AiSettings {
             fetch_pages: true,
+            page_rule: PageRule::Evidence,
             ..settings(AiMode::Train)
         },
     );
@@ -2157,7 +2161,11 @@ fn marking_a_threat_not_a_threat_stops_blocking_and_export() {
             && c.action == "category"
             && c.category == "news"));
 
+    // Clearing the mark leaves the operator's ordinary label in force: it
+    // still does not block. Dropping the label lets the AI decide again.
     assert!(ai.clear_override("casino-bonus.example").unwrap());
+    assert!(ai.blockable_counts().unwrap().is_empty());
+    assert!(ai.clear_category_override("casino-bonus.example").unwrap());
     assert!(ai.blockable_counts().unwrap().contains_key("gambling"));
 }
 
@@ -3887,4 +3895,268 @@ fn unresolved_age_lookups_do_not_hold_the_queue() {
         "retried once the wait is over, untried first"
     );
     assert_eq!(later[0].0, next[0]);
+}
+
+// ── Your label is final, on both tabs ──────────────────────────────────────
+
+fn threat_verdict(ai: &AiEngine, domain: &str, label: &str, confidence: f32) {
+    ai.store.observe(domain).unwrap();
+    ai.store
+        .save_verdict(
+            Channel::Threat,
+            domain,
+            label,
+            "threat",
+            "classified",
+            confidence,
+            "fasttext",
+            "ev",
+            3600,
+        )
+        .unwrap();
+}
+
+fn threat_list(ai: &AiEngine) -> Vec<String> {
+    let labels = ai.settings.load().auto_block_categories.clone();
+    let filter = daygle_dns_ml::store::VerdictFilter {
+        threat_labels: Some(&labels),
+        ..Default::default()
+    };
+    let page = daygle_dns_ml::store::VerdictPage {
+        limit: 100,
+        offset: 0,
+    };
+    ai.store
+        .list_threats_filtered(&filter, page)
+        .unwrap()
+        .0
+        .into_iter()
+        .map(|r| r.domain)
+        .collect()
+}
+
+/// Labelling an ordinary domain as a threat makes it one: it is listed,
+/// blocks whatever the AI scored, and is exported.
+#[test]
+fn a_threat_label_you_set_makes_the_domain_a_threat() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(&dir, settings(AiMode::Enforce));
+    ai.store.observe("news-site.example").unwrap();
+    assert!(!threat_list(&ai).contains(&"news-site.example".to_string()));
+
+    ai.set_category_override("news-site.example", "phishing")
+        .unwrap();
+    assert!(threat_list(&ai).contains(&"news-site.example".to_string()));
+    let blocks = ai.snapshot().load();
+    assert_eq!(blocks["news-site.example"].category, "phishing");
+    let exported = ai.export_threats().unwrap();
+    assert!(exported
+        .iter()
+        .any(|(d, c, conf, _)| d == "news-site.example"
+            && c == "phishing"
+            && (*conf - 1.0).abs() < 1e-6));
+
+    // Unticking the label is the operator's other decision: it stops too.
+    let mut unticked = (*ai.settings.load_full()).clone();
+    unticked.auto_block_categories = vec!["malware".to_string()];
+    ai.apply_settings(&unticked);
+    assert!(!ai.snapshot().load().contains_key("news-site.example"));
+    assert!(!threat_list(&ai).contains(&"news-site.example".to_string()));
+}
+
+/// Labelling a detected threat as an ordinary category stops it blocking
+/// and takes it off the threat list; removing the label lets the AI decide
+/// again.
+#[test]
+fn an_ordinary_label_you_set_overrules_a_detected_threat() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(&dir, settings(AiMode::Enforce));
+    threat_verdict(&ai, "shop-checkout.example", "phishing", 0.995);
+    ai.refresh_snapshot_now();
+    assert!(ai.snapshot().load().contains_key("shop-checkout.example"));
+
+    ai.set_category_override("shop-checkout.example", "shopping")
+        .unwrap();
+    assert!(!ai.snapshot().load().contains_key("shop-checkout.example"));
+    assert!(!threat_list(&ai).contains(&"shop-checkout.example".to_string()));
+    assert!(ai.export_threats().unwrap().is_empty());
+
+    ai.clear_category_override("shop-checkout.example").unwrap();
+    assert!(ai.snapshot().load().contains_key("shop-checkout.example"));
+    assert!(threat_list(&ai).contains(&"shop-checkout.example".to_string()));
+}
+
+/// "Not a threat" and a threat label contradict each other: the newer one
+/// wins, and an exemption still beats a threat label.
+#[test]
+fn not_a_threat_and_a_threat_label_replace_each_other() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(&dir, settings(AiMode::Enforce));
+    threat_verdict(&ai, "flagged.example", "malware", 0.995);
+    ai.set_not_threat_override("flagged.example", "Misclassified")
+        .unwrap();
+    assert!(!ai.snapshot().load().contains_key("flagged.example"));
+
+    ai.set_category_override("flagged.example", "malware")
+        .unwrap();
+    assert!(
+        ai.snapshot().load().contains_key("flagged.example"),
+        "the label wins"
+    );
+    assert!(ai.store.list_overrides().unwrap().is_empty());
+
+    ai.set_not_threat_override("flagged.example", "Misclassified")
+        .unwrap();
+    assert!(!ai.snapshot().load().contains_key("flagged.example"));
+    assert!(ai
+        .store
+        .category_override("flagged.example")
+        .unwrap()
+        .is_none());
+
+    ai.set_category_override("mine.example", "phishing")
+        .unwrap();
+    ai.set_allow_override("mine.example", "Trusted Domain")
+        .unwrap();
+    assert!(
+        !ai.snapshot().load().contains_key("mine.example"),
+        "exemptions win"
+    );
+}
+
+/// In train mode nothing blocks, a label of yours included; it is what
+/// would block.
+#[test]
+fn a_threat_label_you_set_does_not_block_in_train_mode() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(&dir, settings(AiMode::Train));
+    ai.store.observe("news-site.example").unwrap();
+    ai.set_category_override("news-site.example", "phishing")
+        .unwrap();
+    assert!(ai.snapshot().load().is_empty());
+    assert!(ai.blockable_counts().unwrap().contains_key("phishing"));
+}
+
+/// A threat label outlives the verdicts under it: it stays on the threat
+/// list (with its undo) after the verdict expires unqueried, and even for a
+/// domain the scanner never saw.
+#[test]
+fn a_threat_label_stays_listed_after_its_verdict_expires() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(&dir, settings(AiMode::Enforce));
+    threat_verdict(&ai, "old-flag.example", "phishing", 0.995);
+    ai.set_category_override("old-flag.example", "phishing")
+        .unwrap();
+    let later = chrono::Utc::now().timestamp() + 365 * 86400;
+    ai.store.expire_old(later, 1000).unwrap();
+    assert!(threat_list(&ai).contains(&"old-flag.example".to_string()));
+    assert!(ai.snapshot().load().contains_key("old-flag.example"));
+
+    ai.set_category_override("never-seen.example", "malware")
+        .unwrap();
+    assert!(threat_list(&ai).contains(&"never-seen.example".to_string()));
+}
+
+/// A detected threat the operator also labels exports with the operator's
+/// label, at full confidence and without an expiry.
+#[test]
+fn a_threat_label_on_a_detected_threat_exports_as_the_operators() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(&dir, settings(AiMode::Enforce));
+    threat_verdict(&ai, "both.example", "phishing", 0.995);
+    ai.set_category_override("both.example", "malware").unwrap();
+    let exported = ai.export_threats().unwrap();
+    let rows: Vec<_> = exported.iter().filter(|r| r.0 == "both.example").collect();
+    assert_eq!(rows.len(), 1, "{exported:?}");
+    assert_eq!(rows[0].1, "malware");
+    assert!((rows[0].2 - 1.0).abs() < 1e-6);
+    assert_eq!(rows[0].3, i64::MAX);
+}
+
+/// A domain a threat feed lists is a threat even when its name reads
+/// harmless to the model: the listing alone blocks it in enforce mode.
+#[test]
+fn a_listed_domain_is_a_threat_even_when_its_name_reads_harmless() {
+    let dir = TempDir::new().unwrap();
+    AiStore::open(&dir.path().join("ai.db"))
+        .unwrap()
+        .replace_intel(
+            "phishing_army",
+            &["harmless-looking.example".to_string()]
+                .into_iter()
+                .collect(),
+        )
+        .unwrap();
+    let zones = zone_store(&dir);
+    let ai = engine(&dir, settings(AiMode::Enforce));
+    ai.store.observe("harmless-looking.example").unwrap();
+    ai.scanner.run_cycle(0, zones.as_ref()).unwrap();
+    let blocks = ai.snapshot().load();
+    assert_eq!(blocks["harmless-looking.example"].category, "phishing");
+    assert!(threat_list(&ai).contains(&"harmless-looking.example".to_string()));
+}
+
+/// A page that says what it is, for a domain the categorizer is unsure of.
+struct JobsPage;
+
+impl daygle_dns_ml::page::PageReader for JobsPage {
+    fn inspect(&self, domain: &str) -> daygle_dns_ml::page::Inspection {
+        daygle_dns_ml::page::Inspection {
+            note: format!("test page for {domain}"),
+            reading: None,
+            page: Some((
+                "Careers".to_string(),
+                "Browse job openings near you. Job search made simple. Employers: post a job today."
+                    .to_string(),
+            )),
+        }
+    }
+}
+
+/// With page reading on, a domain the categorizer could not place gets its
+/// category from its page, and that label is never trained on.
+#[test]
+fn an_unsure_domain_is_categorized_from_its_page_and_not_trained_on() {
+    let dir = TempDir::new().unwrap();
+    let zones = zone_store(&dir);
+    let ai = engine(
+        &dir,
+        AiSettings {
+            fetch_pages: true,
+            ..settings(AiMode::Train)
+        },
+    );
+    assert!(ai.scanner.set_page_reader(Box::new(JobsPage)));
+    ai.store.observe("acme-careers-portal.example").unwrap();
+    ai.scanner.run_cycle(0, zones.as_ref()).unwrap();
+
+    let (rows, _) = ai.store.list_verdicts(None, None, 16, 0).unwrap();
+    let content = rows
+        .iter()
+        .find(|r| r.domain == "acme-careers-portal.example" && r.channel == "content")
+        .unwrap();
+    assert_eq!(content.category, "jobs", "{content:?}");
+    assert_eq!(content.status, "classified");
+    assert!(
+        content.evidence.contains("job openings"),
+        "{}",
+        content.evidence
+    );
+    let trainable = ai
+        .store
+        .confident_verdicts(0.0, 0.0, chrono::Utc::now().timestamp(), 100)
+        .unwrap();
+    assert!(!trainable
+        .iter()
+        .any(|(_, _, domain)| domain == "acme-careers-portal.example"));
+
+    // Read once per verdict: the next cycle leaves it alone.
+    ai.scanner.run_cycle(0, zones.as_ref()).unwrap();
+    let (rows, _) = ai.store.list_verdicts(None, None, 16, 0).unwrap();
+    assert_eq!(
+        rows.iter()
+            .filter(|r| r.domain == "acme-careers-portal.example" && r.channel == "content")
+            .count(),
+        1
+    );
 }

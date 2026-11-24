@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 
 use daygle_dns_core::config::PageRule;
 use daygle_dns_core::error::{DaygleError, Result};
-use rusqlite::{params, params_from_iter, types::Value, Connection};
+use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension};
 
 use crate::backend::Channel;
 
@@ -177,6 +177,17 @@ const VERDICTS_TABLE: &str = "CREATE TABLE IF NOT EXISTS ai_verdicts (
     page_fetched_at INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (domain, channel)
 )";
+
+/// Give every relabelled domain a threat-channel row (pending, so the
+/// scanner fills it in): the Threats tab lists from those rows, and a threat
+/// label must stay listed, with its undo, for as long as it blocks.
+fn list_relabelled(conn: &Connection) -> rusqlite::Result<usize> {
+    conn.execute(
+        "INSERT OR IGNORE INTO ai_verdicts (domain, channel, last_seen)
+         SELECT domain, 'threat', created_at FROM ai_category_overrides",
+        [],
+    )
+}
 
 const OVERRIDES_TABLE: &str = "CREATE TABLE IF NOT EXISTS ai_overrides (
     domain     TEXT PRIMARY KEY,
@@ -555,7 +566,12 @@ impl AiStore {
         let tx = conn.transaction()?;
         let expired: Vec<(String, String, bool)> = {
             let mut stmt = tx.prepare(
-                "SELECT domain, channel, last_seen > classified_at FROM ai_verdicts
+                // A domain the operator relabelled keeps its rows: the
+                // relabel lists it (and may block it) whether or not it is
+                // still queried.
+                "SELECT domain, channel, last_seen > classified_at OR EXISTS (
+                     SELECT 1 FROM ai_category_overrides c WHERE c.domain = ai_verdicts.domain)
+                 FROM ai_verdicts
                  WHERE status IN ('classified', 'skipped')
                    AND expires_at > 0 AND expires_at <= ?1
                  LIMIT ?2",
@@ -640,6 +656,7 @@ impl AiStore {
         if deleted > 0 {
             delete_orphaned_page_history(&tx)?;
         }
+        list_relabelled(&tx)?;
         tx.commit()?;
         Ok(deleted)
     }
@@ -707,6 +724,8 @@ impl AiStore {
         threshold: f32,
     ) -> Result<Vec<(String, String, i64)>> {
         let conn = self.lock()?;
+        // A domain the operator relabelled is decided by that label (see
+        // [`Self::operator_threats`]), never by the model's verdict.
         let mut stmt = conn.prepare(
             "SELECT domain, category, expires_at FROM ai_verdicts
              WHERE channel = 'threat' AND status = 'classified'
@@ -716,6 +735,10 @@ impl AiStore {
                    SELECT 1 FROM ai_overrides o
                    WHERE o.domain = ai_verdicts.domain
                      AND o.action IN ('allow', 'not_threat')
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM ai_category_overrides c
+                   WHERE c.domain = ai_verdicts.domain
                )",
         )?;
         let collected = stmt
@@ -728,6 +751,37 @@ impl AiStore {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(collected)
+    }
+
+    /// The operator's relabels, as `(domain, label)`, of domains not marked
+    /// "not a threat": the caller keeps those whose label is a threat. A
+    /// relabel is the operator's word on the domain, so a threat label
+    /// blocks whatever the model said, and any other label stops the model's
+    /// threat verdict from blocking.
+    pub fn operator_threats(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT c.domain, lower(c.category) FROM ai_category_overrides c
+             WHERE NOT EXISTS (SELECT 1 FROM ai_overrides o
+                               WHERE o.domain = c.domain AND o.action = 'not_threat')
+             ORDER BY c.domain",
+        )?;
+        let collected = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(collected)
+    }
+
+    /// The operator's category relabel of `domain`, if any.
+    pub fn category_override(&self, domain: &str) -> Result<Option<String>> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(
+                "SELECT category FROM ai_category_overrides WHERE domain = ?1",
+                params![domain],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
 
     /// Apply an operator override row (insert or replace).
@@ -784,6 +838,7 @@ impl AiStore {
              ON CONFLICT(domain) DO UPDATE SET category = ?2, created_at = ?3",
             params![domain, category.to_ascii_lowercase(), now_epoch()],
         )?;
+        list_relabelled(&conn)?;
         Ok(())
     }
 
@@ -864,6 +919,7 @@ impl AiStore {
         let mut stmt = conn.prepare(
             "SELECT channel, category, domain FROM ai_verdicts v
              WHERE status = 'classified' AND severity != 'disputed' AND category != ''
+               AND backend != 'page'
                AND expires_at > ?3
                AND confidence >= CASE channel WHEN 'threat' THEN ?2 ELSE ?1 END
                AND NOT EXISTS (
@@ -941,6 +997,75 @@ impl AiStore {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(collected)
+    }
+
+    /// Domains whose category the categorizer is unsure of (below `below`
+    /// confidence, or no category at all) and whose page has not been read
+    /// for this verdict: `(domain, confidence)`, most looked-up first. A
+    /// relabelled domain is settled, and a threat candidate's page is read
+    /// by the threat stage, so both are left out.
+    pub fn category_page_candidates(
+        &self,
+        now_epoch: i64,
+        below: f32,
+        limit: u32,
+    ) -> Result<Vec<(String, f32)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT domain, confidence FROM ai_verdicts v
+             WHERE channel = 'content' AND status IN ('classified', 'skipped')
+               AND confidence < ?1 AND expires_at > ?2
+               AND page_fetched_at < classified_at
+               AND NOT EXISTS (SELECT 1 FROM ai_category_overrides c WHERE c.domain = v.domain)
+               AND NOT EXISTS (
+                   SELECT 1 FROM ai_verdicts t
+                   WHERE t.domain = v.domain AND t.channel = 'threat'
+                     AND t.status = 'classified' AND t.severity IN ('threat', 'disputed')
+               )
+             ORDER BY observations DESC, domain
+             LIMIT ?3",
+        )?;
+        let collected = stmt
+            .query_map(params![below, now_epoch, limit as i64], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, f32>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(collected)
+    }
+
+    /// Record a page read for the domain's content verdict. With a
+    /// `category`, the page's reading replaces the categorizer's: the
+    /// verdict is marked as the page's (`backend = 'page'`), which keeps it
+    /// out of retraining - a site writes its own page, and the shared model
+    /// must not learn a label from it.
+    pub fn record_category_page(
+        &self,
+        domain: &str,
+        note: &str,
+        category: Option<(&str, f32)>,
+    ) -> Result<bool> {
+        let conn = self.lock()?;
+        let changed = match category {
+            Some((category, confidence)) => conn.execute(
+                "UPDATE ai_verdicts
+                 SET category = ?2, confidence = ?3, status = 'classified', severity = 'info',
+                     backend = 'page', evidence = ?4, page_fetched_at = ?5
+                 WHERE domain = ?1 AND channel = 'content'",
+                params![domain, category, confidence, note, now_epoch()],
+            )?,
+            None => conn.execute(
+                "UPDATE ai_verdicts
+                 SET evidence = CASE
+                         WHEN evidence = '' THEN ?2
+                         WHEN length(evidence) > 2000 THEN evidence
+                         ELSE evidence || char(10) || ?2
+                     END,
+                     page_fetched_at = ?3
+                 WHERE domain = ?1 AND channel = 'content'",
+                params![domain, note, now_epoch()],
+            )?,
+        };
+        Ok(changed > 0)
     }
 
     /// Record what a page said on the domain's threat verdict, optionally
@@ -1302,21 +1427,28 @@ impl AiStore {
                     .map(|i| format!("?{}", 9 + i))
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!(" AND lower(v.category) IN ({marks})")
+                // The operator's relabel stands in for the model's label: a
+                // threat label lists the domain, any other label removes it.
+                format!(
+                    " AND lower(COALESCE((SELECT c.category FROM ai_category_overrides c
+                        WHERE c.domain = v.domain), v.category)) IN ({marks})"
+                )
             }
         };
         // The category filter matches the operator's relabel in place of a
         // content row's label; a threat row shows both its detected label
         // and the relabel, so it matches either.
         let filter =
-            "(?1 = 0 OR (v.status = 'classified' AND v.severity IN ('threat', 'disputed')))
+            "(?1 = 0 OR EXISTS (SELECT 1 FROM ai_category_overrides c WHERE c.domain = v.domain)
+                OR (v.status = 'classified' AND v.severity IN ('threat', 'disputed')))
             AND (?2 = '' OR v.status = ?2)
             AND (?3 = '%%' OR lower(COALESCE((SELECT c.category FROM ai_category_overrides c
                 WHERE c.domain = v.domain AND v.channel = 'content'), v.category))
                 LIKE ?3 ESCAPE '\\'
                 OR (v.channel = 'threat' AND EXISTS (SELECT 1 FROM ai_category_overrides c
                 WHERE c.domain = v.domain AND lower(c.category) LIKE ?3 ESCAPE '\\')))
-            AND (?4 = '' OR v.severity = ?4)
+            AND (?4 = '' OR v.severity = ?4 OR (?1 = 1 AND ?4 = 'threat' AND EXISTS (
+                SELECT 1 FROM ai_category_overrides c WHERE c.domain = v.domain)))
             AND (?5 = '' OR (?5 = 'exempt' AND EXISTS (
                 SELECT 1 FROM ai_overrides o WHERE o.domain = v.domain AND o.action = 'allow'))
                 OR (?5 = 'not_exempt' AND NOT EXISTS (
@@ -1346,7 +1478,8 @@ impl AiStore {
             |r| r.get(0),
         )?;
         let order = if threats_only {
-            "v.confidence DESC, v.classified_at DESC, v.domain"
+            "EXISTS (SELECT 1 FROM ai_category_overrides c WHERE c.domain = v.domain) DESC,
+             v.confidence DESC, v.classified_at DESC, v.domain"
         } else {
             "v.classified_at DESC, v.domain"
         };

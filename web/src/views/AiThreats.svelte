@@ -301,6 +301,19 @@
     }
   }
 
+  // Drop the operator's label: the AI's own verdict decides again.
+  async function clearLabel(domain) {
+    notice = null;
+    error = null;
+    try {
+      await api.aiOverride(domain, 'clear_category');
+      notice = `${domain} no longer carries your label; the AI decides again.`;
+      await load();
+    } catch (e) {
+      error = formatApiError(e);
+    }
+  }
+
   async function restoreThreat(domain) {
     notice = null;
     error = null;
@@ -571,7 +584,8 @@
             {#if show('category')}
             <td>
               {#if r.category_override}
-                <span title={r.category ? `You relabelled it; the AI detected ${titleCase(r.category)}` : 'You relabelled it'}>{titleCase(r.category_override)}</span>
+                <span title={r.category ? `Your label; the AI detected ${titleCase(r.category)}` : 'Your label'}>{titleCase(r.category_override)}</span>
+                <span class="pill ok tag" title="You labelled this domain a threat: it counts as one whatever the AI scored">Set By You</span>
                 {#if r.category && r.category !== r.category_override}<div class="muted" style="font-size: 0.75rem">Detected: {titleCase(r.category)}</div>{/if}
               {:else if r.category}{titleCase(r.category)}{:else}<span class="muted">-</span>{/if}
             </td>
@@ -611,7 +625,11 @@
                   {:else}
                     <IconButton icon="allow" label="Exempt: never let the AI block this domain or its subdomains" onclick={() => setExempt(r.domain, true)} />
                   {/if}
-                  <IconButton icon="tag" label="Mislabelled: not a threat, record a correction that stops this detection blocking" title="Not a threat: record a correction that stops this detection blocking" onclick={() => (correctionDomain = r.domain)} />
+                  {#if r.category_override}
+                    <IconButton icon="undo" label="Remove your label: let the AI decide again" onclick={() => clearLabel(r.domain)} />
+                  {:else}
+                    <IconButton icon="tag" label="Mislabelled: not a threat, record a correction that stops this detection blocking" title="Not a threat: record a correction that stops this detection blocking" onclick={() => (correctionDomain = r.domain)} />
+                  {/if}
                 {/if}
               </td>
             {/if}
@@ -651,7 +669,7 @@
 {#if correctionDomain}
   <AiCorrectionDialog
     domain={correctionDomain}
-    categories={categories}
+    categories={categories.filter((c) => !threatLabels.includes(c))}
     onCancel={() => (correctionDomain = null)}
     onConfirm={(reason, category) => applyCorrection(correctionDomain, reason, category)}
   />
@@ -668,5 +686,6 @@
   .check { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; }
   .check input { width: auto; }
   .nowrap { white-space: nowrap; }
+  .tag { margin-left: 6px; }
   .evidence { max-width: 200px; font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

@@ -228,12 +228,125 @@ const MIN_SCORE: f32 = 2.0;
 /// phrases, each counted once however often it appears, so stuffing a page
 /// with one keyword cannot inflate the score.
 pub fn classify_text(title: &str, text: &str) -> Option<TextVerdict> {
+    classify_with(CUES, title, text)
+}
+
+/// What an ordinary page is about, for a domain the categorizer is unsure
+/// of: the strongest category in [`CATEGORY_CUES`], or `None`. Only ordinary
+/// categories are in that table, so this never reads a threat; threats are
+/// [`classify_text`]'s job, on its own table, so cues added here cannot
+/// outvote a threat reading.
+pub fn classify_category(title: &str, text: &str) -> Option<TextVerdict> {
+    classify_with(CATEGORY_CUES, title, text)
+}
+
+const fn cue(phrase: &'static str, category: &'static str, weight: f32) -> Cue {
+    Cue {
+        phrase,
+        category,
+        weight,
+    }
+}
+
+/// Phrases that say what an ordinary site is, by the categorizer's labels.
+/// Like the ordinary cues in [`CUES`], one phrase alone never clears
+/// `MIN_SCORE`: a reading takes two, or one strong and one weak. Phrases
+/// are chosen to be specific; words every site has ("menu", "contact us")
+/// are left out.
+const CATEGORY_CUES: &[Cue] = &[
+    cue("breaking news", "news", 1.5),
+    cue("latest news", "news", 1.0),
+    cue("top stories", "news", 1.0),
+    cue("editorial", "news", 1.0),
+    cue("opinion", "news", 0.5),
+    cue("add to cart", "shopping", 1.5),
+    cue("free shipping", "shopping", 1.0),
+    cue("shopping cart", "shopping", 1.0),
+    cue("returns policy", "shopping", 1.0),
+    cue("in stock", "shopping", 1.0),
+    cue("casino", "gambling", 1.5),
+    cue("sportsbook", "gambling", 1.5),
+    cue("free spins", "gambling", 1.5),
+    cue("deposit bonus", "gambling", 1.5),
+    cue("betting odds", "gambling", 1.5),
+    cue("explicit content", "adult", 2.0),
+    cue("adults only", "adult", 1.5),
+    cue("porn", "adult", 1.5),
+    cue("job openings", "jobs", 1.5),
+    cue("job search", "jobs", 1.5),
+    cue("post a job", "jobs", 1.5),
+    cue("apply now", "jobs", 0.5),
+    cue("salary", "jobs", 1.0),
+    cue("online courses", "education", 1.5),
+    cue("enrol", "education", 1.0),
+    cue("admissions", "education", 1.0),
+    cue("curriculum", "education", 1.0),
+    cue("online banking", "finance", 1.5),
+    cue("interest rate", "finance", 1.0),
+    cue("savings account", "finance", 1.5),
+    cue("mortgage", "finance", 1.0),
+    cue("credit card", "finance", 0.5),
+    cue("official website of", "government", 1.5),
+    cue("department of", "government", 1.0),
+    cue("ministry of", "government", 1.0),
+    cue("public services", "government", 1.0),
+    cue("multiplayer", "gaming", 1.5),
+    cue("gameplay", "gaming", 1.0),
+    cue("play now", "gaming", 0.5),
+    cue("leaderboard", "gaming", 1.0),
+    cue("live scores", "sports", 1.5),
+    cue("league table", "sports", 1.5),
+    cue("fixtures", "sports", 1.0),
+    cue("match report", "sports", 1.0),
+    cue("recipes", "food", 1.5),
+    cue("ingredients", "food", 1.0),
+    cue("order food", "food", 1.5),
+    cue("restaurant", "food", 1.0),
+    cue("tv shows", "streaming", 1.5),
+    cue("watch now", "streaming", 1.0),
+    cue("episodes", "streaming", 1.0),
+    cue("movies", "streaming", 0.5),
+    cue("followers", "social", 1.0),
+    cue("share photos", "social", 1.5),
+    cue("connect with friends", "social", 1.5),
+    cue("find your match", "dating", 1.5),
+    cue("singles", "dating", 1.0),
+    cue("online dating", "dating", 1.5),
+    cue("homes for sale", "real-estate", 1.5),
+    cue("property for sale", "real-estate", 1.5),
+    cue("for rent", "real-estate", 1.0),
+    cue("bedrooms", "real-estate", 1.0),
+    cue("used cars", "auto", 1.5),
+    cue("test drive", "auto", 1.5),
+    cue("new cars", "auto", 1.0),
+    cue("dealership", "auto", 1.0),
+    cue("bitcoin", "crypto", 1.0),
+    cue("ethereum", "crypto", 1.0),
+    cue("blockchain", "crypto", 1.0),
+    cue("cryptocurrency", "crypto", 1.0),
+    cue("api reference", "developer", 1.5),
+    cue("documentation", "developer", 1.0),
+    cue("open source", "developer", 1.0),
+    cue("sdk", "developer", 1.0),
+    cue("webmail", "email", 1.5),
+    cue("compose", "email", 0.5),
+    cue("inbox", "email", 1.0),
+    cue("virtual machines", "cloud", 1.5),
+    cue("cloud hosting", "cloud", 1.5),
+    cue("object storage", "cloud", 1.0),
+    cue("no logs", "vpn-proxy", 1.5),
+    cue("hide your ip", "vpn-proxy", 1.5),
+    cue("vpn", "vpn-proxy", 1.0),
+    cue("proxy server", "vpn-proxy", 1.0),
+];
+
+fn classify_with(table: &[Cue], title: &str, text: &str) -> Option<TextVerdict> {
     let haystack = normalise(&format!("{title} {text}"));
     if haystack.is_empty() {
         return None;
     }
     let mut scores: Vec<(&'static str, f32, Vec<&'static str>)> = Vec::new();
-    for cue in CUES {
+    for cue in table {
         if !haystack.contains(cue.phrase) {
             continue;
         }
@@ -264,7 +377,8 @@ pub fn classify_text(title: &str, text: &str) -> Option<TextVerdict> {
     }
     cues.sort_by(|a, b| {
         let weight = |phrase: &str| {
-            CUES.iter()
+            table
+                .iter()
                 .find(|c| c.phrase == phrase)
                 .map(|c| c.weight)
                 .unwrap_or(0.0)

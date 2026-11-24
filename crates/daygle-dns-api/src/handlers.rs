@@ -2067,9 +2067,15 @@ pub async fn ai_explain(
                 }
             }
             if let Some(relabel) = &relabel {
-                reasons.push(format!(
-                    "You relabelled it as '{relabel}', which is what category blocking matches."
-                ));
+                reasons.push(if settings.is_auto_block_category(relabel) {
+                    format!(
+                        "You labelled it '{relabel}', a threat: it is treated as one whatever the AI scored, and blocks in enforce mode."
+                    )
+                } else {
+                    format!(
+                        "You labelled it '{relabel}', an ordinary category: the AI's threat detection does not block it, and category blocking matches your label."
+                    )
+                });
             }
             if override_row.is_none() {
                 if let Some(parent) = parent_allow.as_ref() {
@@ -2079,7 +2085,9 @@ pub async fn ai_explain(
                     ));
                 }
             }
-            match threat {
+            // Your label decides; the model's verdict is explained only
+            // while there is none.
+            match threat.filter(|_| relabel.is_none()) {
                 Some(t) if t.severity == "disputed" => reasons.push(
                     if t.evidence.contains("established on this network") {
                         format!(
@@ -2121,7 +2129,7 @@ pub async fn ai_explain(
                         }
                     }
                 }
-                None if blocked_category.is_none() => reasons.push(
+                None if blocked_category.is_none() && relabel.is_none() => reasons.push(
                     "No threat verdict yet: the scanner classifies a domain after it is first queried."
                         .to_string(),
                 ),

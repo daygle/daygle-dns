@@ -1359,10 +1359,11 @@ pub enum AiMode {
 #[serde(rename_all = "lowercase")]
 pub enum PageRule {
     /// Record the reading with the verdict; never change the verdict.
-    #[default]
     Evidence,
     /// Let a page that agrees raise the threat confidence. A page that
-    /// disagrees is recorded but ignored: this rule can only strengthen.
+    /// disagrees is recorded but ignored: this rule can only strengthen, so
+    /// a site cannot talk its way out of a verdict. The default.
+    #[default]
     Corroborate,
     /// A page that agrees raises the confidence; a page that reads as an
     /// ordinary category caps it at the page's own certainty.
@@ -1471,9 +1472,11 @@ pub struct AiSettings {
     /// threat it would otherwise have reported. The threat channel never
     /// reports `benign` as a threat whatever the model says.
     pub learn_negatives: bool,
-    /// Read the page behind each threat candidate and record what its text
-    /// says next to the verdict. Off by default: it makes outbound requests
-    /// to the sites this network visits, from this server. See
+    /// Read the page behind each threat candidate (and each domain the
+    /// categorizer is unsure of) and record what its text says next to the
+    /// verdict. On by default, with `page_rule = corroborate` so a page can
+    /// only strengthen a threat. It makes outbound requests to the sites
+    /// this network visits, from this server. See
     /// `page_fetch_timeout_secs`, `page_fetch_max_bytes` and
     /// `page_candidates_per_scan` for the limits.
     pub fetch_pages: bool,
@@ -1531,8 +1534,8 @@ impl Default for AiSettings {
             block_threshold: 0.99,
             confidence_floor: 0.2,
             category_confidence_floor: 0.2,
-            category_ttl_secs: 30 * 86400,
-            threat_ttl_secs: 7 * 86400,
+            category_ttl_secs: 90 * 86400,
+            threat_ttl_secs: 14 * 86400,
             verifier_model_path: String::new(),
             verifier_reference_path: String::new(),
             verifier_threshold: 0.35,
@@ -1540,11 +1543,11 @@ impl Default for AiSettings {
             retrain_interval_secs: 86_400,
             trial_new_models: true,
             learn_negatives: false,
-            fetch_pages: false,
+            fetch_pages: true,
             page_fetch_timeout_secs: 5,
             page_fetch_max_bytes: 512 * 1024,
             page_candidates_per_scan: 16,
-            page_rule: PageRule::Evidence,
+            page_rule: PageRule::Corroborate,
             page_confidence_floor: 0.6,
             threat_feeds: true,
             network_evidence: true,
@@ -6282,7 +6285,8 @@ mod tests {
         assert!(!cfg.dot.enabled && !cfg.doh.enabled && !cfg.doq.enabled);
         assert!(!cfg.dhcp.enabled);
         assert!(!cfg.syslog.enabled && !cfg.log_export.enabled && !cfg.dnstap.enabled);
-        assert!(!cfg.ai.enabled && !cfg.ai.fetch_pages);
+        // The AI is off; page reading only runs inside it.
+        assert!(!cfg.ai.enabled);
         assert!(!cfg.ecs.enabled && !cfg.dns64.enabled);
         // Filtering is inert until entries are added; abuse limits are opt-in.
         assert!(cfg.policy.allowlist.is_empty() && cfg.policy.blocklist.is_empty());
@@ -7340,15 +7344,15 @@ scope = "groups"
         // memory: the stored overlay dropped them, so the next restart put
         // the config file's values (off, evidence) back.
         let mut c = DaygleConfig::default();
-        c.ai.fetch_pages = true;
-        c.ai.page_rule = PageRule::Corroborate;
+        c.ai.fetch_pages = false;
+        c.ai.page_rule = PageRule::Decide;
         c.ai.learn_negatives = true;
         let stored = serde_json::to_string(&RuntimeSettings::capture(&c)).unwrap();
         let overlay: RuntimeSettings = serde_json::from_str(&stored).unwrap();
         let mut restarted = DaygleConfig::default();
         overlay.apply_to(&mut restarted);
-        assert!(restarted.ai.fetch_pages);
-        assert_eq!(restarted.ai.page_rule, PageRule::Corroborate);
+        assert!(!restarted.ai.fetch_pages);
+        assert_eq!(restarted.ai.page_rule, PageRule::Decide);
         assert!(restarted.ai.learn_negatives);
     }
 
@@ -7376,7 +7380,7 @@ scope = "groups"
         assert!(legacy.is_untouched());
         assert!(AiUpdate::capture_ai(&d).is_untouched());
         let edited = AiSettings {
-            fetch_pages: true,
+            fetch_pages: false,
             ..AiSettings::default()
         };
         assert!(!AiUpdate::capture_ai(&edited).is_untouched());

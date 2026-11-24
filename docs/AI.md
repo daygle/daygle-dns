@@ -15,7 +15,12 @@ are happy with the verdict log. Set `DAYGLE_DNS_AI=0` when installing to
 leave the scanner off.
 
 - The operator allowlist always wins.
-- Expired verdicts go back into the scan queue.
+- Expired verdicts go back into the scan queue. Threats are re-checked
+  after 14 days and classifications after 90 days
+  (`ai.threat_ttl_secs`, `ai.category_ttl_secs`), and expired verdicts are
+  looked for every hour (`ai.expire_check_secs`). An expired threat stops
+  blocking until it is checked again, so that check stays frequent; it costs
+  one indexed query.
 - Verdicts are available from the REST API under `/api/ai/*` (see
   [API.md](API.md#ai-scanner)).
 
@@ -31,6 +36,12 @@ and verdict TTL.
 - **Threat detection** is the only channel that can auto-block, and only
   fresh, high-confidence verdicts. The **AI → Threats** tab lists what it
   blocks.
+  Your own label wins on both tabs: relabelling a domain with a ticked
+  threat label makes it a threat (it blocks in enforce mode whatever the AI
+  scored, and never expires), and relabelling it with any other category
+  stops the AI's detection from blocking it. Exemptions still win, and
+  unticking the label stops your threat labels too. Removing your label
+  lets the AI decide again.
   It reports only the labels in `ai.auto_block_categories` (`malware`,
   `phishing`, `scam` by default).
 
@@ -202,22 +213,30 @@ On by default. Every threat verdict is checked against that evidence:
 
 | Evidence | Effect |
 |---|---|
-| A feed lists it under a threat label | Corroborated at 99% (blocks in enforce mode at the default threshold), even over a verifier dispute |
+| A feed lists it under a threat label | Corroborated at 99% (blocks in enforce mode at the default threshold), even over a verifier dispute, and even when the AI saw no threat in the name at all |
 | Established on this network | Disputed: kept and shown, never auto-blocks |
 | A machine-generated name first seen today | Noted, +5%, never above 95% |
 
 Your exemptions and corrections still win over all of it.
 
+The evidence is applied again when it changes, not only when a verdict is
+made: a threat-feed or popular-sites download re-checks every verdict whose
+listing changed, and the hourly expiry check re-checks the threats on domains
+that have since become established. A different model going live (a
+promotion, a rollback, or new model files after a restart) brings forward the
+re-check of every verdict on a domain still in use, spread over 3 days, so the
+better model corrects old verdicts without waiting out their lifetime.
+
 ## Page fetching (`ai.fetch_pages`)
 
-Off by default. When on, the server fetches the home page of each new threat
+On by default. The server fetches the home page of each new threat
 candidate, reads its title and text with a small cue classifier, and stores
 the result with the verdict. `ai.page_rule` decides what that reading may do:
 
 | `ai.page_rule` | Effect |
 |---|---|
-| `evidence` (default) | Recorded only. |
-| `corroborate` | A page that agrees can raise the confidence. |
+| `evidence` | Recorded only. |
+| `corroborate` (default) | A page that agrees can raise the confidence. It never lowers it, so a site cannot talk its way out of a block. |
 | `decide` | Also caps the confidence when the page reads as an ordinary category and has no threat cue at all. |
 
 The page is written by the site being judged, so a site that shows a fetcher
@@ -225,6 +244,20 @@ harmless text can game `decide`. That is why it is opt-in.
 
 Disputed threat candidates are read too, after the undisputed ones. Their
 pages are the ordinary examples the page-text model learns from.
+
+Fetching contacts the site from this server, so the site sees the server's
+address. Turn `ai.fetch_pages` off if that is not acceptable.
+
+### Categories from pages
+
+In the same time budget, the server also reads the page of each domain the
+categorizer is unsure of (below 50% confidence, or no category at all), most
+looked-up first. If the page's text clearly names an ordinary category
+(job listings, recipes, homes for sale and the like) more surely than the
+name did, the domain takes that category. These labels are marked as the
+page's, are never trained on (a site writes its own page, and the shared
+model must not learn from it), and never make or clear a threat. Your own
+label always wins.
 
 ### Page-text model
 

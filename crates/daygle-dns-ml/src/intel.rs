@@ -108,7 +108,7 @@ pub const MAX_POPULAR_PROBE: usize = 300;
 /// ([`crate::evidence`]): a verdict carrying one depends on the evidence
 /// settings.
 const EVIDENCE_NOTES: &[&str] = &[
-    ", listed by ",
+    crate::evidence::LISTED_NOTE,
     "a popular site",
     "established on this network",
     "machine-generated-looking name",

@@ -222,6 +222,10 @@ impl AiEngine {
             &network,
         )?;
 
+        // A model file that changed while the server was down (a release
+        // bundle, a new configured path) re-checks verdicts like a promotion.
+        note_live_model(&store, &shared_path, &logs);
+
         // The channels sit behind reloadable handles, so a new model goes
         // live without a restart.
         let content_swap = backend::Reloadable::new(content);
@@ -258,6 +262,7 @@ impl AiEngine {
             let learned = learned_shared.clone();
             let reference = learned_reference.clone();
             let network = network.clone();
+            let store = store.clone();
             Box::new(move |path: &Path| {
                 let current = settings.load_full();
                 let file = path.to_string_lossy().into_owned();
@@ -269,6 +274,7 @@ impl AiEngine {
                 content_swap.replace(content);
                 threat_swap.replace(threat);
                 announce(&logs, path == learned, "classifier", &file);
+                note_live_model(&store, &file, &logs);
                 model.store(Arc::new(file));
                 active.store(path == learned, std::sync::atomic::Ordering::Relaxed);
                 Ok(())
@@ -458,14 +464,37 @@ impl AiEngine {
     /// The threat verdict is kept for audit and retraining, but it stops
     /// blocking and leaves the exported threat list until the mark is cleared.
     pub fn set_not_threat_override(&self, domain: &str, reason: &str) -> Result<()> {
+        // A threat label the operator set earlier says the opposite: the
+        // newer decision wins.
+        if self
+            .store
+            .category_override(domain)?
+            .is_some_and(|label| self.settings.load().is_auto_block_category(&label))
+        {
+            self.store.clear_category_override(domain)?;
+        }
         self.store.set_override(domain, "not_threat", reason)?;
         self.refresh_snapshot_now();
         Ok(())
     }
 
-    /// Relabel `domain` as `category` for the console and category blocking.
-    /// The scanner keeps classifying it; the operator's label wins.
+    /// Relabel `domain` as `category`: the operator's word on the domain,
+    /// on both tabs. A label ticked as a threat makes it a threat (it
+    /// blocks in enforce mode, whatever the model said); any other label is
+    /// an ordinary category and stops the model's threat verdict from
+    /// blocking. The scanner keeps classifying the domain underneath.
     pub fn set_category_override(&self, domain: &str, category: &str) -> Result<()> {
+        if self.settings.load().is_auto_block_category(category) {
+            // "Not a threat" says the opposite; the newer decision wins.
+            if self
+                .store
+                .list_overrides()?
+                .iter()
+                .any(|o| o.domain == domain && o.action == "not_threat")
+            {
+                self.store.clear_override(domain)?;
+            }
+        }
         self.store.set_category_override(domain, category)?;
         self.refresh_snapshot_now();
         Ok(())
@@ -643,12 +672,26 @@ impl AiEngine {
         let cfg = self.settings.load_full();
         let now = chrono::Utc::now().timestamp();
         let eligible = self.scanner.eligible_blocks(&cfg, now)?;
-        Ok(self
+        // The operator's own threat labels are exported at full confidence,
+        // with their label and no expiry, in place of the model's row.
+        let mut rows: Vec<(String, String, f32, i64)> = self
             .store
             .export_threats(now, cfg.block_threshold)?
             .into_iter()
-            .filter(|(domain, ..)| eligible.contains_key(domain))
-            .collect())
+            .filter(|(domain, ..)| {
+                eligible
+                    .get(domain)
+                    .is_some_and(|block| block.expires_at != i64::MAX)
+            })
+            .collect();
+        let mut labelled: Vec<(String, String, f32, i64)> = eligible
+            .into_iter()
+            .filter(|(_, block)| block.expires_at == i64::MAX)
+            .map(|(domain, block)| (domain, block.category, 1.0, i64::MAX))
+            .collect();
+        labelled.sort_by(|a, b| a.0.cmp(&b.0));
+        labelled.append(&mut rows);
+        Ok(labelled)
     }
 
     /// Categories the loaded backend can emit (model labels or heuristic
@@ -710,6 +753,61 @@ fn threat_channel(
         threat,
         network.clone(),
     )))
+}
+
+/// How soon verdicts are re-checked once a different model is live: spread
+/// over this window, so a better model corrects old verdicts in days.
+pub const MODEL_CHANGE_RECHECK_SECS: i64 = 3 * 86_400;
+const LIVE_MODEL_KEY: &str = "live_model";
+
+/// What identifies the model file in use: its path, size and modification
+/// time (a promotion rewrites the same path).
+fn model_fingerprint(path: &str) -> String {
+    let path = path.trim();
+    if path.is_empty() {
+        return "heuristic".to_string();
+    }
+    let (len, modified) = std::fs::metadata(path)
+        .map(|m| {
+            (
+                m.len(),
+                m.modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_secs()),
+            )
+        })
+        .unwrap_or((0, 0));
+    format!("{path}:{len}:{modified}")
+}
+
+/// Record the model now live; when it differs from the one before, bring
+/// forward the re-check of the verdicts the old model made (see
+/// [`AiStore::stagger_rechecks`]). Never fails the caller.
+fn note_live_model(store: &AiStore, path: &str, logs: &LogStore) {
+    let fingerprint = model_fingerprint(path);
+    let before = store.meta(LIVE_MODEL_KEY).ok().flatten();
+    if before.as_deref() == Some(fingerprint.as_str()) {
+        return;
+    }
+    if before.is_some() {
+        match store.stagger_rechecks(chrono::Utc::now().timestamp(), MODEL_CHANGE_RECHECK_SECS)
+        {
+            Ok(0) => {}
+            Ok(n) => logs.push(
+                daygle_dns_core::LogLevel::Info,
+                "ai",
+                format!(
+                    "a different model is live: {n} verdict(s) will be re-checked over the next {} days",
+                    MODEL_CHANGE_RECHECK_SECS / 86_400
+                ),
+            ),
+            Err(e) => tracing::warn!(error = %e, "could not schedule re-checks after a model change"),
+        }
+    }
+    if let Err(e) = store.set_meta(LIVE_MODEL_KEY, &fingerprint) {
+        tracing::warn!(error = %e, "could not record the live model");
+    }
 }
 
 /// Whether a learned model should be preferred over the configured one: it
