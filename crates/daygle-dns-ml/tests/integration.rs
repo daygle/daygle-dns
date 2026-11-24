@@ -4094,6 +4094,14 @@ fn a_listed_domain_is_a_threat_even_when_its_name_reads_harmless() {
     let blocks = ai.snapshot().load();
     assert_eq!(blocks["harmless-looking.example"].category, "phishing");
     assert!(threat_list(&ai).contains(&"harmless-looking.example".to_string()));
+    // It blocks, but never trains the name model: its name reads as
+    // ordinary, and teaching it as a threat taught ordinary names are.
+    assert!(!ai
+        .store
+        .confident_verdicts(0.0, 0.0, chrono::Utc::now().timestamp(), 1000)
+        .unwrap()
+        .iter()
+        .any(|(_, _, domain)| domain == "harmless-looking.example"));
 }
 
 /// A page that says what it is, for a domain the categorizer is unsure of.

@@ -47,6 +47,11 @@ use crate::store::{AiStore, Sighting};
 pub const LISTED_CONFIDENCE: f32 = 0.99;
 /// What a feed listing writes into a verdict's evidence.
 pub const LISTED_NOTE: &str = ", listed by ";
+/// How a threat verdict made from a feed listing alone begins: the model
+/// saw no threat in the name. Such verdicts block, but never train the name
+/// model - their names are, by definition, ones that read as ordinary, and
+/// teaching them as threats taught it that ordinary names are threats.
+pub const UNFLAGGED_NOTE: &str = "no threat in the name";
 /// How much a machine-generated name first seen today raises a threat
 /// verdict, and the most it can raise it to: never to blocking on its own.
 const GENERATED_RAISE: f32 = 0.05;
@@ -136,7 +141,7 @@ impl NetworkEvidence {
             confidence: LISTED_CONFIDENCE,
             severity: Severity::Threat,
             evidence: format!(
-                "no threat in the name{LISTED_NOTE}{} as {}",
+                "{UNFLAGGED_NOTE}{LISTED_NOTE}{} as {}",
                 feed.source, feed.label
             ),
         })

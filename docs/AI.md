@@ -169,7 +169,9 @@ through `policy.feed_mirror` when one is set, and keeps the last good copy in
 The downloads name domains and reveal nothing about this network's traffic.
 A stable one in five names is held out of training to test every candidate
 model and trial. The rest train the threat labels, up to 1,000 per label per
-retrain. A feed listing also confirms a threat verdict for training. Only the
+retrain. A feed listing also confirms a threat verdict for training, except
+one the feed alone made (the AI saw no threat in the name): it blocks, but
+its ordinary-looking name never trains the model as a threat. Only the
 labels ticked in `ai.auto_block_categories` are used. Your
 corrections win over a feed.
 

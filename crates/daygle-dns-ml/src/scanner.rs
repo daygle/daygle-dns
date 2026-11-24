@@ -38,6 +38,9 @@ pub struct ActiveBlock {
 
 /// Longest the language-model stage may run in one scan cycle.
 const LLM_STAGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(180);
+/// A question is only started with at least this long (or the answer limit,
+/// if shorter) left in the stage: a page takes 30-60 s on a slow CPU.
+const LLM_MIN_START: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The confidence a threat verdict takes when the language model reads its
 /// page as a threat too, or `None` to leave it: two independent readings
@@ -437,10 +440,13 @@ impl Scanner {
         for candidate in candidates {
             // Each answer gets the configured limit, but never more than the
             // stage has left: a slow server cannot hold the scan past it.
+            // A question started with less than a typical answer's time
+            // left would only be cut off: leave it for the next cycle.
             let left = deadline.saturating_duration_since(std::time::Instant::now());
-            if left < std::time::Duration::from_secs(5) {
+            if left < timeout.min(LLM_MIN_START) {
                 break;
             }
+            let budget_cut = left < timeout;
             let reading = match crate::llm::ask(
                 &cfg.llm_url,
                 &cfg.llm_model,
@@ -451,6 +457,15 @@ impl Scanner {
                 &labels,
             ) {
                 Ok(reading) => reading,
+                // The scan's budget, not the answer limit, ran out: the page
+                // is read next cycle. Not a fault.
+                Err(e) if budget_cut && e.starts_with("no answer within") => {
+                    self.log_info(format!(
+                        "AI language model stopped for this scan (its time budget ran out); {} is read next scan",
+                        candidate.domain
+                    ));
+                    break;
+                }
                 Err(e) => {
                     // An unreachable server would fail every candidate the
                     // same way: stop for this cycle, the rows stay queued.
