@@ -203,6 +203,12 @@ pub fn ask(
         "stream": false,
         "format": schema(labels),
         "keep_alive": "10m",
+        // Thinking models (qwen3.5 and the like) reason before they answer,
+        // and that reasoning arrives in a separate `thinking` field this
+        // reader never looks at. It would still be paid for out of the
+        // answer's own budget, leaving `response` empty; ask for no thinking
+        // so the tokens go to the JSON. Models that cannot think ignore it.
+        "think": false,
         // 2048 tokens hold the prompt and a 3,000-character page, and load
         // faster and in less memory than a larger window.
         "options": { "temperature": 0, "num_predict": 96, "num_ctx": 2048 }
@@ -712,6 +718,60 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("cannot connect"), "{err}");
+    }
+
+    /// A thinking model's reasoning comes back in a `thinking` field this
+    /// reader never reads and is paid for out of the answer's budget, so the
+    /// request asks for no thinking. Nothing was sent before, which left
+    /// `response` empty on qwen3.5 and every page "not the JSON asked for".
+    #[test]
+    fn the_request_asks_for_no_thinking() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let sent = Arc::new(Mutex::new(String::new()));
+        let seen = Arc::clone(&sent);
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = v.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0u8; length];
+            let _ = reader.read_exact(&mut body);
+            if let Ok(mut seen) = seen.lock() {
+                *seen = String::from_utf8_lossy(&body).to_string();
+            }
+            let reply = r#"{"response":"{\"category\":\"news\",\"threat\":false,\"confidence\":0.9,\"reason\":\"A news site.\"}","done":true}"#;
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                reply.len(),
+                reply
+            );
+        });
+        let reading = ask(
+            &url,
+            "thinking-model",
+            Duration::from_secs(5),
+            "news.example",
+            "News",
+            "Today's headlines.",
+            &labels(),
+        )
+        .expect("a plain JSON answer");
+        assert_eq!(reading.category.as_deref(), Some("news"));
+        let request: Value = serde_json::from_str(&sent.lock().unwrap()).expect("a JSON request");
+        assert_eq!(request.get("think"), Some(&Value::Bool(false)), "{request}");
     }
 
     /// A page in a script of one token a character is cut shorter than an
