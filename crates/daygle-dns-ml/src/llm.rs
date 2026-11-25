@@ -236,8 +236,11 @@ pub fn ask(
         .get("thinking")
         .and_then(Value::as_str)
         .is_some_and(|t| !t.trim().is_empty());
-    let unanswered = || {
-        if thought {
+    // Blame thinking only with evidence it crowded the answer out: nothing
+    // was answered, or Ollama stopped at the token budget ("length").
+    let cut_short = value.get("done_reason").and_then(Value::as_str) == Some("length");
+    let unanswered = |answer: &str| {
+        if thought && (answer.trim().is_empty() || cut_short) {
             "the model spent its answer budget thinking (it ignores the request not to); \
              choose a model that can answer without thinking"
                 .to_string()
@@ -247,10 +250,10 @@ pub fn ask(
     };
     let answer = match value.get("response").and_then(Value::as_str) {
         Some(answer) => answer,
-        None if thought => return Err(unanswered()),
+        None if thought => return Err(unanswered("")),
         None => return Err("no answer".to_string()),
     };
-    parse_answer(answer, labels).ok_or_else(unanswered)
+    parse_answer(answer, labels).ok_or_else(|| unanswered(answer))
 }
 
 // ── Management ──────────────────────────────────────────────────────────
@@ -817,6 +820,26 @@ mod tests {
         }));
         let err = ask_fake(&url).unwrap_err();
         assert!(err.contains("spent its answer budget thinking"), "{err}");
+
+        // Thinking that ran into the budget mid-answer is blamed too.
+        let (url, _) = fake_ollama(json!({
+            "response": "{\"category\":",
+            "thinking": "A news site.",
+            "done": true,
+            "done_reason": "length"
+        }));
+        let err = ask_fake(&url).unwrap_err();
+        assert!(err.contains("spent its answer budget thinking"), "{err}");
+
+        // A malformed answer the model finished is not thinking's fault.
+        let (url, _) = fake_ollama(json!({
+            "response": "not json",
+            "thinking": "A news site.",
+            "done": true,
+            "done_reason": "stop"
+        }));
+        let err = ask_fake(&url).unwrap_err();
+        assert_eq!(err, "the answer was not the JSON asked for");
 
         // An empty answer with no thinking keeps the plain message.
         let (url, _) = fake_ollama(json!({ "response": "", "done": true }));
