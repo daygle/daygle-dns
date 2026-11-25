@@ -228,11 +228,29 @@ pub fn ask(
     if !status.is_success() {
         return Err(format!("HTTP {status}"));
     }
-    let answer = value
-        .get("response")
+    // A model that cannot stop thinking (gpt-oss takes only thinking levels
+    // and ignores `think: false`) can spend the whole budget reasoning and
+    // leave the answer empty or cut short: say so, rather than blaming the
+    // answer's shape.
+    let thought = value
+        .get("thinking")
         .and_then(Value::as_str)
-        .ok_or_else(|| "no answer".to_string())?;
-    parse_answer(answer, labels).ok_or_else(|| "the answer was not the JSON asked for".to_string())
+        .is_some_and(|t| !t.trim().is_empty());
+    let unanswered = || {
+        if thought {
+            "the model spent its answer budget thinking (it ignores the request not to); \
+             choose a model that can answer without thinking"
+                .to_string()
+        } else {
+            "the answer was not the JSON asked for".to_string()
+        }
+    };
+    let answer = match value.get("response").and_then(Value::as_str) {
+        Some(answer) => answer,
+        None if thought => return Err(unanswered()),
+        None => return Err("no answer".to_string()),
+    };
+    parse_answer(answer, labels).ok_or_else(unanswered)
 }
 
 // ── Management ──────────────────────────────────────────────────────────
@@ -720,12 +738,9 @@ mod tests {
         assert!(err.contains("cannot connect"), "{err}");
     }
 
-    /// A thinking model's reasoning comes back in a `thinking` field this
-    /// reader never reads and is paid for out of the answer's budget, so the
-    /// request asks for no thinking. Nothing was sent before, which left
-    /// `response` empty on qwen3.5 and every page "not the JSON asked for".
-    #[test]
-    fn the_request_asks_for_no_thinking() {
+    /// A stand-in Ollama server for one request: replies with `reply` (the
+    /// whole `/api/generate` body) and keeps the request body it was sent.
+    fn fake_ollama(reply: Value) -> (String, Arc<Mutex<String>>) {
         use std::io::{BufRead, BufReader, Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -748,10 +763,11 @@ mod tests {
             }
             let mut body = vec![0u8; length];
             let _ = reader.read_exact(&mut body);
+            // Kept before replying, so the caller sees it once `ask` returns.
             if let Ok(mut seen) = seen.lock() {
                 *seen = String::from_utf8_lossy(&body).to_string();
             }
-            let reply = r#"{"response":"{\"category\":\"news\",\"threat\":false,\"confidence\":0.9,\"reason\":\"A news site.\"}","done":true}"#;
+            let reply = reply.to_string();
             let _ = write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -759,8 +775,12 @@ mod tests {
                 reply
             );
         });
-        let reading = ask(
-            &url,
+        (url, sent)
+    }
+
+    fn ask_fake(url: &str) -> Result<LlmReading, String> {
+        ask(
+            url,
             "thinking-model",
             Duration::from_secs(5),
             "news.example",
@@ -768,10 +788,40 @@ mod tests {
             "Today's headlines.",
             &labels(),
         )
-        .expect("a plain JSON answer");
+    }
+
+    /// A thinking model's reasoning comes back in a `thinking` field this
+    /// reader never reads and is paid for out of the answer's budget, so the
+    /// request asks for no thinking. Nothing was sent before, which left
+    /// `response` empty on qwen3.5 and every page "not the JSON asked for".
+    #[test]
+    fn the_request_asks_for_no_thinking() {
+        let (url, sent) = fake_ollama(json!({
+            "response": r#"{"category":"news","threat":false,"confidence":0.9,"reason":"A news site."}"#,
+            "done": true
+        }));
+        let reading = ask_fake(&url).expect("a plain JSON answer");
         assert_eq!(reading.category.as_deref(), Some("news"));
         let request: Value = serde_json::from_str(&sent.lock().unwrap()).expect("a JSON request");
         assert_eq!(request.get("think"), Some(&Value::Bool(false)), "{request}");
+    }
+
+    /// A model that thinks regardless (gpt-oss ignores `think: false`) and
+    /// runs out of budget is reported as such, not as a malformed answer.
+    #[test]
+    fn a_model_that_only_thought_is_reported_as_thinking() {
+        let (url, _) = fake_ollama(json!({
+            "response": "",
+            "thinking": "The user wants a category. The page lists headlines, so",
+            "done": true
+        }));
+        let err = ask_fake(&url).unwrap_err();
+        assert!(err.contains("spent its answer budget thinking"), "{err}");
+
+        // An empty answer with no thinking keeps the plain message.
+        let (url, _) = fake_ollama(json!({ "response": "", "done": true }));
+        let err = ask_fake(&url).unwrap_err();
+        assert_eq!(err, "the answer was not the JSON asked for");
     }
 
     /// A page in a script of one token a character is cut shorter than an
