@@ -935,6 +935,33 @@ async fn the_language_model_status_reports_an_unreachable_server() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A test is given at least five minutes even when the per-answer limit is
+/// shorter, because its first answer also loads the model. The status says
+/// which limit it will use, so the raise is visible instead of silent.
+#[tokio::test]
+async fn the_test_limit_is_raised_and_reported() {
+    let dir = scratch_dir("llm-test-timeout");
+    let ai = engine(&dir);
+    let mut settings = (*ai.settings.load_full()).clone();
+    settings.llm_url = "http://127.0.0.1:9".to_string();
+    settings.llm_timeout_secs = 60;
+    ai.apply_settings(&settings);
+    let state = AppState::for_tests(Some(ai.clone()));
+    let status = json(state.clone(), "/api/ai/llm").await;
+    assert_eq!(
+        status["timeout_secs"], 60,
+        "the per-answer limit is unchanged"
+    );
+    assert_eq!(status["test_timeout_secs"], 300, "raised for a test");
+
+    // A limit already above the floor is used as it is.
+    settings.llm_timeout_secs = 450;
+    ai.apply_settings(&settings);
+    let status = json(state, "/api/ai/llm").await;
+    assert_eq!(status["test_timeout_secs"], 450);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn language_model_requests_are_validated() {
     let dir = scratch_dir("llm-validate");
