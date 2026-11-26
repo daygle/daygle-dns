@@ -1526,6 +1526,7 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         "threshold_trial": applied_trial.map(|t| serde_json::json!({
             "id": t.id,
             "model": t.model,
+            "applied_model": (!t.applied_model.is_empty()).then(|| t.applied_model.clone()),
             "base_threshold": t.base_threshold,
             "candidate": t.candidate,
             "fpr_target": t.fpr_target,
@@ -2479,6 +2480,7 @@ fn threshold_trial_json(t: &daygle_dns_ml::store::ThresholdTrial) -> serde_json:
     serde_json::json!({
         "id": t.id,
         "model": t.model,
+        "applied_model": (!t.applied_model.is_empty()).then(|| t.applied_model.clone()),
         "base_threshold": t.base_threshold,
         "candidate": t.candidate,
         "fpr_target": t.fpr_target,
@@ -2637,10 +2639,15 @@ pub async fn ai_threshold_apply(
     // trial's own recorded base may be older, if another trial moved it), and
     // it is what undoing this trial must put back.
     let base = ai.settings.load_full().block_threshold;
+    // The model actually live at this moment, not the one the trial was
+    // measured against: a retrain may have promoted another one in between,
+    // and the threshold and the model only mean something together.
+    let applied_model = daygle_dns_ml::threshold::model_version(&ai.live_model_path());
     let marked = run_blocking({
         let ai = ai.clone();
         let id = trial.id;
-        move || ai.store.mark_threshold_applied(id, base)
+        let model = applied_model.clone();
+        move || ai.store.mark_threshold_applied(id, base, &model)
     })
     .await;
     match marked {
@@ -2674,8 +2681,9 @@ pub async fn ai_threshold_apply(
         "applied": true,
         "id": trial.id,
         "block_threshold": trial.candidate,
+        "model": applied_model,
         "message": format!(
-            "The block threshold is {:.3}. The model ({}) is unchanged.",
+            "The block threshold is {:.3}, recorded against model {}. The model itself is unchanged.",
             trial.candidate, trial.model
         ),
     }))
@@ -2697,8 +2705,8 @@ pub async fn ai_threshold_rollback(
         move || ai.store.mark_threshold_rolled_back(input.id)
     })
     .await;
-    let base = match rolled {
-        Ok(Some(base)) => base,
+    let (base, applied_model) = match rolled {
+        Ok(Some((base, model))) => (base, model),
         Ok(None) => {
             return error_response(
                 StatusCode::CONFLICT,
@@ -2718,10 +2726,27 @@ pub async fn ai_threshold_rollback(
             input.id
         ),
     );
+    // A rollback moves the threshold alone. The model recorded at apply time
+    // is reported so an operator can see whether the candidate that is being
+    // undone is still the model that ran it, or whether a retrain has since
+    // replaced it.
+    let live_model = daygle_dns_ml::threshold::model_version(&ai.live_model_path());
+    let model_note = if applied_model.is_empty() {
+        "the model is unchanged (the model live at apply time was not recorded for this trial)"
+            .to_string()
+    } else if applied_model == live_model {
+        "the model is unchanged".to_string()
+    } else {
+        format!(
+            "the model is unchanged: this trial was applied under {applied_model}, and {live_model} is live now"
+        )
+    };
     Json(serde_json::json!({
         "applied": true,
         "block_threshold": base,
-        "message": format!("The block threshold is back to {base:.3}; the model is unchanged."),
+        "model": (!applied_model.is_empty()).then_some(applied_model),
+        "live_model": live_model,
+        "message": format!("The block threshold is back to {base:.3}; {model_note}."),
     }))
     .into_response()
 }

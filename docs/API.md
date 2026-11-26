@@ -1708,20 +1708,25 @@ off the cycle still runs the expiry check and refreshes the block snapshot;
 `GET /api/ai/threshold` reports `block_threshold`, `fpr_target`
 (`ai.threshold_fpr_target`), `model` (the live model's `path@stamp:bytes`,
 `builtin` when there is none), `in_force` (the applied trial, or `null`) and
-the last 20 `trials`. `POST /api/ai/threshold/trial` runs one: it chooses the
-lowest threshold whose false-positive rate on established and unseen domains
-meets the target, validates it on a held-out fifth of the evidence, records
-it with the model version and returns `{trial, message}`. Nothing is applied.
-`POST /api/ai/threshold/apply` with `{"id": n}` puts that trial's candidate in
-force and publishes it as `ai.block_threshold`; a trial that did not pass is a
-`400`, an unknown id a `404`, and one already in force a `409` (applying a
-trial rolls back whichever one was). `POST /api/ai/threshold/rollback` with the
-id in force puts back the threshold that trial replaced, again without
-touching the model; a trial that is not in force is a `409`. Each trial row
-carries `model`, `base_threshold`, `candidate`, `fpr_target`, `passed`,
-`in_force`, the RFC 3339 stamps, `restored_threshold` once undone, and
-`report` (samples, tuning/held-out splits, one row per group: established,
-confirmed threats, corrections, unseen domains, and a `summary` sentence).
+the last 20 `trials`. `POST /api/ai/threshold/trial` runs one: it scores the
+store's threat verdicts by the same confidence `ai.block_threshold` compares,
+chooses the lowest threshold whose false-positive rate on established and
+unseen domains meets the target, validates it on a held-out fifth of the
+evidence, records it with the model version and returns `{trial, message}`.
+Nothing is applied. `POST /api/ai/threshold/apply` with `{"id": n}` puts that
+trial's candidate in force and publishes it as `ai.block_threshold`, recording
+the model that was live at that moment as `applied_model`; a trial that did
+not pass is a `400`, an unknown id a `404`, and one already in force a `409`
+(applying a trial rolls back whichever one was). `POST /api/ai/threshold/rollback`
+with the id in force puts back the threshold that trial replaced, again
+without touching the model, and returns `model` (the one it was applied under)
+and `live_model` (the one running now) so the two can be told apart; a trial
+that is not in force is a `409`. Each trial row carries `model`,
+`applied_model` (empty until applied), `base_threshold`, `candidate`,
+`fpr_target`, `passed`, `in_force`, the RFC 3339 stamps, `restored_threshold`
+once undone, and `report` (samples, tuning/held-out splits, one row per group:
+established, confirmed threats, corrections, unseen domains, and a `summary`
+sentence).
 
 Every threat row and `/api/ai/explain` also carry `signals`: the scored inputs
 shown on their own - `model`, `feed`, `popular`, `established`, `age`, `name` -

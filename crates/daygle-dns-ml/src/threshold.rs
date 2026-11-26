@@ -333,8 +333,9 @@ pub fn held_out(domain: &str) -> bool {
     hash.is_multiple_of(HOLD_OUT_EVERY)
 }
 
-/// Read the evidence a trial runs on: every threat verdict that carries a
-/// model score, labelled by what the store knows about the name.
+/// Read the evidence a trial runs on: every threat verdict, scored by the
+/// confidence the block gate compares, labelled by what the store knows about
+/// the name.
 pub fn collect(
     store: &AiStore,
     intel: &IntelIndex,
@@ -354,7 +355,7 @@ pub fn collect(
             .entry(row.domain.to_ascii_lowercase())
             .or_insert((row.action, row.category));
     }
-    let rows = store.scored_threats(limit)?;
+    let rows = store.gate_scores(limit)?;
     Ok(rows
         .into_iter()
         .map(|(domain, score)| {

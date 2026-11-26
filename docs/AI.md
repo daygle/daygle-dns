@@ -240,7 +240,13 @@ is stable between runs.
 
 The threshold is chosen by false positives, never by overall accuracy: a
 threshold that catches more threats by calling more harmless domains threats
-is not an improvement. Four groups are reported separately, as four score
+is not an improvement. It is fitted on the same confidence the block gate
+compares (`ai.block_threshold` against a verdict's confidence, after the
+evidence stages), not on the model's raw score, so the measured rate describes
+the decision the threshold will actually make. Every stored threat verdict is
+counted, including ones the evidence disputed or an override settled; the gate
+blocks none of those, so the measured false-positive rate is an upper bound on
+what the threshold will do. Four groups are reported separately, as four score
 rows: domains established on this network, confirmed threats (a feed or a
 correction says so), the operator's corrections, and unseen domains.
 
@@ -249,9 +255,13 @@ the candidate, the false-positive target, the outcome, the per-group rows and
 the model version it measured (`path@stamp:bytes`, or `builtin`) in one row,
 because a threshold means nothing apart from the model that produced the
 scores. `POST /api/ai/threshold/apply` puts a trial's candidate in force, and
-refuses a trial that did not keep the target on the held-out half.
-`POST /api/ai/threshold/rollback` puts back the threshold that trial replaced;
-that moves the threshold alone, so a model promoted since stays live.
+refuses a trial that did not keep the target on the held-out half. Applying
+also records the model that was live at that moment beside the threshold it
+replaced, since a retrain can promote a different model between the trial and
+its application. `POST /api/ai/threshold/rollback` puts back the threshold
+that trial replaced; that moves the threshold alone, so a model promoted
+since stays live, and the response names the model the trial was applied
+under so the two can be reverted together by hand if that is what is wanted.
 
 ## Outside evidence
 

@@ -1097,6 +1097,63 @@ async fn threshold_trials_are_recorded_and_never_apply_themselves() {
 }
 
 #[tokio::test]
+async fn applying_a_trial_records_the_live_model_and_rollback_reports_it() {
+    let dir = scratch_dir("threshold-model");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai.clone()));
+    // A store with no evidence cannot produce a passing trial itself, so the
+    // candidate is recorded directly; the HTTP paths are what this checks.
+    let trial = ai
+        .store
+        .save_threshold_trial(&daygle_dns_ml::store::NewThresholdTrial {
+            model: "builtin".to_string(),
+            base_threshold: 0.99,
+            candidate: 0.96,
+            fpr_target: 0.01,
+            passed: true,
+            report: "{}".to_string(),
+        })
+        .unwrap();
+    let live = daygle_dns_ml::threshold::model_version(&ai.live_model_path());
+
+    let (code, _, body) = call(
+        state.clone(),
+        "POST",
+        "/api/ai/threshold/apply",
+        Some(serde_json::json!({ "id": trial.id })),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let applied = ai.store.threshold_trial(trial.id).unwrap().unwrap();
+    assert!(applied.in_force());
+    assert_eq!(applied.applied_model, live);
+    assert!((applied.base_threshold - 0.99).abs() < 1e-6);
+
+    // The list names the model the candidate actually went live with, next to
+    // the one the trial was measured against.
+    let listed = json(state.clone(), "/api/ai/threshold").await;
+    assert_eq!(
+        listed["in_force"]["applied_model"].as_str(),
+        Some(live.as_str())
+    );
+
+    let (code, _, body) = call(
+        state.clone(),
+        "POST",
+        "/api/ai/threshold/rollback",
+        Some(serde_json::json!({ "id": trial.id })),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let rolled: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!((rolled["block_threshold"].as_f64().unwrap() - 0.99).abs() < 1e-6);
+    assert_eq!(rolled["model"].as_str(), Some(live.as_str()));
+    assert_eq!(rolled["live_model"].as_str(), Some(live.as_str()));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn autonomy_and_the_false_positive_target_round_trip() {
     let dir = scratch_dir("threshold-settings");
     let ai = engine(&dir);

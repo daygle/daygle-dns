@@ -355,6 +355,7 @@ impl AiStore {
             threshold::TABLES
         ))?;
         evidence::upgrade(&conn)?;
+        threshold::upgrade(&conn)?;
         let has_column = |name: &str| -> Result<bool> {
             Ok(conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM pragma_table_info('ai_verdicts') WHERE name = ?1)",

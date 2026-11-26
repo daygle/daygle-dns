@@ -3,11 +3,13 @@
 //! beside the model it was tuned with.
 //!
 //! Each row holds the model version and the threshold as one candidate: the
-//! number means nothing away from the model it was measured against. Rolling
+//! number means nothing away from the model it was measured against. Applying
+//! also records the model that was live at that moment, because a retrain can
+//! promote a different one between the trial and its application. Rolling
 //! back restores `base_threshold` and leaves the model alone (see
 //! `POST /api/ai/threshold/rollback`).
 
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use daygle_dns_core::error::Result;
 
@@ -25,9 +27,27 @@ CREATE TABLE IF NOT EXISTS ai_threshold_trials (
     created_at         INTEGER NOT NULL,
     applied_at         INTEGER NOT NULL DEFAULT 0,
     rolled_back_at     INTEGER NOT NULL DEFAULT 0,
-    restored_threshold REAL NOT NULL DEFAULT 0
+    restored_threshold REAL NOT NULL DEFAULT 0,
+    applied_model      TEXT NOT NULL DEFAULT ''
 );
 ";
+
+/// Add the columns a database from before this feature lacks.
+pub(super) fn upgrade(conn: &Connection) -> rusqlite::Result<()> {
+    let has: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('ai_threshold_trials') \
+         WHERE name = 'applied_model')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has {
+        conn.execute(
+            "ALTER TABLE ai_threshold_trials ADD COLUMN applied_model TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    Ok(())
+}
 
 /// One threshold trial as it was recorded.
 #[derive(Debug, Clone)]
@@ -54,6 +74,11 @@ pub struct ThresholdTrial {
     pub rolled_back_at: i64,
     /// The threshold the rollback put back (0 until one happened).
     pub restored_threshold: f32,
+    /// The model that was live when this trial was applied. A model promoted
+    /// after the trial ran is a different candidate, so this is recorded at
+    /// apply time rather than assumed from [`Self::model`]. Empty for a trial
+    /// applied before the column existed.
+    pub applied_model: String,
 }
 
 impl ThresholdTrial {
@@ -75,7 +100,8 @@ pub struct NewThresholdTrial {
 }
 
 const COLUMNS: &str = "id, model, base_threshold, candidate, fpr_target, passed, report, \
-                       created_at, applied_at, rolled_back_at, restored_threshold";
+                       created_at, applied_at, rolled_back_at, restored_threshold, \
+                       applied_model";
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<ThresholdTrial> {
     let report: String = r.get(6)?;
@@ -91,6 +117,7 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<ThresholdTrial> {
         applied_at: r.get(8)?,
         rolled_back_at: r.get(9)?,
         restored_threshold: r.get(10)?,
+        applied_model: r.get(11)?,
     })
 }
 
@@ -167,12 +194,13 @@ impl AiStore {
             .optional()?)
     }
 
-    /// Mark a trial applied in place of `base`, the threshold it replaces.
-    /// Only one threshold can be in force, so any other trial still marked
-    /// applied is rolled back onto its own base. A trial that was rolled back
-    /// can be applied again: the console offers that, and refusing it would
-    /// leave a candidate that passed unreachable.
-    pub fn mark_threshold_applied(&self, id: i64, base: f32) -> Result<bool> {
+    /// Mark a trial applied in place of `base`, the threshold it replaces,
+    /// recording `model` as the model actually live at that moment. Only one
+    /// threshold can be in force, so any other trial still marked applied is
+    /// rolled back onto its own base. A trial that was rolled back can be
+    /// applied again: the console offers that, and refusing it would leave a
+    /// candidate that passed unreachable.
+    pub fn mark_threshold_applied(&self, id: i64, base: f32, model: &str) -> Result<bool> {
         let conn = self.lock()?;
         let now = super::now_epoch();
         conn.execute(
@@ -183,28 +211,29 @@ impl AiStore {
         )?;
         let changed = conn.execute(
             "UPDATE ai_threshold_trials
-             SET applied_at = ?1, base_threshold = ?3, rolled_back_at = 0,
-                 restored_threshold = 0
+             SET applied_at = ?1, base_threshold = ?3, applied_model = ?4,
+                 rolled_back_at = 0, restored_threshold = 0
              WHERE id = ?2 AND (applied_at = 0 OR rolled_back_at > 0)",
-            params![now, id, base],
+            params![now, id, base, model],
         )?;
         Ok(changed > 0)
     }
 
     /// Roll a trial back: the threshold returns to the trial's own base, not
     /// to some later number, and the model is untouched. Returns the
-    /// threshold to restore, or `None` when the trial was not in force.
-    pub fn mark_threshold_rolled_back(&self, id: i64) -> Result<Option<f32>> {
+    /// threshold to restore and the model the trial was applied under, or
+    /// `None` when the trial was not in force.
+    pub fn mark_threshold_rolled_back(&self, id: i64) -> Result<Option<(f32, String)>> {
         let conn = self.lock()?;
-        let base: Option<f32> = conn
+        let base: Option<(f32, String)> = conn
             .query_row(
-                "SELECT base_threshold FROM ai_threshold_trials
+                "SELECT base_threshold, applied_model FROM ai_threshold_trials
                  WHERE id = ?1 AND applied_at > 0 AND rolled_back_at = 0",
                 params![id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        let Some(base) = base else {
+        let Some((base, model)) = base else {
             return Ok(None);
         };
         conn.execute(
@@ -213,17 +242,19 @@ impl AiStore {
              WHERE id = ?3",
             params![super::now_epoch(), base, id],
         )?;
-        Ok(Some(base))
+        Ok(Some((base, model)))
     }
 
-    /// The threat verdicts that carry a model score, for a threshold trial:
-    /// `(domain, threat_score)`, highest score first.
-    pub fn scored_threats(&self, limit: u32) -> Result<Vec<(String, f32)>> {
+    /// The scores a threshold trial is fitted on: `(domain, confidence)`,
+    /// highest first. `confidence` is the number `fresh_blocked` compares with
+    /// `ai.block_threshold`; reading `threat_score` here measured the model's
+    /// raw opinion while enforcement ignored what the evidence stages added.
+    pub fn gate_scores(&self, limit: u32) -> Result<Vec<(String, f32)>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT domain, threat_score FROM ai_verdicts
-             WHERE channel = 'threat' AND status = 'classified' AND threat_score > 0
-             ORDER BY threat_score DESC, domain LIMIT ?1",
+            "SELECT domain, confidence FROM ai_verdicts
+             WHERE channel = 'threat' AND status = 'classified' AND confidence > 0
+             ORDER BY confidence DESC, domain LIMIT ?1",
         )?;
         let collected = stmt
             .query_map(params![limit.clamp(1, 200_000)], |r| {
@@ -262,28 +293,106 @@ mod tests {
         let (_dir, store) = store();
         let first = trial(&store, 0.99, 0.96);
 
-        assert!(store.mark_threshold_applied(first.id, 0.99).unwrap());
+        assert!(store
+            .mark_threshold_applied(first.id, 0.99, "builtin")
+            .unwrap());
         assert!(store.threshold_trial(first.id).unwrap().unwrap().in_force());
         // Applying the one already in force is not a second application.
-        assert!(!store.mark_threshold_applied(first.id, 0.99).unwrap());
+        assert!(!store
+            .mark_threshold_applied(first.id, 0.99, "builtin")
+            .unwrap());
 
         // Undo puts back the threshold the application replaced.
         assert_eq!(
-            store.mark_threshold_rolled_back(first.id).unwrap(),
+            store
+                .mark_threshold_rolled_back(first.id)
+                .unwrap()
+                .map(|(base, _)| base),
             Some(0.99)
         );
         assert!(!store.threshold_trial(first.id).unwrap().unwrap().in_force());
 
         // And it can go back in force, now replacing the 0.97 an operator set
         // in between, so undoing it again returns there and not to 0.99.
-        assert!(store.mark_threshold_applied(first.id, 0.97).unwrap());
+        assert!(store
+            .mark_threshold_applied(first.id, 0.97, "builtin")
+            .unwrap());
         let in_force = store.threshold_trial(first.id).unwrap().unwrap();
         assert!(in_force.in_force());
         assert!((in_force.base_threshold - 0.97).abs() < 1e-6);
         assert!((in_force.restored_threshold - 0.0).abs() < 1e-6);
         assert_eq!(
-            store.mark_threshold_rolled_back(first.id).unwrap(),
+            store
+                .mark_threshold_rolled_back(first.id)
+                .unwrap()
+                .map(|(base, _)| base),
             Some(0.97)
+        );
+    }
+
+    /// The model live at apply time is what makes a candidate readable as one
+    /// thing: the trial's own `model` is the one it was measured with, which a
+    /// retrain may have replaced before the operator applied it.
+    #[test]
+    fn applying_records_the_model_that_was_live() {
+        let (_dir, store) = store();
+        let first = trial(&store, 0.99, 0.96);
+
+        assert!(store
+            .mark_threshold_applied(first.id, 0.99, "model-v14@1700000000:4096")
+            .unwrap());
+        let applied = store.threshold_trial(first.id).unwrap().unwrap();
+        assert_eq!(applied.applied_model, "model-v14@1700000000:4096");
+        // The model it was measured with is kept apart from the one applied.
+        assert_eq!(applied.model, "builtin");
+
+        // Rolling back returns the threshold and the model that went with it.
+        assert_eq!(
+            store.mark_threshold_rolled_back(first.id).unwrap(),
+            Some((0.99, "model-v14@1700000000:4096".to_string()))
+        );
+        let undone = store.threshold_trial(first.id).unwrap().unwrap();
+        assert_eq!(undone.applied_model, "model-v14@1700000000:4096");
+
+        // A second application records the model live then, not the first.
+        assert!(store
+            .mark_threshold_applied(first.id, 0.99, "model-v15")
+            .unwrap());
+        assert_eq!(
+            store
+                .threshold_trial(first.id)
+                .unwrap()
+                .unwrap()
+                .applied_model,
+            "model-v15"
+        );
+    }
+
+    /// The trial must read the number the gate compares. A row whose evidence
+    /// raised its confidence above the model's own score is exactly where the
+    /// two used to diverge.
+    #[test]
+    fn the_trial_reads_the_confidence_the_gate_compares() {
+        let (_dir, store) = store();
+        store.observe("age-raised.example").unwrap();
+        store
+            .save_verdicts(&[crate::store::NewVerdict {
+                domain: "age-raised.example".to_string(),
+                channel: crate::store::Channel::Threat,
+                category: "phishing".to_string(),
+                severity: "threat".to_string(),
+                status: "classified".to_string(),
+                confidence: 0.97,
+                backend: "fasttext".to_string(),
+                evidence: "raised because the domain is newly registered".to_string(),
+                threat_score: 0.80,
+                expires_after_secs: 3_600,
+            }])
+            .unwrap();
+
+        assert_eq!(
+            store.gate_scores(10).unwrap(),
+            vec![("age-raised.example".to_string(), 0.97)]
         );
     }
 
@@ -293,8 +402,12 @@ mod tests {
         let first = trial(&store, 0.99, 0.96);
         let second = trial(&store, 0.99, 0.93);
 
-        assert!(store.mark_threshold_applied(first.id, 0.99).unwrap());
-        assert!(store.mark_threshold_applied(second.id, 0.96).unwrap());
+        assert!(store
+            .mark_threshold_applied(first.id, 0.99, "builtin")
+            .unwrap());
+        assert!(store
+            .mark_threshold_applied(second.id, 0.96, "builtin")
+            .unwrap());
 
         assert!(store.applied_threshold_trial().unwrap().unwrap().id == second.id);
         let undone = store.threshold_trial(first.id).unwrap().unwrap();
