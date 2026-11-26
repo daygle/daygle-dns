@@ -1739,7 +1739,7 @@ pub async fn ai_threats(
                         "status": r.status,
                         "confidence": r.confidence,
                         "threat_score": (r.threat_score > 0.0).then_some(r.threat_score),
-                        "reason": threat_reason(&r),
+                        "reason": threat_reason(r),
                         "backend": r.backend,
                         "evidence": r.evidence,
                         "observations": r.observations,
