@@ -1509,6 +1509,9 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         "threat_ttl_secs": settings.threat_ttl_secs,
         "block_threshold": settings.block_threshold,
         "auto_block_categories": settings.auto_block_categories,
+        // Families forced off, and the resulting set the threat channel uses.
+        "auto_block_removals": settings.auto_block_removals,
+        "threat_labels": settings.threat_labels(),
         // The configured model (empty: the built-in rules).
         "model_path": settings.model_path,
         // Self-maintained model: automatic retraining and what the last run
@@ -1639,11 +1642,36 @@ pub async fn ai_verdicts(
     }
 }
 
+/// Why the AI judged a row as it did, in one line for the Threats tab: the
+/// label, the model's own score for the threat families, and the evidence
+/// the pipeline added (a feed listing, a verifier disagreement, ...).
+fn threat_reason(row: &daygle_dns_ml::store::VerdictRow) -> String {
+    let score = if row.threat_score > 0.0 {
+        format!("{:.0}% threat score", row.threat_score * 100.0)
+    } else {
+        "not scored".to_string()
+    };
+    match row.severity.as_str() {
+        "threat" => format!(
+            "model judged '{}' a threat ({score}): {}",
+            row.category, row.evidence
+        ),
+        "disputed" => format!(
+            "model judged '{}' a threat ({score}) but this is disputed: {}",
+            row.category, row.evidence
+        ),
+        _ => format!(
+            "'{}' is not a threat label ({score}): {}",
+            row.category, row.evidence
+        ),
+    }
+}
+
 /// `GET /api/ai/threats?q=&category=&severity=&exemption=&page=&per_page=` - paginated list of the
 /// scanner's *detected* threat verdicts (`threat` and `disputed` severity),
 /// highest confidence first: what the threat channel reported, not merely what
-/// blocks. Only the labels in `ai.auto_block_categories` are reported, so
-/// the list follows that list
+/// blocks. Only threat labels are reported (the built-in families unless
+/// removed, plus the operator's list), so the list follows them
 /// live: unticking a label deletes its stored verdicts, so its rows go at
 /// once and a later re-tick does not bring them back - only a fresh
 /// detection reports the domain again. Each row carries `blocked`:
@@ -1670,7 +1698,7 @@ pub async fn ai_threats(
     };
     // The list shows the labels treated as threats right now, read from the
     // live settings: the operator's edit applies to the list immediately.
-    let threat_labels = Some(ai.settings.load().auto_block_categories.clone());
+    let threat_labels = Some(ai.settings.load().threat_labels());
     let listed = run_blocking({
         let ai = ai.clone();
         move || {
@@ -1710,6 +1738,8 @@ pub async fn ai_threats(
                         "severity": r.severity,
                         "status": r.status,
                         "confidence": r.confidence,
+                        "threat_score": (r.threat_score > 0.0).then_some(r.threat_score),
+                        "reason": threat_reason(&r),
                         "backend": r.backend,
                         "evidence": r.evidence,
                         "observations": r.observations,
@@ -2163,6 +2193,8 @@ pub async fn ai_explain(
                 "mode": mode,
                 "block_threshold": settings.block_threshold,
                 "auto_block_categories": settings.auto_block_categories.clone(),
+                "threat_labels": settings.threat_labels(),
+                "auto_block_removals": settings.auto_block_removals.clone(),
                 "blocked": blocked_category.is_some(),
                 "blocked_category": blocked_category,
                 "label": label,
@@ -2183,6 +2215,7 @@ pub async fn ai_explain(
                     "severity": t.severity,
                     "status": t.status,
                     "confidence": t.confidence,
+                    "threat_score": (t.threat_score > 0.0).then_some(t.threat_score),
                     "backend": t.backend,
                     "evidence": t.evidence,
                     "observations": t.observations,
@@ -6983,7 +7016,10 @@ pub struct AiUpdate {
     pub scan_interval_secs: Option<u64>,
     pub expire_check_secs: Option<u64>,
     pub max_domains_per_scan: Option<u32>,
+    /// Labels treated as threats (the built-in families plus anything here).
     pub auto_block_categories: Option<Vec<String>>,
+    /// Built-in families forced off, whatever the list says.
+    pub auto_block_removals: Option<Vec<String>>,
     pub block_threshold: Option<f32>,
     pub confidence_floor: Option<f32>,
     pub category_ttl_secs: Option<u64>,
@@ -7934,6 +7970,15 @@ pub async fn update_settings(
         if let Some(v) = &a.auto_block_categories {
             config.ai.auto_block_categories =
                 daygle_dns_core::config::AiUpdate::normalize_categories(v.clone());
+        }
+        if let Some(v) = &a.auto_block_removals {
+            config.ai.auto_block_removals =
+                daygle_dns_core::config::AiUpdate::normalize_categories(v.clone());
+        } else if a.auto_block_categories.is_some() {
+            // A console that sends only the list means it the old way: every
+            // built-in family it leaves out is turned off.
+            config.ai.auto_block_removals =
+                daygle_dns_core::config::AiSettings::removals_for(&config.ai.auto_block_categories);
         }
         if let Some(v) = a.block_threshold {
             config.ai.block_threshold = v;

@@ -160,8 +160,8 @@ impl AiEngine {
         let database_path = database_path(settings, authoritative_database);
         let store = Arc::new(AiStore::open(&database_path)?);
         // Live settings, shared by the scanner, the plugin and the threat
-        // channel's category list, so editing `auto_block_categories` takes
-        // effect without a restart.
+        // channel's threat label set, so editing `auto_block_categories` or
+        // `auto_block_removals` takes effect without a restart.
         let settings_swap = Arc::new(ArcSwap::from_pointee(settings.clone()));
         // Outside evidence: the threat feeds (the last good download, until
         // the refresh loop fetches newer) and how this network uses each
@@ -560,8 +560,12 @@ impl AiEngine {
         // threat channel stored a `skipped` row. Both are bounded to the
         // domains in question and start the moment the list changes rather
         // than at each verdict's TTL.
-        let removed: Vec<String> = old
-            .auto_block_categories
+        // Both sides are the effective set, so unticking a built-in family
+        // through `auto_block_removals` withdraws its verdicts exactly as
+        // editing the list does.
+        let old_labels = old.threat_labels();
+        let new_labels = new.threat_labels();
+        let removed: Vec<String> = old_labels
             .iter()
             .filter(|label| !new.is_auto_block_category(label))
             .cloned()
@@ -580,8 +584,7 @@ impl AiEngine {
                 ),
             }
         }
-        let added: Vec<String> = new
-            .auto_block_categories
+        let added: Vec<String> = new_labels
             .iter()
             .filter(|label| !old.is_auto_block_category(label))
             .cloned()

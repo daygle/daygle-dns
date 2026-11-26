@@ -580,8 +580,11 @@ query_db_retention_days = 0
 #     they are the labels Filtering → AI → Classifications lists, and an
 #     operator can relabel any domain there.
 #   - the THREAT channel is the only channel that can block on its own, and
-#     its verdicts are what Filtering → AI → Threats lists. It reports only
-#     the categories named in auto_block_categories.
+#     its verdicts are what Filtering → AI → Threats lists. Malware,
+#     phishing and scam are threats by default; auto_block_categories adds
+#     more labels and auto_block_removals turns a default family off. An
+#     ordinary category (ads, gambling, ...) is never a threat unless you
+#     list it here.
 # Each channel has its own confidence floor and its own verdict TTL, so a
 # floor or TTL tuned for one job does not distort the other.
 #
@@ -594,9 +597,9 @@ query_db_retention_days = 0
 # Safety model:
 #   - mode = "train" records verdicts only; nothing is ever blocked.
 #     Inspect the verdict log for a while, then flip to "enforce".
-#   - In "enforce" mode only threat-channel verdicts in
-#     auto_block_categories (e.g. malware, phishing) auto-block, and only
-#     above block_threshold confidence while fresh (threat_ttl_secs).
+#   - In "enforce" mode only threat-channel verdicts carrying a threat
+#     label auto-block, and only above block_threshold confidence while
+#     fresh (threat_ttl_secs).
 #   - The user allowlist and operator blocklists still apply before AI
 #     verdicts, and POST /api/ai/override pins a domain AI-exempt.
 #   - Expired verdicts re-enter the scan queue; a site that changed is
@@ -617,6 +620,10 @@ scan_interval_secs = 300
 expire_check_secs = 3600
 max_domains_per_scan = 5120
 auto_block_categories = ["malware", "phishing", "scam"]
+# Default families turned off from the console or the API (an entry here wins
+# over the same label in auto_block_categories). Left empty, every default
+# family is a threat.
+# auto_block_removals = []
 
 # The scanner maintains its own model. Every retrain_interval_secs it rebuilds
 # the classifier from your category corrections (AI -> Threats), its own
@@ -627,7 +634,7 @@ auto_block_categories = ["malware", "phishing", "scam"]
 # then on, unless a channel names its own model). Delete learned.bin to fall
 # back. A retrain needs 200+ examples of this install's own, must hold up on
 # held-out corrections and held-out threats, and must still be able to report
-# every auto_block_categories label the model in use can.
+# every threat label the model in use can.
 # auto_retrain = true
 # retrain_interval_secs = 86400
 # Its own verdicts only train when the shipped model (model_path), the

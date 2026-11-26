@@ -69,8 +69,7 @@ const RULES: &[Rule] = &[
         severity: Severity::Info,
     },
     // Fake offers and social engineering: a label, not a blocking decision -
-    // the threat channel turns only `auto_block_categories` labels into
-    // Threats entries.
+    // the threat channel turns only threat labels into Threats entries.
     Rule {
         tokens: &["scam", "giveaway", "doubler", "airdrop", "refundclaim"],
         category: "scam",
@@ -179,6 +178,7 @@ impl DomainClassifier for HeuristicBackend {
                         confidence: rule.rule_confidence,
                         severity: rule.severity,
                         evidence: format!("keyword '{token}'"),
+                        threat_score: None,
                     });
                 }
             }

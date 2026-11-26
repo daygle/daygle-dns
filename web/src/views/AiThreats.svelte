@@ -13,6 +13,8 @@
     { key: 'category', label: 'Category' },
     { key: 'state', label: 'State' },
     { key: 'confidence', label: 'Confidence' },
+    { key: 'score', label: 'Threat Score' },
+    { key: 'reason', label: 'Why' },
     { key: 'seen', label: 'Seen' },
     { key: 'evidence', label: 'Evidence' },
     { key: 're-check', label: 'Re-Check' },
@@ -43,6 +45,9 @@
   // The list as last saved, and how many stored verdicts each label carries:
   // together they say what a save would delete before it happens.
   let savedLabels = $state([]);
+  // The families forced off, kept across saves: a label unticked here joins
+  // them, and a family removed in an earlier visit stays off.
+  let removalLabels = $state([]);
   let threatCounts = $state({});
   let modelLabels = $state([]);
   let savingLabels = $state(false);
@@ -70,11 +75,25 @@
   // with sign-in off there is no stored user at all.
   const isAdmin = getStoredUser()?.role !== 'viewer';
 
+  // The labels that count as threats: the built-in families minus the
+  // removals, plus the listed labels. The status endpoint reports that set;
+  // fall back to computing it when only the list and removals are known.
+  function effectiveThreatLabels(effective, list, removals) {
+    if (Array.isArray(effective)) return [...effective];
+    const off = (removals || []).map((l) => l.toLowerCase());
+    return (list || []).filter((l) => !off.includes(l.toLowerCase()));
+  }
+
   async function loadCategories() {
     try {
       const status = await api.aiStatus();
       modelLabels = [...new Set(status?.backend_categories || [])].sort();
-      threatLabels = [...(status?.auto_block_categories || [])];
+      threatLabels = effectiveThreatLabels(
+        status?.threat_labels,
+        status?.auto_block_categories,
+        status?.auto_block_removals,
+      );
+      removalLabels = [...(status?.auto_block_removals || [])].map((l) => l.toLowerCase());
       savedLabels = [...threatLabels];
       threatCounts = status?.threat_counts || {};
       labelsText = threatLabels.join(', ');
@@ -86,7 +105,12 @@
       // 404: the scanner is off. The saved list still lives in the config.
       try {
         const config = await api.config();
-        threatLabels = [...(config?.ai?.auto_block_categories || [])];
+        threatLabels = effectiveThreatLabels(
+          config?.ai?.threat_labels,
+          config?.ai?.auto_block_categories,
+          config?.ai?.auto_block_removals,
+        );
+        removalLabels = [...(config?.ai?.auto_block_removals || [])].map((l) => l.toLowerCase());
         savedLabels = [...threatLabels];
         labelsText = threatLabels.join(', ');
       } catch {
@@ -132,7 +156,20 @@
     labelsNotice = null;
     labelsError = null;
     try {
-      await api.updateSettings({ ai: { auto_block_categories: [...list] } });
+      // Unticking is expressed as a removal as well as by dropping the label
+      // from the list: a built-in family the list still named (or one the
+      // defaults name) stays off because a removal wins.
+      const next = [...list];
+      const lowered = next.map((l) => l.toLowerCase());
+      const withdrawn = savedLabels
+        .map((l) => l.toLowerCase())
+        .filter((label) => !lowered.includes(label));
+      const removals = [...new Set([...removalLabels, ...withdrawn])].filter(
+        (label) => !lowered.includes(label),
+      );
+      await api.updateSettings({
+        ai: { auto_block_categories: next, auto_block_removals: removals },
+      });
       labelsNotice = 'Threat labels saved and applied live.';
       await Promise.all([loadCategories(), load()]);
     } catch (e) {
@@ -400,8 +437,9 @@
       {/if}
     </div>
     <p class="muted help" style="margin: 0 0 10px">
-      Only ticked labels count as threats. In Enforce mode they block once
-      confident enough; unticked labels never block.
+      Malware, phishing and scam are threats unless you untick them. Only
+      ticked labels count as threats: in Enforce mode they block once
+      confident enough, and unticked labels never block.
     </p>
     {#if labelsNotice}<p class="muted" style="color: var(--ok); margin: 0 0 8px">{labelsNotice}</p>{/if}
     {#if labelsError}<p class="dialog-error">{labelsError}</p>{/if}
@@ -478,7 +516,7 @@
         </ul>
         <p class="muted small" style="margin: 0">
           {#if explainResult.threat}
-            Threat label {titleCase(explainResult.threat.category)} at {percent(explainResult.threat.confidence)}{#if explainResult.threat.over_threshold}, at or above the threshold{:else}, below the threshold{/if}{#if explainResult.threat.severity === 'disputed'}, disputed{/if}.
+            Threat label {titleCase(explainResult.threat.category)} at {percent(explainResult.threat.confidence)}{#if explainResult.threat.threat_score != null} (model threat score {percent(explainResult.threat.threat_score)}){:else} (not scored by the model){/if}{#if explainResult.threat.over_threshold}, at or above the threshold{:else}, below the threshold{/if}{#if explainResult.threat.severity === 'disputed'}, disputed{/if}.
             {#if explainResult.threat.evidence}
               <span class="evidence-line">Evidence: {explainResult.threat.evidence}.</span>
             {/if}
@@ -558,6 +596,8 @@
           {#if show('category')}<th>Category</th>{/if}
           {#if show('state')}<th>State</th>{/if}
           {#if show('confidence')}<th class="num">Confidence</th>{/if}
+          {#if show('score')}<th class="num" title="The model's own probability for the threat families, before evidence and the block threshold">Threat Score</th>{/if}
+          {#if show('reason')}<th title="Why the domain was judged a threat">Why</th>{/if}
           {#if show('seen')}<th class="num" title="In how many scans the domain showed up in your DNS traffic">Seen</th>{/if}
           {#if show('evidence')}<th>Evidence</th>{/if}
           {#if show('re-check')}<th title="When the threat expires: it is checked again if the domain is still being queried, and dropped otherwise">Re-Check</th>{/if}
@@ -598,6 +638,14 @@
             {/if}
             {#if show('confidence')}
               <td class="num">{percent(r.confidence)}</td>
+            {/if}
+            {#if show('score')}
+              <td class="num" title={r.threat_score == null ? 'Not scored: this backend reports no per-label probability' : 'The model\'s own threat score'}>
+                {r.threat_score == null ? '—' : percent(r.threat_score)}
+              </td>
+            {/if}
+            {#if show('reason')}
+              <td class="muted evidence" title={r.reason}>{r.reason || '-'}</td>
             {/if}
             {#if show('seen')}<td class="num">{fmt(r.observations)}</td>{/if}
             {#if show('evidence')}

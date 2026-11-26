@@ -452,7 +452,7 @@
           <tr>
             <td class="muted">Labels Treated as Threats</td>
             <td>
-              {#each status.auto_block_categories || [] as c (c)}
+              {#each status.threat_labels || status.auto_block_categories || [] as c (c)}
                 <span class="pill">{titleCase(c)}</span>{' '}
               {:else}
                 <span class="muted">None</span>

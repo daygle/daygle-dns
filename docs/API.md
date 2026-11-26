@@ -1671,8 +1671,9 @@ POST /api/ai/llm/service       {"action": "install|update|remove"}
 Available when `[ai] enabled = true`. The scanner runs two independent
 channels: `content` categorizes sites (`news`, `shopping`, ...) and stores a
 label only, `threat` reports detected threats and is the only channel that
-can block on its own. `threat` reports only the labels in
-`ai.auto_block_categories`. Both channels run `ai.model_path`; each has its own
+can block on its own. `threat` reports the effective threat labels: the
+built-in families (`malware`, `phishing`, `scam`) minus `ai.auto_block_removals`,
+plus every label in `ai.auto_block_categories`. Both channels run `ai.model_path`; each has its own
 confidence floor and verdict TTL. Blocking a *content* category is an
 operator rule on a client group (`blocked_categories`, see Advanced
 blocking) - the label comes from the scanner, the decision does not.
@@ -1686,11 +1687,13 @@ intervals, TTLs and thresholds (`confidence_floor` is the threat channel's,
 `blockable_counts` (domains that qualify for auto-blocking, by category:
 blocked in enforce mode, what would be blocked in train mode), `threat_counts`
 (stored threat verdicts by label: what saving a label list that drops the
-label deletes) and the current block-snapshot size.
+label deletes), the current block-snapshot size, `auto_block_categories` (the
+operator's list), `auto_block_removals` (the built-in families forced off) and
+`threat_labels` (the resulting effective set).
 
 A domain qualifies for auto-blocking when its *threat-channel* verdict is at
 or above `ai.block_threshold`, neither it nor a parent domain is exempt, and
-its label is one of `ai.auto_block_categories`. A content-channel verdict never qualifies, whatever it is called. A threat
+its label is one of the effective threat labels. A content-channel verdict never qualifies, whatever it is called. A threat
 verdict the MiniLM verifier disagreed with (severity `disputed`, decided at
 `ai.verifier_threshold`) never qualifies.
 The built-in heuristic rules score at most 0.35, so they never auto-block on
@@ -1716,13 +1719,19 @@ to classified threats: verdicts with severity `threat` or `disputed`,
 highest confidence first, with optional category substring `category`, severity
 (`threat`/`disputed`), exemption (`exempt`/`not_exempt`) and domain substring
 `q` filters. With the shared classifier the list holds only the labels
-currently in `ai.auto_block_categories`, read live: unticking a label
+currently treated as threats (`threat_labels`), read live: unticking a label,
+or removing a built-in family through `auto_block_removals`,
 deletes its stored threat verdicts, so its rows leave the list at once and a
 later re-tick does not bring them back - only a fresh classification (the
 domain is seen again and re-detected) reports it again. Declaring a label a
 threat re-queues the threat-channel verdicts of the domains whose
 categorization already carries it, so the next scan cycle reports them
-instead of waiting for their verdict TTL. Each row
+instead of waiting for their verdict TTL. Each row also carries
+`threat_score`: the model's own probability for the threat families (the
+highest over their per-label scores), `null` when the backend reports none
+(the built-in rules, or a model that only emits one verdict); and `reason`,
+one line for the console: the label, that score and the evidence (a feed
+listing, a verifier disagreement, ...). Each row
 also carries `blocked`, whether the domain is in the *current* block
 snapshot - actually auto-blocked in enforce mode (in train mode the snapshot
 is empty, so every row is `false`). The console's AI → Threats tab renders
@@ -1840,7 +1849,7 @@ else the strongest verdict). `POST /api/ai/retrain` runs the same job now; a
 scheduled retrain and a manual one never run at once. A retrain needs at least
 200 examples of this install's own across two labels, and a candidate model
 must reproduce at least half of its own training set, and must still be able
-to emit every label in `ai.auto_block_categories` that the model in use can,
+to emit every threat label that the model in use can,
 or the current model is kept. The result is written
 beside `ai.db` as `learned.bin` (with `learned.json` recording the run), and
 loaded into the running channels immediately. It is preferred over
@@ -1945,7 +1954,7 @@ once per verdict.
 `ai.page_rule` decides whether a reading may move the verdict:
 `evidence` records it only; `corroborate` (default) lets agreement raise the
 threat confidence to the page's own score and ignores disagreement (agreement
-means the label is in `auto_block_categories`); `decide`
+means the label is treated as a threat); `decide`
 also caps a verdict at `1 - page confidence` when the page reads as an
 ordinary category, which can drop it below `block_threshold` and stop a
 name-only block. A reading below `ai.page_confidence_floor` (0.6, clamped
@@ -2008,7 +2017,7 @@ list), and `clear_category` drops the relabel (`404` when there is none).
 A relabel is shown and filtered instead of the model's label, survives
 re-scans, and is what category blocking matches; the row also carries
 `category_overridden` so the console can mark it. It also decides the
-threat side: a label in `ai.auto_block_categories` makes the domain a threat
+threat side: a label treated as a threat makes the domain a threat
 (listed by `GET /api/ai/threats`, in the block snapshot whatever the model
 scored, exported at confidence 1 with no expiry), and any other label keeps
 the model's threat verdict out of both. A threat label clears a `not_threat`

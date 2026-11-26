@@ -99,6 +99,9 @@ pub struct VerdictRow {
     /// Backend that produced the verdict (`fasttext`, `heuristic`).
     pub backend: String,
     pub evidence: String,
+    /// The model's own threat score: its highest probability for a threat
+    /// label, independent of the label it reported. 0 when unknown.
+    pub threat_score: f32,
     /// In how many scan cycles the domain showed up in the query log.
     pub observations: u32,
     /// Unix epoch seconds of the latest classification (0 when pending).
@@ -125,6 +128,9 @@ pub struct NewVerdict {
     pub confidence: f32,
     pub backend: String,
     pub evidence: String,
+    /// The model's own threat score for this verdict (see
+    /// [`VerdictRow::threat_score`]).
+    pub threat_score: f32,
     /// Seconds until the verdict expires (0: never).
     pub expires_after_secs: i64,
 }
@@ -187,6 +193,7 @@ const VERDICTS_TABLE: &str = "CREATE TABLE IF NOT EXISTS ai_verdicts (
     last_seen     INTEGER NOT NULL DEFAULT 0,
     page_fetched_at INTEGER NOT NULL DEFAULT 0,
     llm_checked_at INTEGER NOT NULL DEFAULT 0,
+    threat_score  REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (domain, channel)
 )";
 
@@ -265,6 +272,7 @@ const VERDICT_COLUMNS: &str = concat!(
     "WHERE c.domain = v.domain AND v.channel = 'content'), v.category), ",
     "v.severity, v.status, v.confidence, ",
     "v.backend, v.evidence, v.observations, v.classified_at, v.expires_at, ",
+    "v.threat_score, ",
     "EXISTS (SELECT 1 FROM ai_overrides o ",
     "WHERE o.domain = v.domain AND o.action = 'allow'), ",
     // Only a categorization carries the relabel (see above).
@@ -286,8 +294,9 @@ fn verdict_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<VerdictRow> {
         observations: r.get::<_, i64>(8)? as u32,
         classified_at: r.get(9)?,
         expires_at: r.get(10)?,
-        overridden: r.get(11)?,
-        category_overridden: r.get(12)?,
+        threat_score: r.get::<_, f64>(11)? as f32,
+        overridden: r.get(12)?,
+        category_overridden: r.get(13)?,
     })
 }
 
@@ -359,6 +368,15 @@ impl AiStore {
         if !has_column("page_fetched_at")? {
             conn.execute(
                 "ALTER TABLE ai_verdicts ADD COLUMN page_fetched_at INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        // The model's own threat score, independent of the label it
+        // reported. Rows from before the column show 0 (unknown), which the
+        // console renders as "not scored" rather than "no threat".
+        if !has_column("threat_score")? {
+            conn.execute(
+                "ALTER TABLE ai_verdicts ADD COLUMN threat_score REAL NOT NULL DEFAULT 0",
                 [],
             )?;
         }
@@ -532,6 +550,9 @@ impl AiStore {
             confidence,
             backend: backend.to_string(),
             evidence: evidence.to_string(),
+            // The shorthand leaves the score unknown; callers that have one
+            // use `save_verdicts` with a `NewVerdict`.
+            threat_score: 0.0,
             expires_after_secs,
         }])
     }
@@ -546,7 +567,8 @@ impl AiStore {
             let mut update = tx.prepare(
                 "UPDATE ai_verdicts
                  SET category = ?3, severity = ?4, status = ?5, confidence = ?6,
-                     backend = ?7, evidence = ?8, classified_at = ?9, expires_at = ?10
+                     backend = ?7, evidence = ?8, classified_at = ?9, expires_at = ?10,
+                     threat_score = ?11
                  WHERE domain = ?1 AND channel = ?2 AND status = 'pending'",
             )?;
             for v in verdicts {
@@ -565,7 +587,8 @@ impl AiStore {
                     v.backend,
                     v.evidence,
                     now,
-                    expires_at
+                    expires_at,
+                    v.threat_score
                 ])?;
             }
         }

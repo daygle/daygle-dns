@@ -2444,6 +2444,7 @@ fn a_panicking_worker_does_not_shift_verdicts() {
                 confidence: 0.9,
                 severity: Severity::Info,
                 evidence: String::new(),
+                threat_score: None,
             })
         }
     }
@@ -2944,7 +2945,10 @@ fn the_threat_export_matches_what_blocks() {
     let ai = engine(
         &dir,
         AiSettings {
+            // `scam` is a built-in threat family, so stopping it takes an
+            // explicit removal, not just leaving it off the list.
             auto_block_categories: vec!["phishing".to_string()],
+            auto_block_removals: vec!["malware".to_string(), "scam".to_string()],
             block_threshold: 0.5,
             ..settings(AiMode::Enforce)
         },
@@ -3917,7 +3921,7 @@ fn threat_verdict(ai: &AiEngine, domain: &str, label: &str, confidence: f32) {
 }
 
 fn threat_list(ai: &AiEngine) -> Vec<String> {
-    let labels = ai.settings.load().auto_block_categories.clone();
+    let labels = ai.settings.load().threat_labels();
     let filter = daygle_dns_ml::store::VerdictFilter {
         threat_labels: Some(&labels),
         ..Default::default()
@@ -3956,9 +3960,9 @@ fn a_threat_label_you_set_makes_the_domain_a_threat() {
             && c == "phishing"
             && (*conf - 1.0).abs() < 1e-6));
 
-    // Unticking the label is the operator's other decision: it stops too.
+    // Removing the label is the operator's other decision: it stops too.
     let mut unticked = (*ai.settings.load_full()).clone();
-    unticked.auto_block_categories = vec!["malware".to_string()];
+    unticked.auto_block_removals = vec!["phishing".to_string()];
     ai.apply_settings(&unticked);
     assert!(!ai.snapshot().load().contains_key("news-site.example"));
     assert!(!threat_list(&ai).contains(&"news-site.example".to_string()));

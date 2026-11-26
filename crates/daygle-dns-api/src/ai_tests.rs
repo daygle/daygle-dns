@@ -607,7 +607,10 @@ async fn threat_list_follows_the_labels_treated_as_threats() {
     let dir = scratch_dir("threat-labels");
     let ai = engine(&dir);
     let mut cfg = (*ai.settings.load_full()).clone();
+    // The list narrows the built-in families: phishing is turned off for now,
+    // so only malware counts as a threat.
     cfg.auto_block_categories = vec!["malware".to_string()];
+    cfg.auto_block_removals = vec!["phishing".to_string(), "scam".to_string()];
     ai.settings.store(Arc::new(cfg));
     for (domain, label) in [
         ("bad.example", "malware"),
@@ -631,7 +634,7 @@ async fn threat_list_follows_the_labels_treated_as_threats() {
     }
     let state = AppState::for_tests(Some(ai.clone()));
 
-    // Only the ticked label is a detected threat.
+    // Only the label still in effect is a detected threat.
     let listed = json(state.clone(), "/api/ai/threats").await;
     assert_eq!(listed["total"], 1, "{listed}");
     assert_eq!(listed["entries"][0]["domain"], "bad.example", "{listed}");
@@ -650,6 +653,18 @@ async fn threat_list_follows_the_labels_treated_as_threats() {
     assert_eq!(status, StatusCode::OK, "{body}");
     let listed = json(state.clone(), "/api/ai/threats").await;
     assert_eq!(listed["total"], 3, "every ticked label is listed: {listed}");
+    // A list that leaves a built-in family out records it as removed.
+    let status = json(state.clone(), "/api/ai/status").await;
+    assert_eq!(
+        status["auto_block_removals"],
+        serde_json::json!(["scam"]),
+        "{status}"
+    );
+    assert_eq!(
+        status["threat_labels"],
+        serde_json::json!(["malware", "phishing", "ads"]),
+        "{status}"
+    );
 
     // Untick them again: their rows and their stored verdicts go at once.
     let (status, _, body) = call(
@@ -667,6 +682,19 @@ async fn threat_list_follows_the_labels_treated_as_threats() {
     assert_eq!(
         listed["entries"][0]["domain"], "bad.example",
         "the unticked labels' rows are gone: {listed}"
+    );
+    // Sending the list alone records the families it no longer names as
+    // removals, so the saved config keeps them off.
+    let status = json(state.clone(), "/api/ai/status").await;
+    assert_eq!(
+        status["auto_block_removals"],
+        serde_json::json!(["phishing", "scam"]),
+        "{status}"
+    );
+    assert_eq!(
+        status["threat_labels"],
+        serde_json::json!(["malware"]),
+        "{status}"
     );
 
     // Unticking is a decision to forget: the verdicts are deleted, so a later

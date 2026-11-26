@@ -65,6 +65,13 @@ fn llm_raise(cfg: &AiSettings, base: f32, reading: &crate::llm::LlmReading) -> O
 /// A content verdict below this confidence has its page read (with
 /// `ai.fetch_pages`): the name alone left the categorizer unsure.
 pub const CATEGORY_PAGE_BELOW: f32 = 0.5;
+
+/// How many *new* blocks one snapshot refresh may publish. A model that
+/// suddenly flags a large share of the network is far more likely to be
+/// broken than to have found a mass infection, so the surplus waits for the
+/// next refresh while the alert says how much was held back. Domains already
+/// blocked are never released by this rail.
+pub const MAX_NEW_BLOCKS_PER_REFRESH: usize = 500;
 /// Longest the page stages may run in one scan cycle, together.
 const PAGE_STAGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
 
@@ -315,6 +322,7 @@ impl Scanner {
                     status: status.to_string(),
                     confidence: verdict.as_ref().map_or(0.0, |v| v.confidence),
                     backend: backend.to_string(),
+                    threat_score: verdict.as_ref().and_then(|v| v.threat_score).unwrap_or(0.0),
                     evidence: verdict
                         .map(|v| v.evidence)
                         .unwrap_or_else(|| "no signal".to_string()),
@@ -425,8 +433,9 @@ impl Scanner {
             .filter(|label| label != crate::learn::BENIGN_LABEL)
             .collect();
         let mut labels = content_labels.clone();
-        for label in &cfg.auto_block_categories {
-            let label = label.to_ascii_lowercase();
+        // The effective threat labels, so a family the operator removed is
+        // not offered to the model as an answer.
+        for label in cfg.threat_labels() {
             if !labels.contains(&label) {
                 labels.push(label);
             }
@@ -887,7 +896,8 @@ impl Scanner {
 
     /// Domain -> category, for per-group category blocking.
     ///
-    /// A threat label (`ai.auto_block_categories`: malware, phishing, scam)
+    /// A threat label (the built-in families, unless removed, plus the ones
+    /// the operator listed)
     /// gets here only on the threat channel's terms - a verdict at or above
     /// `block_threshold` that the verifier did not dispute - whatever the
     /// mode: blocking a category is the operator's rule. The categorizer's
@@ -990,6 +1000,27 @@ impl Scanner {
             BlockSnapshot::new()
         };
         let previous = self.snapshot.load();
+        // Safety rail: a broken model (or a tagger change) that suddenly
+        // calls half the network a threat must not black it out in one
+        // refresh. Domains already blocked stay blocked; only the new ones
+        // are held back, oldest name first, and the next refresh admits the
+        // rest once the operator has had a chance to look.
+        let mut snapshot = snapshot;
+        let fresh: Vec<String> = snapshot
+            .keys()
+            .filter(|domain| !previous.contains_key(*domain))
+            .cloned()
+            .collect();
+        let mut withheld = 0usize;
+        if fresh.len() > MAX_NEW_BLOCKS_PER_REFRESH {
+            let mut overflow = fresh;
+            overflow.sort();
+            withheld = overflow.len() - MAX_NEW_BLOCKS_PER_REFRESH;
+            for domain in overflow.iter().skip(MAX_NEW_BLOCKS_PER_REFRESH) {
+                snapshot.remove(domain);
+            }
+        }
+        let snapshot = snapshot;
         let mut added: Vec<(&String, &ActiveBlock)> = snapshot
             .iter()
             .filter(|(domain, _)| !previous.contains_key(*domain))
@@ -1005,17 +1036,34 @@ impl Scanner {
             daygle_dns_core::alerts::raise(
                 daygle_dns_core::alerts::AlertKind::AiBlocks,
                 format!("ai-blocks:{now}"),
-                format!(
-                    "The AI blocked {} new domain{}",
-                    added.len(),
-                    if added.len() == 1 { "" } else { "s" }
-                ),
+                if withheld > 0 {
+                    format!(
+                        "The AI blocked {} new domain{} ({} more held back)",
+                        added.len(),
+                        if added.len() == 1 { "" } else { "s" },
+                        withheld
+                    )
+                } else {
+                    format!(
+                        "The AI blocked {} new domain{}",
+                        added.len(),
+                        if added.len() == 1 { "" } else { "s" }
+                    )
+                },
                 format!(
                     "The AI scanner started blocking: {}{}. Review them under AI -> Threats, \
-                     and exempt any that should stay reachable.",
+                     and exempt any that should stay reachable.{}",
                     list.join(", "),
                     if more > 0 {
                         format!(" and {more} more")
+                    } else {
+                        String::new()
+                    },
+                    if withheld > 0 {
+                        format!(
+                            " {withheld} more new domains were held back by the per-cycle limit \
+                             and will be reconsidered on the next scan."
+                        )
                     } else {
                         String::new()
                     }

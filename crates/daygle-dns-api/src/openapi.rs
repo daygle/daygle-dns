@@ -2742,7 +2742,18 @@ fn ai_schemas() -> Value {
                 "block_threshold": { "type": "number" },
                 "auto_block_categories": {
                     "type": "array",
-                    "items": { "type": "string" }
+                    "items": { "type": "string" },
+                    "description": "Labels treated as threats: the built-in families plus anything listed here."
+                },
+                "auto_block_removals": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Built-in families forced off; a removal wins over the list."
+                },
+                "threat_labels": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "The effective threat labels: the built-in families minus removals, plus the listed labels."
                 },
                 "backend_categories": {
                     "type": "array",

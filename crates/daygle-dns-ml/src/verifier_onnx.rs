@@ -358,6 +358,7 @@ impl DomainClassifier for MiniLmVerifier {
             confidence: cosine.clamp(0.0, 1.0),
             severity: Severity::Info,
             evidence: format!("MiniLM embedding cosine {cosine:.3}"),
+            threat_score: None,
         })
     }
 }

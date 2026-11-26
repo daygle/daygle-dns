@@ -30,8 +30,9 @@ pub enum Channel {
     /// Content categorization: which kind of site is this (`news`,
     /// `shopping`, ...). Verdicts are informational and never auto-block.
     Content,
-    /// Threat detection: is this site one an operator declared block-worthy
-    /// (`ai.auto_block_categories`)? Only this channel can auto-block.
+    /// Threat detection: is this site a threat? The built-in families
+    /// (`ai.auto_block_categories` plus the defaults, minus
+    /// `ai.auto_block_removals`) decide. Only this channel can auto-block.
     Threat,
 }
 
@@ -94,6 +95,10 @@ pub struct Verdict {
     pub severity: Severity,
     /// Short human-readable explanation (matched keywords, label name, ...).
     pub evidence: String,
+    /// The model's own threat score: the highest probability it gave any
+    /// threat label, whether or not that label was the one it reported.
+    /// `None` when the backend cannot score labels individually.
+    pub threat_score: Option<f32>,
 }
 
 /// Input delivered to a backend for one domain.
@@ -130,6 +135,15 @@ pub trait DomainClassifier: Send + Sync {
     /// Classify one input. `None` = "no signal" (the domain is not skipped:
     /// the scanner records the attempt without a verdict).
     fn classify(&self, input: &ClassificationInput) -> Option<Verdict>;
+    /// Every label's probability for one input, as the model scored it.
+    /// The default is the single reported verdict, for backends that only
+    /// expose their top label; the threat channel uses this to score the
+    /// threat labels even when the model's top label is an ordinary one.
+    fn label_scores(&self, input: &ClassificationInput) -> Vec<(String, f32)> {
+        self.classify(input)
+            .map(|v| vec![(v.category, v.confidence)])
+            .unwrap_or_default()
+    }
 }
 
 /// A channel backend that can be replaced while the server is running: model
@@ -163,6 +177,10 @@ impl DomainClassifier for Reloadable {
     fn classify(&self, input: &ClassificationInput) -> Option<Verdict> {
         self.inner.load().classify(input)
     }
+
+    fn label_scores(&self, input: &ClassificationInput) -> Vec<(String, f32)> {
+        self.inner.load().label_scores(input)
+    }
 }
 
 impl<T: DomainClassifier + ?Sized> DomainClassifier for std::sync::Arc<T> {
@@ -177,6 +195,10 @@ impl<T: DomainClassifier + ?Sized> DomainClassifier for std::sync::Arc<T> {
     fn classify(&self, input: &ClassificationInput) -> Option<Verdict> {
         (**self).classify(input)
     }
+
+    fn label_scores(&self, input: &ClassificationInput) -> Vec<(String, f32)> {
+        (**self).label_scores(input)
+    }
 }
 
 impl<T: DomainClassifier + ?Sized> DomainClassifier for Box<T> {
@@ -190,5 +212,9 @@ impl<T: DomainClassifier + ?Sized> DomainClassifier for Box<T> {
 
     fn classify(&self, input: &ClassificationInput) -> Option<Verdict> {
         (**self).classify(input)
+    }
+
+    fn label_scores(&self, input: &ClassificationInput) -> Vec<(String, f32)> {
+        (**self).label_scores(input)
     }
 }

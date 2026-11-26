@@ -1416,12 +1416,18 @@ pub struct AiSettings {
     pub expire_check_secs: u64,
     /// Domains per scan cycle (older ones are picked up on later cycles).
     pub max_domains_per_scan: u32,
-    /// The labels that make a domain a *threat* (lowercase, e.g. `malware`,
-    /// `phishing`, `scam`). The threat channel reports these and nothing
-    /// else. Ordinary categories (news, gambling, ...) never
-    /// appear here - blocking those is a per-group `blocked_categories` policy
-    /// in the console, not a config decision.
+    /// Labels the operator adds to the built-in threat families
+    /// ([`THREAT_FAMILIES`]: `malware`, `phishing`, `scam`). The threat
+    /// channel treats a label as a threat when it is a family (unless
+    /// removed below) or is listed here. Ordinary categories (news,
+    /// gambling, ...) belong here only when the operator wants them treated
+    /// as threats; blocking them is otherwise a per-group
+    /// `blocked_categories` policy in the console.
     pub auto_block_categories: Vec<String>,
+    /// Built-in threat families the operator removed, so the list overrides
+    /// the families in both directions. Empty keeps all of them.
+    #[serde(default)]
+    pub auto_block_removals: Vec<String>,
     /// Minimum confidence for a threat-channel verdict to auto-block.
     pub block_threshold: f32,
     /// Threat-channel verdicts below this confidence are skipped entirely.
@@ -1545,6 +1551,7 @@ impl Default for AiSettings {
                 "phishing".to_string(),
                 "scam".to_string(),
             ],
+            auto_block_removals: Vec::new(),
             block_threshold: 0.99,
             confidence_floor: 0.2,
             category_confidence_floor: 0.2,
@@ -1618,12 +1625,73 @@ fn default_auto_retrain() -> bool {
     true
 }
 
+/// The threat families the classifier is built to recognise. A model that
+/// reports one of these is judging the domain a threat on its own; the
+/// operator's label list adds to them or, by removing one, takes it away.
+/// Kept in step with the labels the shipped starter model is trained on.
+pub const THREAT_FAMILIES: &[&str] = &["malware", "phishing", "scam"];
+
 impl AiSettings {
-    /// Whether `category` is eligible to auto-block in enforce mode.
+    /// Whether `category` is a threat label: a built-in family the operator
+    /// kept, or a label they listed themselves. Enforcement still applies
+    /// `block_threshold`, the verifier and the mode on top of this.
     pub fn is_auto_block_category(&self, category: &str) -> bool {
-        self.auto_block_categories
+        if self
+            .auto_block_removals
             .iter()
             .any(|c| c.eq_ignore_ascii_case(category))
+        {
+            return false;
+        }
+        THREAT_FAMILIES
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case(category))
+            || self
+                .auto_block_categories
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(category))
+    }
+
+    /// The built-in families a label list leaves out: what sending the list
+    /// without removals means for the built-in set. This is how a list saved
+    /// before `auto_block_removals` existed, or sent by an older console, is
+    /// read, so a family the operator had unticked stays unticked.
+    pub fn removals_for(categories: &[String]) -> Vec<String> {
+        THREAT_FAMILIES
+            .iter()
+            .filter(|family| !categories.iter().any(|c| c.eq_ignore_ascii_case(family)))
+            .map(|family| family.to_string())
+            .collect()
+    }
+
+    /// Every label the threat channel treats as a threat, for scoring a
+    /// model's per-label probabilities.
+    pub fn threat_labels(&self) -> Vec<String> {
+        let mut labels: Vec<String> = THREAT_FAMILIES
+            .iter()
+            .filter(|family| {
+                !self
+                    .auto_block_removals
+                    .iter()
+                    .any(|c| c.eq_ignore_ascii_case(family))
+            })
+            .map(|family| family.to_string())
+            .collect();
+        for label in &self.auto_block_categories {
+            // A removal wins over a listed label: it is how the operator turns
+            // a family off without also rewriting the list they shipped with.
+            if self
+                .auto_block_removals
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(label))
+            {
+                continue;
+            }
+            if !labels.iter().any(|c| c.eq_ignore_ascii_case(label)) {
+                labels.push(label.to_ascii_lowercase());
+            }
+        }
+        labels
     }
 }
 
@@ -2563,6 +2631,8 @@ pub struct AiUpdate {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_block_categories: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_block_removals: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub block_threshold: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence_floor: Option<f32>,
@@ -2635,6 +2705,7 @@ impl AiUpdate {
             expire_check_secs: Some(settings.expire_check_secs),
             max_domains_per_scan: Some(settings.max_domains_per_scan),
             auto_block_categories: Some(settings.auto_block_categories.clone()),
+            auto_block_removals: Some(settings.auto_block_removals.clone()),
             block_threshold: Some(settings.block_threshold),
             confidence_floor: Some(settings.confidence_floor),
             category_ttl_secs: Some(settings.category_ttl_secs),
@@ -2703,6 +2774,15 @@ impl AiUpdate {
         }
         if let Some(v) = &self.auto_block_categories {
             ai.auto_block_categories = Self::normalize_categories(v.clone());
+        }
+        if let Some(v) = &self.auto_block_removals {
+            ai.auto_block_removals = Self::normalize_categories(v.clone());
+        } else if self.auto_block_categories.is_some() {
+            // A list saved before removals existed, or one the operator just
+            // edited, overrides the families it leaves out: an install that
+            // unticked `scam` keeps it unticked, and an existing block is
+            // never silently re-enabled by the built-in set.
+            ai.auto_block_removals = AiSettings::removals_for(&ai.auto_block_categories);
         }
         if let Some(v) = self.block_threshold {
             ai.block_threshold = v;
@@ -4329,6 +4409,13 @@ impl DaygleConfig {
             if category.trim().is_empty() {
                 return Err(DaygleError::Config(
                     "ai.auto_block_categories contains an empty category".to_string(),
+                ));
+            }
+        }
+        for category in &ai.auto_block_removals {
+            if category.trim().is_empty() {
+                return Err(DaygleError::Config(
+                    "ai.auto_block_removals contains an empty category".to_string(),
                 ));
             }
         }

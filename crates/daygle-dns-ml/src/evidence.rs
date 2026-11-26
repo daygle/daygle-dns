@@ -144,6 +144,7 @@ impl NetworkEvidence {
                 "{UNFLAGGED_NOTE}{LISTED_NOTE}{} as {}",
                 feed.source, feed.label
             ),
+            threat_score: Some(LISTED_CONFIDENCE),
         })
     }
 
@@ -300,6 +301,7 @@ mod tests {
             confidence,
             severity: Severity::Threat,
             evidence: "model".into(),
+            threat_score: None,
         }
     }
 
@@ -332,8 +334,10 @@ mod tests {
         assert!(got.evidence.contains("listed by Phishing Army as phishing"));
         assert!(judge.listed("news.example").is_none());
 
+        // `phishing` is a built-in family, so removing it from the list is
+        // what stops a phishing feed listing from being a threat.
         let (_dir, _store, judge) = evidence(AiSettings {
-            auto_block_categories: vec!["malware".into()],
+            auto_block_removals: vec!["phishing".into()],
             ..AiSettings::default()
         });
         assert!(judge.listed("paypa1-login.example").is_none());

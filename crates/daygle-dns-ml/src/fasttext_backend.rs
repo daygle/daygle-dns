@@ -17,8 +17,9 @@ use crate::backend::{ClassificationInput, DomainClassifier, Severity, Verdict};
 /// the heuristic backend). Everything else is `info` severity here.
 ///
 /// In the scanner this is overridden by the channel wrapper
-/// ([`crate::channel`]): the threat channel promotes exactly the categories
-/// in `ai.auto_block_categories`, and the content channel is always `info`.
+/// ([`crate::channel`]): the threat channel promotes exactly the effective
+/// threat labels (`AiSettings::threat_labels`), and the content channel is
+/// always `info`.
 /// The mapping is kept for callers that run the backend on its own.
 const DEFAULT_THREAT_CATEGORIES: &[&str] = &["malware", "phishing"];
 
@@ -40,8 +41,8 @@ impl FastTextBackend {
         })?;
         // Autodetect category→severity: labels emitted by the model. A
         // feedback-friendly generic mapping: known threat names are threats,
-        // the rest is info. (The exact auto-block category list is config's
-        // job - `ai.auto_block_categories`.)
+        // the rest is info. (The exact threat label set is config's job -
+        // `AiSettings::threat_labels`.)
         let labels = model.get_labels().0;
         let threat_categories = labels
             .into_iter()
@@ -105,6 +106,25 @@ impl DomainClassifier for FastTextBackend {
             confidence: best.prob,
             severity,
             evidence,
+            threat_score: None,
         })
+    }
+
+    /// Every label's probability, so the threat channel can score a threat
+    /// label the model ranked below its top guess.
+    fn label_scores(&self, input: &ClassificationInput) -> Vec<(String, f32)> {
+        let k = self.model.get_labels().0.len().max(1);
+        self.model
+            .predict(&input.domain, k, 0.0)
+            .into_iter()
+            .filter_map(|p| {
+                let label = p
+                    .label
+                    .strip_prefix("__label__")
+                    .unwrap_or(&p.label)
+                    .to_ascii_lowercase();
+                (!label.is_empty()).then_some((label, p.prob))
+            })
+            .collect()
     }
 }

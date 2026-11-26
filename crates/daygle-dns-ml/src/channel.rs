@@ -9,11 +9,11 @@
 //! | Channel   | Verdict it reports                                      |
 //! |-----------|---------------------------------------------------------|
 //! | `Content` | whatever the categorizer said, always severity `Info`   |
-//! | `Threat`  | only the labels in `ai.auto_block_categories`, severity `Threat` |
+//! | `Threat`  | only the threat labels, severity `Threat`              |
 //!
-//! The threat channel reads its category list from the *live* settings, so
-//! editing `auto_block_categories` changes what the next scan treats as a
-//! threat without a restart. Detection and blocking are separate decisions:
+//! The threat channel reads its label set from the *live* settings, so
+//! editing `auto_block_categories` or `auto_block_removals` changes what the
+//! next scan treats as a threat without a restart. Detection and blocking are separate decisions:
 //! this wrapper decides what is *reported* as a threat, and the scanner's
 //! block snapshot applies `auto_block_categories`, `block_threshold`, the
 //! verifier verdict and the mode before anything blocks. A content verdict is
@@ -54,8 +54,8 @@ impl ChannelBackend {
         }
     }
 
-    /// The threat pass: reports only the labels `ai.auto_block_categories`
-    /// names, promoted to `Severity::Threat`. Everything else is no signal.
+    /// The threat pass: reports only threat labels (`AiSettings::threat_labels`),
+    /// promoted to `Severity::Threat`. Everything else is no signal.
     pub fn threat(
         inner: Box<dyn DomainClassifier + Send + Sync>,
         settings: Arc<ArcSwap<AiSettings>>,
@@ -95,6 +95,7 @@ impl DomainClassifier for ChannelBackend {
         match self.channel {
             Channel::Content => Some(Verdict {
                 severity: Severity::Info,
+                threat_score: None,
                 ..verdict
             }),
             Channel::Threat => {
@@ -112,8 +113,14 @@ impl DomainClassifier for ChannelBackend {
                 if !settings.is_auto_block_category(&verdict.category) {
                     return None;
                 }
+                // The model's own threat score: its highest probability for
+                // any threat label, even one it ranked below its top guess.
+                // Recorded and shown; enforcement still applies
+                // `block_threshold` to the reported verdict.
+                let score = self.threat_score(input, &settings);
                 let verdict = Verdict {
                     severity: Severity::Threat,
+                    threat_score: Some(score.unwrap_or(verdict.confidence)),
                     ..verdict
                 };
                 Some(match self.cleared_parent(input, &settings) {
@@ -137,6 +144,19 @@ struct ParentReading {
 }
 
 impl ChannelBackend {
+    /// The highest probability the model gave any threat label. `None` when
+    /// the backend cannot score labels individually, leaving the reported
+    /// verdict's own confidence as the score.
+    fn threat_score(&self, input: &ClassificationInput, settings: &AiSettings) -> Option<f32> {
+        let labels = settings.threat_labels();
+        self.inner
+            .label_scores(input)
+            .into_iter()
+            .filter(|(label, _)| labels.iter().any(|t| t.eq_ignore_ascii_case(label)))
+            .map(|(_, probability)| probability)
+            .reduce(f32::max)
+    }
+
     /// When `input` is a subdomain, classify the registered domain it sits
     /// under (`employmenthero.com` for `secure.employmenthero.com`, per the
     /// Public Suffix List) and return that reading if it is an ordinary site.
@@ -201,6 +221,7 @@ mod tests {
             confidence,
             severity,
             evidence: format!("test '{category}'"),
+            threat_score: None,
         }
     }
 
@@ -322,12 +343,57 @@ mod tests {
     }
 
     #[test]
-    fn empty_category_list_means_no_threats() {
+    fn the_list_overrides_the_built_in_threat_families() {
+        // The model decides first: an empty list no longer means "no
+        // threats", because malware, phishing and scam are built in.
         let backend = ChannelBackend::threat(
             Box::new(Fixed(Some(verdict("malware", 1.0, Severity::Threat)))),
             settings_with(&[]),
         );
+        let v = backend.classify(&input()).unwrap();
+        assert_eq!(v.severity, Severity::Threat);
+
+        // Removing a family is how the operator turns it off, and the same
+        // backend picks that up on the next classification.
+        let settings = settings_with(&[]);
+        let backend = ChannelBackend::threat(
+            Box::new(Fixed(Some(verdict("malware", 1.0, Severity::Threat)))),
+            settings.clone(),
+        );
+        settings.store(Arc::new(AiSettings {
+            auto_block_removals: vec!["malware".to_string()],
+            ..AiSettings::default()
+        }));
         assert!(backend.classify(&input()).is_none());
+    }
+
+    #[test]
+    fn a_threat_score_is_recorded_from_the_models_own_probabilities() {
+        // The model reported `malware`, but its own distribution put more
+        // weight on `phishing`: the score is the strongest threat signal it
+        // produced, not just the confidence of the label it named.
+        let scores = vec![
+            ("malware".to_string(), 0.31),
+            ("phishing".to_string(), 0.72),
+            ("news".to_string(), 0.05),
+        ];
+        struct Scored(Vec<(String, f32)>);
+        impl DomainClassifier for Scored {
+            fn name(&self) -> String {
+                "scored".to_string()
+            }
+            fn classify(&self, _input: &ClassificationInput) -> Option<Verdict> {
+                Some(verdict("malware", 0.31, Severity::Threat))
+            }
+            fn label_scores(&self, _input: &ClassificationInput) -> Vec<(String, f32)> {
+                self.0.clone()
+            }
+        }
+        let backend = ChannelBackend::threat(Box::new(Scored(scores)), settings_with(&[]));
+        let v = backend.classify(&input()).unwrap();
+        assert_eq!(v.category, "malware");
+        assert_eq!(v.confidence, 0.31);
+        assert_eq!(v.threat_score, Some(0.72));
     }
 
     /// Answers by name: the registered domain and the subdomain can read

@@ -63,7 +63,11 @@
     try {
       const status = await api.aiStatus();
       categories = [...new Set(status?.backend_categories || [])].sort();
-      threatLabels = (status?.auto_block_categories || []).map((l) => l.toLowerCase());
+      // The effective set: the built-in families minus the operator's
+      // removals, plus the labels they added.
+      threatLabels = (status?.threat_labels || status?.auto_block_categories || []).map((l) =>
+        l.toLowerCase(),
+      );
     } catch {
       categories = [];
       threatLabels = [];

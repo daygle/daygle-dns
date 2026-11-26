@@ -142,6 +142,7 @@ mod tests {
             confidence,
             severity,
             evidence: format!("test '{category}'"),
+            threat_score: None,
         }
     }
 

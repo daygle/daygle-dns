@@ -42,8 +42,19 @@ and verdict TTL.
   stops the AI's detection from blocking it. Exemptions still win, and
   unticking the label stops your threat labels too. Removing your label
   lets the AI decide again.
-  It reports only the labels in `ai.auto_block_categories` (`malware`,
-  `phishing`, `scam` by default).
+  The built-in threat families (`malware`, `phishing`, `scam`) are threats on
+  their own: the model decides and the scanner reports them with no box
+  ticked. **AI → Threats → Labels Treated as Threats** is an override on top
+  of that. Ticking a label adds it; unticking a built-in family turns it off,
+  which is stored as `ai.auto_block_removals`; an ordinary category (`ads`,
+  `gambling`, ...) is never a threat unless you tick it. Enforcement is
+  unchanged: `ai.block_threshold`, the verifier, disputes, exemptions and
+  expiry still decide what blocks, and only in enforce mode. Each row shows
+  the model's own threat score next to the verdict, and the *Why* line says
+  what it read and what evidence confirmed or disputed it. A cycle admits at
+  most 500 new domains to the block snapshot, however many qualify: the rest
+  wait for the next cycle and the count is reported in the scanner's alert,
+  so a misbehaving model or feed cannot take the network down at once.
 
 The model reads only the domain name. When it flags a subdomain, the
 scanner also scores the registered domain above it (by the Public Suffix
@@ -172,8 +183,8 @@ model and trial. The rest train the threat labels, up to 1,000 per label per
 retrain. A feed listing also confirms a threat verdict for training, except
 one the feed alone made (the AI saw no threat in the name): it blocks, but
 its ordinary-looking name never trains the model as a threat. Only the
-labels ticked in `ai.auto_block_categories` are used. Your
-corrections win over a feed.
+effective threat labels are used: the built-in families unless you turned
+one off, plus the labels you ticked. Your corrections win over a feed.
 
 ### Popular sites
 
