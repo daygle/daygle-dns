@@ -47,14 +47,48 @@ and verdict TTL.
   ticked. **AI → Threats → Labels Treated as Threats** is an override on top
   of that. Ticking a label adds it; unticking a built-in family turns it off,
   which is stored as `ai.auto_block_removals`; an ordinary category (`ads`,
-  `gambling`, ...) is never a threat unless you tick it. Enforcement is
-  unchanged: `ai.block_threshold`, the verifier, disputes, exemptions and
-  expiry still decide what blocks, and only in enforce mode. Each row shows
-  the model's own threat score next to the verdict, and the *Why* line says
-  what it read and what evidence confirmed or disputed it. A cycle admits at
-  most 500 new domains to the block snapshot, however many qualify: the rest
-  wait for the next cycle and the count is reported in the scanner's alert,
-  so a misbehaving model or feed cannot take the network down at once.
+  `gambling`, ...) is never a threat unless you tick it.
+
+### Labels, scores and decisions
+
+Every label has one of three explicit roles (`label_role` in the threat list
+and in `/api/ai/explain`), and a removal wins over a ticked label:
+
+- **threat** - the built-in families you kept and the labels you ticked. A
+  verdict carrying one is a threat at any confidence.
+- **suppressed** - a label you unticked. The model's verdict on it reports
+  nothing at all.
+- **classification** - everything else. It describes a domain; it never
+  becomes a security verdict. `news` is not a threat however sure the model
+  is, and blocking an ordinary category stays a filtering-group policy.
+
+The tab keeps the three outputs of a detection apart:
+
+- **Classification** - what the categorization pass called the domain. It is
+  shown under the category when it differs from the assessment.
+- **Threat score** - the model's own probability for the threat families,
+  before evidence and the threshold. It is not a calibrated probability of
+  being malicious, so it is called a score.
+- **Decision** - `block`, `override` (your exemption, your *not a threat*
+  mark or a removal wins), `monitor` (reported, not blocked) or `allow`.
+
+A domain the model *classified* as `news` can still be a reported threat: if
+its score for a threat label reaches `ai.block_threshold`, the row appears in
+the threats list with that threat label as its category, that score as its
+confidence, and the model's classification shown beside it. Below the
+threshold the classification is left alone. Either way the row's *Why* line
+says what the model read, what it scored and what evidence confirmed or
+disputed it.
+
+Enforcement is unchanged: `ai.block_threshold`, the verifier, disputes,
+exemptions and expiry still decide what blocks, and only in enforce mode.
+Existing blocks stay: the stored `ai.auto_block_categories` list is read as
+the threat role, so no domain that blocks today stops blocking.
+
+A cycle admits at most 500 new domains to the block snapshot, however many
+qualify: the rest wait for the next cycle and the count is reported in the
+scanner's alert, so a misbehaving model or feed cannot take the network down
+at once.
 
 The model reads only the domain name. When it flags a subdomain, the
 scanner also scores the registered domain above it (by the Public Suffix

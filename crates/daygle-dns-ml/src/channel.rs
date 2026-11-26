@@ -9,7 +9,7 @@
 //! | Channel   | Verdict it reports                                      |
 //! |-----------|---------------------------------------------------------|
 //! | `Content` | whatever the categorizer said, always severity `Info`   |
-//! | `Threat`  | only the threat labels, severity `Threat`              |
+//! | `Threat`  | a threat label, or any label when the threat score reaches the threshold |
 //!
 //! The threat channel reads its label set from the *live* settings, so
 //! editing `auto_block_categories` or `auto_block_removals` changes what the
@@ -29,7 +29,7 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use daygle_dns_core::config::AiSettings;
+use daygle_dns_core::config::{AiSettings, LabelRole};
 
 use crate::backend::{Channel, ClassificationInput, DomainClassifier, Severity, Verdict};
 use crate::learn::BENIGN_LABEL;
@@ -108,20 +108,49 @@ impl DomainClassifier for ChannelBackend {
                 // Settings are always present for this channel; no settings
                 // means no declared threats, which is the safe reading.
                 let settings = self.settings.as_ref()?.load();
-                // The operator's list decides what a threat is: nothing else
-                // is reported.
-                if !settings.is_auto_block_category(&verdict.category) {
+                let role = settings.label_role(&verdict.category);
+                // Never a threat: the operator's removal suppresses the
+                // model's own verdict on that label, so nothing is reported.
+                if role == LabelRole::Suppressed {
                     return None;
                 }
                 // The model's own threat score: its highest probability for
                 // any threat label, even one it ranked below its top guess.
-                // Recorded and shown; enforcement still applies
-                // `block_threshold` to the reported verdict.
-                let score = self.threat_score(input, &settings);
-                let verdict = Verdict {
-                    severity: Severity::Threat,
-                    threat_score: Some(score.unwrap_or(verdict.confidence)),
-                    ..verdict
+                // A threat label carries the verdict on its own; a
+                // *classification* label only does when that score reaches
+                // `block_threshold`, so the label list no longer decides
+                // whether a suspicious domain can be reported at all.
+                let strongest = self.strongest_threat_label(input, &settings);
+                let score = strongest.as_ref().map(|(_, probability)| *probability);
+                let verdict = if role == LabelRole::Threat {
+                    Verdict {
+                        severity: Severity::Threat,
+                        threat_score: Some(score.unwrap_or(verdict.confidence)),
+                        ..verdict
+                    }
+                } else {
+                    // The classification is what the model named; the
+                    // assessment names the family it actually scored, so the
+                    // verifier corroborates like with like and enforcement
+                    // applies `block_threshold` to the reported confidence.
+                    let (label, probability) = strongest?;
+                    if probability < settings.block_threshold {
+                        return None;
+                    }
+                    let classification = verdict.category.clone();
+                    Verdict {
+                        category: label.to_ascii_lowercase(),
+                        confidence: probability,
+                        severity: Severity::Threat,
+                        threat_score: Some(probability),
+                        evidence: format!(
+                            "{}; the model scored '{}' {:.0}% although it labelled this '{}'",
+                            verdict.evidence,
+                            label,
+                            probability * 100.0,
+                            classification
+                        ),
+                    }
                 };
                 Some(match self.cleared_parent(input, &settings) {
                     Some(parent) => parent_disputes(verdict, &parent),
@@ -144,17 +173,20 @@ struct ParentReading {
 }
 
 impl ChannelBackend {
-    /// The highest probability the model gave any threat label. `None` when
-    /// the backend cannot score labels individually, leaving the reported
-    /// verdict's own confidence as the score.
-    fn threat_score(&self, input: &ClassificationInput, settings: &AiSettings) -> Option<f32> {
+    /// The highest probability the model gave any threat label, with the
+    /// label that produced it. `None` when the backend cannot score labels
+    /// individually.
+    fn strongest_threat_label(
+        &self,
+        input: &ClassificationInput,
+        settings: &AiSettings,
+    ) -> Option<(String, f32)> {
         let labels = settings.threat_labels();
         self.inner
             .label_scores(input)
             .into_iter()
             .filter(|(label, _)| labels.iter().any(|t| t.eq_ignore_ascii_case(label)))
-            .map(|(_, probability)| probability)
-            .reduce(f32::max)
+            .reduce(|best, candidate| if candidate.1 > best.1 { candidate } else { best })
     }
 
     /// When `input` is a subdomain, classify the registered domain it sits
@@ -394,6 +426,79 @@ mod tests {
         assert_eq!(v.category, "malware");
         assert_eq!(v.confidence, 0.31);
         assert_eq!(v.threat_score, Some(0.72));
+    }
+
+    /// Scores by table, names one label: the shape of a multi-label model
+    /// whose top guess is an ordinary category.
+    struct Scored(Vec<(String, f32)>, &'static str, f32);
+
+    impl DomainClassifier for Scored {
+        fn name(&self) -> String {
+            "scored".to_string()
+        }
+        fn classify(&self, _input: &ClassificationInput) -> Option<Verdict> {
+            Some(verdict(self.1, self.2, Severity::Info))
+        }
+        fn label_scores(&self, _input: &ClassificationInput) -> Vec<(String, f32)> {
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn a_threat_score_reports_a_domain_the_label_list_would_have_skipped() {
+        // The model names `news`, which is a classification and never a
+        // threat, but its own distribution puts `phishing` over the block
+        // threshold. The score carries the verdict, so the label list no
+        // longer decides whether a suspicious domain can be reported.
+        let backend = ChannelBackend::threat(
+            Box::new(Scored(
+                vec![("news".to_string(), 0.02), ("phishing".to_string(), 0.995)],
+                "news",
+                0.02,
+            )),
+            settings_with(&[]),
+        );
+        let v = backend.classify(&input()).unwrap();
+        assert_eq!(v.category, "phishing");
+        assert_eq!(v.severity, Severity::Threat);
+        assert_eq!(v.confidence, 0.995);
+        assert_eq!(v.threat_score, Some(0.995));
+        assert!(
+            v.evidence.contains("labelled this 'news'"),
+            "{}",
+            v.evidence
+        );
+    }
+
+    #[test]
+    fn a_threat_score_below_the_block_threshold_leaves_a_classification_alone() {
+        let backend = ChannelBackend::threat(
+            Box::new(Scored(
+                vec![("news".to_string(), 0.5), ("phishing".to_string(), 0.6)],
+                "news",
+                0.5,
+            )),
+            settings_with(&[]),
+        );
+        assert!(backend.classify(&input()).is_none());
+    }
+
+    #[test]
+    fn a_suppressed_family_is_not_reported_even_with_a_high_score() {
+        let settings = settings_with(&[]);
+        settings.store(Arc::new(AiSettings {
+            auto_block_removals: vec!["phishing".to_string()],
+            ..AiSettings::default()
+        }));
+        let backend = ChannelBackend::threat(
+            Box::new(Scored(
+                vec![("news".to_string(), 0.01), ("phishing".to_string(), 1.0)],
+                "news",
+                0.01,
+            )),
+            settings,
+        );
+        assert!(backend.classify(&input()).is_none());
     }
 
     /// Answers by name: the registered domain and the subdomain can read

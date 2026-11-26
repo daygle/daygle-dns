@@ -1730,8 +1730,18 @@ instead of waiting for their verdict TTL. Each row also carries
 `threat_score`: the model's own probability for the threat families (the
 highest over their per-label scores), `null` when the backend reports none
 (the built-in rules, or a model that only emits one verdict); and `reason`,
-one line for the console: the label, that score and the evidence (a feed
-listing, a verifier disagreement, ...). Each row
+one line for the console: the label, that score, the model's classification
+when it differs, and the evidence (a feed listing, a verifier disagreement,
+...). The three outputs are reported apart: `classification` is what the
+categorization pass called the domain, which can differ from `category` -
+a domain the model labelled `news` but scored `phishing` at
+`ai.block_threshold` is reported as a threat under `phishing`, with
+`classification: "news"`; below the threshold the classification is left
+alone. `label_role` is `threat`, `suppressed` or `classification` (a
+*classification* label never becomes a security verdict on its own), and
+`decision` says what the gateway does about the domain: `block`, `override`
+(an exemption, a *not a threat* mark or a suppressed label wins), `monitor`
+(reported but not blocked) or `allow`. Each row
 also carries `blocked`, whether the domain is in the *current* block
 snapshot - actually auto-blocked in enforce mode (in train mode the snapshot
 is empty, so every row is `false`). The console's AI → Threats tab renders
@@ -1753,7 +1763,9 @@ scan, so re-fetch rather than treating one download as permanent.
 both channels' verdicts, your overrides, the label category blocking matches,
 the names of the filtering groups that block it, and a `reasons` list in plain
 language covering the threshold, the label gate, a disputed verification, an
-expired or missing verdict, and exemptions.
+expired or missing verdict, and exemptions. It carries the same `decision`
+(`block`/`override`/`monitor`/`allow`) as the list, and the threat verdict's
+`label_role` and `classification`.
 
 Model files are managed over the API too: `GET /api/ai/model-status` reports
 the models directory, each installed model file (presence, size, sha256) and

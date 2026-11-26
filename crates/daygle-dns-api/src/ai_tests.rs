@@ -638,6 +638,16 @@ async fn threat_list_follows_the_labels_treated_as_threats() {
     let listed = json(state.clone(), "/api/ai/threats").await;
     assert_eq!(listed["total"], 1, "{listed}");
     assert_eq!(listed["entries"][0]["domain"], "bad.example", "{listed}");
+    // The three outputs are reported apart: the label's role, the
+    // classification (no content verdict here, so none) and what DNS does
+    // about the domain - train mode keeps it monitored, never blocked.
+    assert_eq!(listed["entries"][0]["label_role"], "threat", "{listed}");
+    assert_eq!(listed["entries"][0]["decision"], "monitor", "{listed}");
+    assert_eq!(
+        listed["entries"][0]["classification"],
+        serde_json::Value::Null,
+        "{listed}"
+    );
 
     // Ticking the other two labels through the console's settings update
     // shows the rows already stored under them.

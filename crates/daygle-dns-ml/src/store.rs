@@ -113,6 +113,10 @@ pub struct VerdictRow {
     /// The operator relabelled this domain: `category` is their label, not
     /// the model's.
     pub category_overridden: bool,
+    /// What the categorization pass called the domain, kept apart from the
+    /// threat assessment: the model's top label can be an ordinary category
+    /// (`news`) while the threat channel reports the family it scored.
+    pub classification: Option<String>,
 }
 
 /// One classification to store (see [`AiStore::save_verdicts`]).
@@ -277,7 +281,11 @@ const VERDICT_COLUMNS: &str = concat!(
     "WHERE o.domain = v.domain AND o.action = 'allow'), ",
     // Only a categorization carries the relabel (see above).
     "v.channel = 'content' AND ",
-    "EXISTS (SELECT 1 FROM ai_category_overrides c WHERE c.domain = v.domain)"
+    "EXISTS (SELECT 1 FROM ai_category_overrides c WHERE c.domain = v.domain), ",
+    // The classification output, read from the domain's content verdict on
+    // the same pass: the threat row's own `category` is the assessment.
+    "(SELECT c.category FROM ai_verdicts c WHERE c.domain = v.domain ",
+    "AND c.channel = 'content' AND c.status = 'classified')"
 );
 
 /// Map a row selected with [`VERDICT_COLUMNS`].
@@ -297,6 +305,7 @@ fn verdict_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<VerdictRow> {
         threat_score: r.get::<_, f64>(11)? as f32,
         overridden: r.get(12)?,
         category_overridden: r.get(13)?,
+        classification: r.get(14)?,
     })
 }
 

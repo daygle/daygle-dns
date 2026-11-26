@@ -1631,25 +1631,67 @@ fn default_auto_retrain() -> bool {
 /// Kept in step with the labels the shipped starter model is trained on.
 pub const THREAT_FAMILIES: &[&str] = &["malware", "phishing", "scam"];
 
+/// What a category label means to the threat decision.
+///
+/// The three roles are kept apart because a classification label describes a
+/// domain, it does not judge it: `news` or `gambling` never becomes a security
+/// verdict just because the model named it with confidence. Blocking a
+/// *classification* is a per-group filtering policy (`blocked_categories`),
+/// which is a different decision from the AI's threat assessment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LabelRole {
+    /// Always a threat: a built-in family the operator kept, or a label they
+    /// listed. A verdict carrying it is a threat at any confidence; the
+    /// threshold, the verifier and the mode still decide about blocking.
+    Threat,
+    /// Never a threat: the operator removed it, so the AI's own verdict on
+    /// that label is suppressed and reports nothing.
+    Suppressed,
+    /// Describes the domain and nothing more.
+    Classification,
+}
+
+impl LabelRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Threat => "threat",
+            Self::Suppressed => "suppressed",
+            Self::Classification => "classification",
+        }
+    }
+}
+
 impl AiSettings {
-    /// Whether `category` is a threat label: a built-in family the operator
-    /// kept, or a label they listed themselves. Enforcement still applies
-    /// `block_threshold`, the verifier and the mode on top of this.
-    pub fn is_auto_block_category(&self, category: &str) -> bool {
+    /// The role `category` plays in the threat decision.
+    ///
+    /// A removal wins over a listed label: it is how the operator turns a
+    /// family off without rewriting the list they shipped with.
+    pub fn label_role(&self, category: &str) -> LabelRole {
         if self
             .auto_block_removals
             .iter()
             .any(|c| c.eq_ignore_ascii_case(category))
         {
-            return false;
+            return LabelRole::Suppressed;
         }
-        THREAT_FAMILIES
+        if THREAT_FAMILIES
             .iter()
             .any(|c| c.eq_ignore_ascii_case(category))
             || self
                 .auto_block_categories
                 .iter()
                 .any(|c| c.eq_ignore_ascii_case(category))
+        {
+            return LabelRole::Threat;
+        }
+        LabelRole::Classification
+    }
+
+    /// Whether `category` is a threat label: a built-in family the operator
+    /// kept, or a label they listed themselves. Enforcement still applies
+    /// `block_threshold`, the verifier and the mode on top of this.
+    pub fn is_auto_block_category(&self, category: &str) -> bool {
+        self.label_role(category) == LabelRole::Threat
     }
 
     /// The built-in families a label list leaves out: what sending the list
@@ -6068,6 +6110,29 @@ fn to_ascii_domain(entry: &str) -> String {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    /// The label list splits into three explicit roles, so a classification
+    /// never becomes a security verdict by accident and a removal wins over a
+    /// listed label.
+    #[test]
+    fn a_label_is_a_threat_a_classification_or_suppressed() {
+        let mut ai = AiSettings::default();
+        assert_eq!(ai.label_role("malware"), LabelRole::Threat);
+        assert_eq!(ai.label_role("Phishing"), LabelRole::Threat);
+        assert_eq!(ai.label_role("news"), LabelRole::Classification);
+
+        ai.auto_block_categories = vec!["gambling".to_string()];
+        assert_eq!(ai.label_role("gambling"), LabelRole::Threat);
+        assert!(ai.is_auto_block_category("Gambling"));
+
+        ai.auto_block_removals = vec!["scam".to_string(), "Gambling".to_string()];
+        assert_eq!(ai.label_role("scam"), LabelRole::Suppressed);
+        assert_eq!(ai.label_role("gambling"), LabelRole::Suppressed);
+        assert!(!ai.is_auto_block_category("gambling"));
+        // Untouched families stay threats, and ordinary labels stay ordinary.
+        assert_eq!(ai.label_role("malware"), LabelRole::Threat);
+        assert_eq!(ai.label_role("news"), LabelRole::Classification);
+    }
 
     /// Configs saved while the Residential Hosting category existed carry
     /// its settings: they still load, and are not written back.

@@ -12,6 +12,7 @@
     { key: 'domain', label: 'Domain', locked: true },
     { key: 'category', label: 'Category' },
     { key: 'state', label: 'State' },
+    { key: 'decision', label: 'Decision' },
     { key: 'confidence', label: 'Confidence' },
     { key: 'score', label: 'Threat Score' },
     { key: 'reason', label: 'Why' },
@@ -595,6 +596,7 @@
           <th>Domain</th>
           {#if show('category')}<th>Category</th>{/if}
           {#if show('state')}<th>State</th>{/if}
+          {#if show('decision')}<th title="What DNS does about the domain: block, override (your decision wins), monitor (reported, not blocking) or allow">Decision</th>{/if}
           {#if show('confidence')}<th class="num">Confidence</th>{/if}
           {#if show('score')}<th class="num" title="The model's own probability for the threat families, before evidence and the block threshold">Threat Score</th>{/if}
           {#if show('reason')}<th title="Why the domain was judged a threat">Why</th>{/if}
@@ -616,7 +618,12 @@
                 <span title={r.category ? `Your label; the AI detected ${titleCase(r.category)}` : 'Your label'}>{titleCase(r.category_override)}</span>
                 <span class="pill ok tag" title="You labelled this domain a threat: it counts as one whatever the AI scored">Set By You</span>
                 {#if r.category && r.category !== r.category_override}<div class="muted" style="font-size: 0.75rem">Detected: {titleCase(r.category)}</div>{/if}
-              {:else if r.category}{titleCase(r.category)}{:else}<span class="muted">-</span>{/if}
+              {:else if r.category}
+                {titleCase(r.category)}
+                {#if r.classification && r.classification !== r.category}
+                  <div class="muted" style="font-size: 0.75rem" title="What the categorization pass called the domain; the threat score is what made it a threat">Classified: {titleCase(r.classification)}</div>
+                {/if}
+              {:else}<span class="muted">-</span>{/if}
             </td>
             {/if}
             {#if show('state')}
@@ -633,6 +640,19 @@
                 <span class="pill ok tag" title="Exempt: the operator's allow override vetoed blocking for this domain">Exempt</span>
               {:else}
                 <span class="pill" title="Not in the block snapshot: below the block threshold, not an auto-block category, or expired">Not Blocked</span>
+              {/if}
+            </td>
+            {/if}
+            {#if show('decision')}
+            <td>
+              {#if r.decision === 'block'}
+                <span class="pill err" title="Blocked in the current AI block snapshot">Block</span>
+              {:else if r.decision === 'override'}
+                <span class="pill ok tag" title="Your decision wins: exempt, or marked not a threat">Override</span>
+              {:else if r.decision === 'monitor'}
+                <span class="pill" title="Detected and reported, but the enforcement rules do not block it">Monitor</span>
+              {:else}
+                <span class="pill" title="Not blocked">Allow</span>
               {/if}
             </td>
             {/if}

@@ -1642,26 +1642,60 @@ pub async fn ai_verdicts(
     }
 }
 
+/// The decision triple's third output, in one word: what DNS does about a
+/// domain. The classification says what it is, the threat assessment says how
+/// sure the model is, and this says what the gateway does - so a detection can
+/// be reported without being blocked.
+fn enforcement_decision(
+    blocked: bool,
+    overridden: bool,
+    not_threat: bool,
+    detected: bool,
+) -> &'static str {
+    if blocked {
+        "block"
+    } else if overridden || not_threat {
+        "override"
+    } else if detected {
+        "monitor"
+    } else {
+        "allow"
+    }
+}
+
 /// Why the AI judged a row as it did, in one line for the Threats tab: the
-/// label, the model's own score for the threat families, and the evidence
-/// the pipeline added (a feed listing, a verifier disagreement, ...).
-fn threat_reason(row: &daygle_dns_ml::store::VerdictRow) -> String {
+/// label, the model's own score for the threat families, what the model
+/// classified the domain as, and the evidence the pipeline added (a feed
+/// listing, a verifier disagreement, ...).
+fn threat_reason(row: &daygle_dns_ml::store::VerdictRow, role: daygle_dns_core::config::LabelRole) -> String {
     let score = if row.threat_score > 0.0 {
         format!("{:.0}% threat score", row.threat_score * 100.0)
     } else {
         "not scored".to_string()
     };
+    let classified = row
+        .classification
+        .as_deref()
+        .filter(|c| !c.eq_ignore_ascii_case(&row.category))
+        .map(|c| format!(", classified '{c}'"))
+        .unwrap_or_default();
     match row.severity.as_str() {
-        "threat" => format!(
-            "model judged '{}' a threat ({score}): {}",
+        "threat" if role == daygle_dns_core::config::LabelRole::Threat => format!(
+            "model judged '{}' a threat ({score}{classified}): {}",
             row.category, row.evidence
         ),
+        "threat" => format!(
+            "model scored '{}' ({score}{classified}) but that label is {}: {}",
+            row.category,
+            role.as_str(),
+            row.evidence
+        ),
         "disputed" => format!(
-            "model judged '{}' a threat ({score}) but this is disputed: {}",
+            "model judged '{}' a threat ({score}{classified}) but this is disputed: {}",
             row.category, row.evidence
         ),
         _ => format!(
-            "'{}' is not a threat label ({score}): {}",
+            "'{}' is not a threat label ({score}{classified}): {}",
             row.category, row.evidence
         ),
     }
@@ -1678,7 +1712,14 @@ fn threat_reason(row: &daygle_dns_ml::store::VerdictRow) -> String {
 /// whether the domain is in the *current* block snapshot - detected, in an
 /// auto-block label, at or above the block threshold, undisputed and not
 /// exempt, and only in enforce mode (an empty snapshot in train mode
-/// therefore reports every row as not blocked). `category_blocked`: whether a
+/// therefore reports every row as not blocked). `classification`: what the
+/// categorization pass called the domain, which can differ from `category`
+/// (the assessment): a domain the model named `news` but scored `phishing`
+/// at the block threshold is reported as a threat with that classification.
+/// `label_role`: `threat`, `suppressed` or `classification`.
+/// `decision`: `block`, `override`, `monitor` or `allow` - the three outputs
+/// (classification, threat assessment, enforcement) kept apart.
+/// `category_blocked`: whether a
 /// filtering group blocks the category the domain carries, so it is blocked
 /// for that group's clients in either mode. `category_override`: the
 /// operator's relabel of the domain, if any, which the console shows in
@@ -1698,7 +1739,8 @@ pub async fn ai_threats(
     };
     // The list shows the labels treated as threats right now, read from the
     // live settings: the operator's edit applies to the list immediately.
-    let threat_labels = Some(ai.settings.load().threat_labels());
+    let settings = ai.settings.load_full();
+    let threat_labels = Some(settings.threat_labels());
     let listed = run_blocking({
         let ai = ai.clone();
         move || {
@@ -1730,22 +1772,30 @@ pub async fn ai_threats(
             let groups = state.advanced_blocking.load();
             (StatusCode::OK,
                 axum::Json(serde_json::json!({
-                    "entries": rows.iter().map(|r| serde_json::json!({
+                    "entries": rows.iter().map(|r| {
+                        let role = settings.label_role(&r.category);
+                        let blocked = snapshot.contains_key(&r.domain);
+                        let overridden = r.overridden;
+                        let not_threat = not_threat.contains(&r.domain);
+                        serde_json::json!({
                         "domain": r.domain,
                         "channel": r.channel,
                         "category": r.category,
+                        "classification": r.classification,
+                        "label_role": role.as_str(),
                         "category_override": relabels.get(&r.domain),
                         "severity": r.severity,
                         "status": r.status,
                         "confidence": r.confidence,
                         "threat_score": (r.threat_score > 0.0).then_some(r.threat_score),
-                        "reason": threat_reason(r),
+                        "decision": enforcement_decision(blocked, overridden, not_threat, true),
+                        "reason": threat_reason(r, role),
                         "backend": r.backend,
                         "evidence": r.evidence,
                         "observations": r.observations,
-                        "overridden": r.overridden,
-                        "not_threat": not_threat.contains(&r.domain),
-                        "blocked": snapshot.contains_key(&r.domain),
+                        "overridden": overridden,
+                        "not_threat": not_threat,
+                        "blocked": blocked,
                         "category_blocked": categories
                             .get(&r.domain)
                             .is_some_and(|c| groups.blocks_category(&c.category)),
@@ -1753,7 +1803,8 @@ pub async fn ai_threats(
                             .map(|t| t.to_rfc3339()),
                         "expires_at": chrono::DateTime::<chrono::Utc>::from_timestamp(r.expires_at, 0)
                             .map(|t| t.to_rfc3339()),
-                    }))
+                    })
+                    })
                     .collect::<Vec<_>>(),
                     "total": total,
                     "per_page": per_page,
@@ -2196,6 +2247,12 @@ pub async fn ai_explain(
                 "threat_labels": settings.threat_labels(),
                 "auto_block_removals": settings.auto_block_removals.clone(),
                 "blocked": blocked_category.is_some(),
+                "decision": enforcement_decision(
+                    blocked_category.is_some(),
+                    override_row.is_some(),
+                    false,
+                    threat.is_some(),
+                ),
                 "blocked_category": blocked_category,
                 "label": label,
                 "category_override": relabel,
@@ -2212,6 +2269,8 @@ pub async fn ai_explain(
                 })),
                 "threat": threat.map(|t| serde_json::json!({
                     "category": t.category,
+                    "classification": t.classification,
+                    "label_role": settings.label_role(&t.category).as_str(),
                     "severity": t.severity,
                     "status": t.status,
                     "confidence": t.confidence,
