@@ -245,20 +245,39 @@ impl AiStore {
         Ok(Some((base, model)))
     }
 
-    /// The scores a threshold trial is fitted on: `(domain, confidence)`,
-    /// highest first. `confidence` is the number `fresh_blocked` compares with
-    /// `ai.block_threshold`; reading `threat_score` here measured the model's
-    /// raw opinion while enforcement ignored what the evidence stages added.
+    /// The scores a threshold trial is fitted on: `(domain, score)`,
+    /// highest first. `score` is exactly the number `fresh_blocked` compares
+    /// with `ai.block_threshold` (see [`Self::GATE_SCORE`]); reading
+    /// `threat_score` here measured the model's raw opinion while enforcement
+    /// ignored what the evidence stages added.
     pub fn gate_scores(&self, limit: u32) -> Result<Vec<(String, f32)>> {
+        Ok(self
+            .gate_samples(limit)?
+            .into_iter()
+            .map(|(domain, score, _)| (domain, score))
+            .collect())
+    }
+
+    /// [`Self::gate_scores`] with the verdict's classification time, for the
+    /// time-based evaluation and the label-provenance report.
+    pub fn gate_samples(&self, limit: u32) -> Result<Vec<(String, f32, i64)>> {
         let conn = self.lock()?;
+        // The same expression `fresh_blocked` compares: the calibrated score
+        // when a map was in force for the verdict, else the confidence.
         let mut stmt = conn.prepare(
-            "SELECT domain, confidence FROM ai_verdicts
-             WHERE channel = 'threat' AND status = 'classified' AND confidence > 0
-             ORDER BY confidence DESC, domain LIMIT ?1",
+            "SELECT domain, COALESCE(NULLIF(calibrated_score, 0), confidence), classified_at
+             FROM ai_verdicts
+             WHERE channel = 'threat' AND status = 'classified'
+               AND COALESCE(NULLIF(calibrated_score, 0), confidence) > 0
+             ORDER BY COALESCE(NULLIF(calibrated_score, 0), confidence) DESC, domain LIMIT ?1",
         )?;
         let collected = stmt
             .query_map(params![limit.clamp(1, 200_000)], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, f32>(1)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, f32>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(collected)

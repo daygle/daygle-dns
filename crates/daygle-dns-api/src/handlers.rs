@@ -1478,11 +1478,12 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
                 ai.store.status_counts()?,
                 ai.blockable_counts()?,
                 ai.store.threat_verdict_counts()?,
+                ai.store.active_calibration()?.map(|map| map.version),
             ))
         }
     })
     .await;
-    let (statuses, blockable, threat_counts) = match counts {
+    let (statuses, blockable, threat_counts, calibration_version) = match counts {
         Ok(counts) => counts,
         Err(e) => return map_err(e),
     };
@@ -1517,6 +1518,19 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         "category_ttl_secs": settings.category_ttl_secs,
         "threat_ttl_secs": settings.threat_ttl_secs,
         "block_threshold": settings.block_threshold,
+        // How the structured signals are combined, the calibration map in
+        // force, and the graduated authority: the three additions that sit
+        // between the raw evidence and the gate.
+        "fusion": settings.fusion.as_str(),
+        "calibration_version": calibration_version,
+        "calibrated": calibration_version.is_some(),
+        "authority": {
+            "enabled": settings.authority.enabled,
+            "feed_stage": settings.authority.feed_stage.as_str(),
+            "model_stage": settings.authority.model_stage.as_str(),
+            "operator_stage": settings.authority.operator_stage.as_str(),
+            "max_new_blocks_per_refresh": settings.authority.max_new_blocks_per_refresh,
+        },
         // Autonomy is what the AI may do unasked; `mode` is what it may
         // enforce. A build can run the AI's work but never block on it.
         "autonomy": settings.autonomy,
@@ -2150,6 +2164,10 @@ pub async fn ai_explain(
             let signals = threat
                 .map(|t| ai.verdict_signals(&domain, t.threat_score, &t.evidence))
                 .unwrap_or_default();
+            // The same inputs in machine-readable form: every source with its
+            // direction, value, scope and time, plus the fused view and the
+            // calibrated score the gate compares.
+            let signal_report = ai.signal_report(&domain).ok().flatten();
             let content = rows.iter().find(|r| r.channel == "content");
             let label = relabel
                 .clone()
@@ -2295,6 +2313,12 @@ pub async fn ai_explain(
                 "auto_block_removals": settings.auto_block_removals.clone(),
                 "autonomy": settings.autonomy,
                 "signals": signals,
+                "signal_observations": signal_report
+                    .as_ref()
+                    .map(|report| report.observations.clone())
+                    .unwrap_or_default(),
+                "fusion": signal_report.as_ref().map(|report| report.fusion.clone()),
+                "calibrated_score": signal_report.as_ref().and_then(|report| report.calibrated),
                 "blocked": blocked_category.is_some(),
                 "decision": enforcement_decision(
                     blocked_category.is_some(),
@@ -2749,6 +2773,292 @@ pub async fn ai_threshold_rollback(
         "message": format!("The block threshold is back to {base:.3}; {model_note}."),
     }))
     .into_response()
+}
+
+/// `GET /api/ai/signals?domain=` - the structured signal observations
+/// behind one domain's threat verdict, with the fused view and the calibrated
+/// score. Each observation carries its source, direction, value, explanation,
+/// timestamp and the hostname or registrable domain it applies to.
+pub async fn ai_signals(
+    State(state): State<AppState>,
+    Query(query): Query<AiExplainQuery>,
+) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let domain = query
+        .domain
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .trim_matches('.')
+        .to_ascii_lowercase();
+    if !daygle_dns_ml::scanner::looks_like_domain(&domain) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "enter a valid domain name, such as news.example.com",
+        );
+    }
+    let report = run_blocking({
+        let ai = ai.clone();
+        let domain = domain.clone();
+        move || ai.signal_report(&domain)
+    })
+    .await;
+    match report {
+        Ok(Some(report)) => Json(serde_json::json!(report)).into_response(),
+        Ok(None) => error_response(StatusCode::NOT_FOUND, "no threat verdict for that domain"),
+        Err(e) => map_err(e),
+    }
+}
+
+/// `GET /api/ai/calibration` - the calibration map in force, the recorded
+/// candidates, and their held-out Brier/ECE reports.
+pub async fn ai_calibration(State(state): State<AppState>) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let status = run_blocking({
+        let ai = ai.clone();
+        move || ai.calibration_status()
+    })
+    .await;
+    match status {
+        Ok(status) => Json(status).into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+/// `POST /api/ai/calibration/fit` - fit an isotonic calibration on the
+/// tuning split and evaluate it on the held-out split. The map is recorded
+/// only when it is no worse than the one in force, and never activated.
+pub async fn ai_calibration_fit(State(state): State<AppState>) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let outcome = run_blocking({
+        let ai = ai.clone();
+        move || ai.fit_calibration()
+    })
+    .await;
+    match outcome {
+        Ok(report) => Json(report).into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CalibrationInput {
+    pub version: String,
+}
+
+/// `POST /api/ai/calibration/apply` - put a recorded calibration map in
+/// force. A map whose held-out report is worse than the one in force is
+/// refused with the numbers that refused it.
+pub async fn ai_calibration_apply(
+    State(state): State<AppState>,
+    Json(input): Json<CalibrationInput>,
+) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let outcome = run_blocking({
+        let ai = ai.clone();
+        let version = input.version.clone();
+        move || ai.apply_calibration(&version)
+    })
+    .await;
+    match outcome {
+        Ok(report) => {
+            state.logs.push(
+                daygle_dns_core::LogLevel::Info,
+                "api",
+                format!("AI calibration {} is in force", input.version),
+            );
+            Json(report).into_response()
+        }
+        // A refused candidate is a conflict with the map in force, not a
+        // malformed request.
+        Err(daygle_dns_core::error::DaygleError::Config(reason)) => {
+            error_response(StatusCode::CONFLICT, reason)
+        }
+        Err(e) => map_err(e),
+    }
+}
+
+/// `POST /api/ai/calibration/disable` - go back to the uncalibrated score.
+pub async fn ai_calibration_disable(State(state): State<AppState>) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let outcome = run_blocking({
+        let ai = ai.clone();
+        move || ai.disable_calibration()
+    })
+    .await;
+    match outcome {
+        Ok(report) => Json(report).into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+/// `GET /api/ai/candidates` - the atomic candidate versions: model artifact
+/// hash, threshold, calibration, signal weights, scoring config and the
+/// validation report, with the active one named.
+pub async fn ai_candidates(State(state): State<AppState>) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let status = run_blocking({
+        let ai = ai.clone();
+        move || ai.candidates_status()
+    })
+    .await;
+    match status {
+        Ok(status) => Json(status).into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+/// `POST /api/ai/candidates/snapshot` - record the scoring system as it
+/// stands now as a candidate version. Nothing is promoted.
+pub async fn ai_candidates_snapshot(State(state): State<AppState>) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let outcome = run_blocking({
+        let ai = ai.clone();
+        move || ai.snapshot_candidate()
+    })
+    .await;
+    match outcome {
+        Ok(candidate) => Json(serde_json::json!({
+            "candidate": daygle_dns_ml::candidate_json(&candidate),
+            "message": "recorded; nothing is promoted until you promote it",
+        }))
+        .into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateInput {
+    pub id: i64,
+}
+
+/// `POST /api/ai/candidates/promote` - activate a candidate as one version:
+/// its model artifact is restored and loaded, its calibration and signal
+/// weights are published, and its threshold is written through the normal
+/// settings path.
+pub async fn ai_candidates_promote(
+    State(state): State<AppState>,
+    Json(input): Json<CandidateInput>,
+) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let promoted = run_blocking({
+        let ai = ai.clone();
+        move || ai.promote_candidate(input.id)
+    })
+    .await;
+    let promoted = match promoted {
+        Ok(candidate) => candidate,
+        Err(e) => return map_err(e),
+    };
+    if let Err(e) = publish_block_threshold(&state, &ai, promoted.block_threshold).await {
+        // The candidate state is rolled back rather than left half applied.
+        let _ = run_blocking({
+            let ai = ai.clone();
+            move || ai.rollback_candidate()
+        })
+        .await;
+        return map_err(e);
+    }
+    state.logs.push(
+        daygle_dns_core::LogLevel::Info,
+        "api",
+        format!(
+            "AI candidate {} promoted: threshold {:.3}, calibration {}, model {}",
+            promoted.version,
+            promoted.block_threshold,
+            if promoted.calibration_version.is_empty() {
+                "none".to_string()
+            } else {
+                promoted.calibration_version.clone()
+            },
+            if promoted.model_sha256.is_empty() {
+                "builtin"
+            } else {
+                &promoted.model_sha256[..promoted.model_sha256.len().min(12)]
+            }
+        ),
+    );
+    Json(serde_json::json!({
+        "promoted": daygle_dns_ml::candidate_json(&promoted),
+        "block_threshold": promoted.block_threshold,
+        "message": "the candidate is active as one version",
+    }))
+    .into_response()
+}
+
+/// `POST /api/ai/candidates/rollback` - restore the complete previous
+/// version: its model artifact, threshold, calibration and signal weights.
+pub async fn ai_candidates_rollback(State(state): State<AppState>) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let restored = run_blocking({
+        let ai = ai.clone();
+        move || ai.rollback_candidate()
+    })
+    .await;
+    let restored = match restored {
+        Ok(Some(candidate)) => candidate,
+        Ok(None) => {
+            return error_response(
+                StatusCode::CONFLICT,
+                "there is no previous candidate version to restore",
+            );
+        }
+        Err(e) => return map_err(e),
+    };
+    if let Err(e) = publish_block_threshold(&state, &ai, restored.block_threshold).await {
+        return map_err(e);
+    }
+    state.logs.push(
+        daygle_dns_core::LogLevel::Info,
+        "api",
+        format!(
+            "AI candidate {} restored: threshold {:.3}",
+            restored.version, restored.block_threshold
+        ),
+    );
+    Json(serde_json::json!({
+        "restored": daygle_dns_ml::candidate_json(&restored),
+        "block_threshold": restored.block_threshold,
+        "message": "the previous version is in force, artifact and calibration included",
+    }))
+    .into_response()
+}
+
+/// `GET /api/ai/authority` - each source's graduated enforcement authority,
+/// its measured false-positive record and the stage in force.
+pub async fn ai_authority(State(state): State<AppState>) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let status = run_blocking({
+        let ai = ai.clone();
+        move || ai.authority_status()
+    })
+    .await;
+    match status {
+        Ok(status) => Json(status).into_response(),
+        Err(e) => map_err(e),
+    }
 }
 
 /// `POST /api/ai/retrain` - retrain the classifier from the scanner's

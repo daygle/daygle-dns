@@ -20,13 +20,16 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use chrono::Utc;
-use daygle_dns_core::config::{AiMode, AiSettings};
+use daygle_dns_core::config::{AiMode, AiSettings, FusionMode};
 use daygle_dns_core::error::Result;
 use daygle_dns_core::LogStore;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+use crate::assessment;
 use crate::backend::{Channel, ClassificationInput, DomainClassifier, Verdict};
+use crate::calibration::CalibrationMap;
+use crate::fusion::{self, SignalWeights};
 use crate::store::{AiStore, NewVerdict};
 
 /// A domain currently auto-blocked in `enforce` mode.
@@ -133,6 +136,14 @@ pub struct Scanner {
     page_model: std::sync::OnceLock<Arc<crate::page_model::PageModel>>,
     /// Registration-date lookups, set once by the engine.
     domain_age: std::sync::OnceLock<Arc<crate::age::DomainAge>>,
+    /// The calibration map in force. `None` (the default, and what a
+    /// rollback to no calibration restores) leaves the confidence as the
+    /// score the gate compares.
+    calibration: Arc<ArcSwap<Option<CalibrationMap>>>,
+    /// The signal weights in force: the active candidate's, or the defaults.
+    weights: Arc<ArcSwap<SignalWeights>>,
+    /// Threat feeds and popularity, for the structured observations.
+    intel: std::sync::OnceLock<Arc<crate::intel::Intel>>,
 }
 
 impl Scanner {
@@ -164,7 +175,37 @@ impl Scanner {
             page_reader: std::sync::OnceLock::new(),
             page_model: std::sync::OnceLock::new(),
             domain_age: std::sync::OnceLock::new(),
+            calibration: Arc::new(ArcSwap::from_pointee(None)),
+            weights: Arc::new(ArcSwap::from_pointee(SignalWeights::default())),
+            intel: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Hand the scanner the threat-feed index the observations read.
+    pub fn set_intel(&self, intel: Arc<crate::intel::Intel>) {
+        let _ = self.intel.set(intel);
+    }
+
+    /// Publish the calibration map the gate's score is mapped through.
+    /// `None` restores the uncalibrated score (identity), which is the
+    /// default and what every rollback to "no map" does.
+    pub fn set_calibration(&self, calibration: Option<CalibrationMap>) {
+        self.calibration.store(Arc::new(calibration));
+    }
+
+    /// Publish the signal weights the fusion uses.
+    pub fn set_signal_weights(&self, weights: SignalWeights) {
+        self.weights.store(Arc::new(weights));
+    }
+
+    /// The calibration map the scanner is applying.
+    pub fn calibration_map(&self) -> Option<CalibrationMap> {
+        self.calibration.load_full().as_ref().clone()
+    }
+
+    /// The signal weights the scanner is applying.
+    pub fn signal_weights(&self) -> SignalWeights {
+        self.weights.load_full().as_ref().clone()
     }
 
     /// Replace the reader the page stage uses, e.g. with readings a test
@@ -341,6 +382,11 @@ impl Scanner {
             })
             .collect();
         self.store.save_verdicts(&rows)?;
+        // The evidence behind every threat verdict, recorded as structured
+        // observations, with the fused view and the calibrated score beside
+        // them. This never fails the cycle: a verdict keeps its confidence
+        // if the assessment cannot be stored.
+        self.assess_verdicts(&cfg, &rows, now);
         // What the threat channel produced this scan: the watch on a newly
         // promoted model compares it with the week before (see
         // `crate::maintain`).
@@ -415,6 +461,125 @@ impl Scanner {
             Err(e) => self.log_warn(format!("AI language-model stage failed: {e}")),
         }
         Ok(classified)
+    }
+
+    /// Record every threat verdict's signal observations, the fused view and
+    /// the calibrated score. The calibrated score is the number the gate
+    /// compares from now on; with no calibration map in force it is left
+    /// unset, and the gate keeps using the confidence exactly as before.
+    fn assess_verdicts(&self, cfg: &AiSettings, rows: &[NewVerdict], now: i64) {
+        for row in rows
+            .iter()
+            .filter(|r| r.channel == Channel::Threat && r.status == "classified")
+        {
+            self.assess_row(
+                cfg,
+                &row.domain,
+                row.threat_score,
+                row.confidence,
+                &row.severity,
+                &row.evidence,
+                now,
+            );
+        }
+    }
+
+    /// Recompute one stored verdict's observations and calibrated score after
+    /// a later stage (the page rule or the language model) moved its
+    /// confidence. Without this the gate would keep comparing a calibration
+    /// of the confidence the verdict had before the evidence arrived.
+    fn reassess_domain(&self, cfg: &AiSettings, domain: &str, now: i64) {
+        let Ok(Some(row)) = self.store.verdict(domain, "threat") else {
+            return;
+        };
+        self.assess_row(
+            cfg,
+            domain,
+            row.threat_score,
+            row.confidence,
+            &row.severity,
+            &row.evidence,
+            now,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assess_row(
+        &self,
+        cfg: &AiSettings,
+        domain: &str,
+        threat_score: f32,
+        confidence: f32,
+        severity: &str,
+        evidence: &str,
+        now: i64,
+    ) {
+        let Some(intel) = self.intel.get() else {
+            return;
+        };
+        let index = intel.index();
+        let calibration = self.calibration.load_full();
+        let weights = self.weights.load_full();
+        let page = self
+            .store
+            .page_reading(domain)
+            .ok()
+            .flatten()
+            .map(|reading| assessment::PageNote {
+                category: reading.category,
+                confidence: reading.confidence,
+                cues: reading.cues,
+                read_at: reading.read_at,
+                adjusted: self
+                    .store
+                    .page_adjustment(domain)
+                    .ok()
+                    .flatten()
+                    .map(|adjustment| (adjustment.prior, adjustment.confidence)),
+            });
+        let observations = assessment::observe(
+            &assessment::Context {
+                store: &self.store,
+                intel: &index,
+            },
+            &assessment::AssessmentInput {
+                domain,
+                threat_score,
+                confidence,
+                severity,
+                evidence,
+                page,
+                now,
+            },
+        );
+        let fused = (cfg.fusion != FusionMode::Off).then(|| fusion::fuse(&observations, &weights));
+        let assessment_score = match (&cfg.fusion, &fused) {
+            (FusionMode::Decide, Some(fused)) => fused.effective_score(),
+            _ => confidence,
+        };
+        let (calibrated, version) = match calibration.as_ref() {
+            Some(map) => (Some(map.apply(assessment_score)), map.version.clone()),
+            None => (None, String::new()),
+        };
+        if let Err(e) = self
+            .store
+            .save_observations(domain, "threat", now, &observations)
+        {
+            self.log_warn(format!(
+                "AI could not store the signals behind {domain}: {e}"
+            ));
+        }
+        if let Err(e) = self.store.save_assessment(
+            domain,
+            "threat",
+            calibrated,
+            &version,
+            fused.as_ref().map(|f| f.score),
+        ) {
+            self.log_warn(format!(
+                "AI could not store the assessment of {domain}: {e}"
+            ));
+        }
     }
 
     /// Ask the configured language model (see [`crate::llm`]) to read kept
@@ -544,7 +709,10 @@ impl Scanner {
                 confidence,
                 category.as_deref(),
             )?;
-            if moved {
+            // A raised threat confidence has to be calibrated again before the
+            // snapshot is rebuilt, or the gate would compare a stale map.
+            if moved && candidate.channel == "threat" {
+                self.reassess_domain(cfg, &candidate.domain, now);
                 changed += 1;
             }
         }
@@ -764,6 +932,11 @@ impl Scanner {
             }
             self.store
                 .record_page_reading(domain, &note, changed, inspection.reading.as_ref())?;
+            // The reading changed the confidence: recompute the calibrated
+            // score so the gate compares the confidence that is stored now.
+            if changed.is_some() {
+                self.reassess_domain(cfg, domain, now);
+            }
             if changed.is_some() {
                 adjusted += 1;
             }
@@ -874,15 +1047,44 @@ impl Scanner {
         overrides: &ExemptionSnapshot,
     ) -> Result<BlockSnapshot> {
         let mut eligible = BlockSnapshot::new();
+        // Graduated authority (off by default): with it on, a finding from a
+        // source at `monitor` or `propose` is recorded and listed but never
+        // reaches the block snapshot. A source is demoted here automatically
+        // when its measured false-positive share passes the configured limit.
+        let decisions = if cfg.authority.enabled {
+            match crate::authority::evaluate(&self.store, &cfg.authority) {
+                Ok(decisions) => decisions,
+                Err(e) => {
+                    // Fail closed: a broken measurement must not grant
+                    // authority nobody measured.
+                    self.log_warn(format!(
+                        "AI could not measure enforcement authority ({e}); holding findings to monitor"
+                    ));
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
         // The label list is what separates a threat from an ordinary
         // category, so it gates blocking too.
-        for (domain, category, expires_at) in self.store.fresh_blocked(now, cfg.block_threshold)? {
-            if cfg.is_auto_block_category(&category) && !exempt(&domain, overrides) {
+        for candidate in self.store.fresh_blocked(now, cfg.block_threshold)? {
+            if cfg.authority.enabled {
+                let source = crate::authority::Source::of(&candidate.source);
+                let may_block = crate::authority::decision_for(&decisions, source)
+                    .is_some_and(|decision| decision.may_block());
+                if !may_block {
+                    continue;
+                }
+            }
+            if cfg.is_auto_block_category(&candidate.category)
+                && !exempt(&candidate.domain, overrides)
+            {
                 eligible.insert(
-                    domain,
+                    candidate.domain,
                     ActiveBlock {
-                        category,
-                        expires_at,
+                        category: candidate.category,
+                        expires_at: candidate.expires_at,
                     },
                 );
             }
@@ -1022,11 +1224,12 @@ impl Scanner {
             .cloned()
             .collect();
         let mut withheld = 0usize;
-        if fresh.len() > MAX_NEW_BLOCKS_PER_REFRESH {
+        let limit = effective_new_block_limit(cfg);
+        if fresh.len() > limit {
             let mut overflow = fresh;
             overflow.sort();
-            withheld = overflow.len() - MAX_NEW_BLOCKS_PER_REFRESH;
-            for domain in overflow.iter().skip(MAX_NEW_BLOCKS_PER_REFRESH) {
+            withheld = overflow.len() - limit;
+            for domain in overflow.iter().skip(limit) {
                 snapshot.remove(domain);
             }
         }
@@ -1147,6 +1350,17 @@ impl Scanner {
 
 /// Most distinct domains recorded from the query log per cycle.
 const HARVEST_LIMIT: u32 = 100_000;
+
+/// The number of new blocks one refresh may publish. [`MAX_NEW_BLOCKS_PER_REFRESH`]
+/// is a ceiling: a configured authority limit can only tighten it, never
+/// bypass it.
+fn effective_new_block_limit(cfg: &AiSettings) -> usize {
+    if cfg.authority.enabled {
+        (cfg.authority.max_new_blocks_per_refresh as usize).clamp(1, MAX_NEW_BLOCKS_PER_REFRESH)
+    } else {
+        MAX_NEW_BLOCKS_PER_REFRESH
+    }
+}
 
 /// How far back the first cycle after startup reads the query log: eight
 /// intervals, at most eight hours.

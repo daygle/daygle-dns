@@ -393,6 +393,26 @@ see [AI.md](AI.md).
   build time - so operator decisions and explicit trust always supersede AI
   verdicts.
 
+- **Assessment, fusion, calibration and candidates.** Every threat verdict's
+  inputs are recorded as structured observations (`assessment.rs`:
+  source, direction, value, explanation, timestamp, hostname or registrable
+  domain, evidence family). `fusion.rs` combines them without double-counting
+  the primary model and the MiniLM verifier: the model sets the base, the
+  verifier adjusts it inside the same family, independent evidence is bounded
+  as a group, and feed corroboration and popular/established disputes remain
+  hard mechanisms outside the sum. `calibration.rs` maps the assessment score
+  to a calibrated one with a versioned isotonic map fitted on a tuning split
+  and judged on a registrable-domain hold-out by Brier score, ECE and a
+  reliability table; a worse candidate is refused. `candidate.rs` plus the
+  `ai_candidates`/`ai_model_artifacts` tables keep the whole scoring system -
+  model bytes, threshold, calibration, signal weights, scoring config and
+  validation report - as one version that promotes and rolls back atomically.
+  `authority.rs` applies a per-source stage (`monitor`, `propose`, `enforce`)
+  to what may reach the block snapshot, demoting a source automatically when
+  its measured false-positive share passes `ai.authority.demote_fp_rate`. All
+  of it is off or in monitor mode by default; see
+  [AI_SCORING_AUDIT.md](AI_SCORING_AUDIT.md).
+
 ## Console, roles and dashboard
 
 - **Login.** Console accounts live in the database (seeded once from

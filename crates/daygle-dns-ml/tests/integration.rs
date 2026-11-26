@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use daygle_dns_core::config::{AiMode, AiSettings, PageRule};
+use daygle_dns_core::config::{AiMode, AiSettings, AuthorityStage, PageRule};
 use daygle_dns_core::LogStore;
 use daygle_dns_ml::backend::Channel;
 use daygle_dns_ml::store::{AiStore, VerdictRow};
@@ -87,6 +87,58 @@ fn learned_previous(ai: &AiEngine) -> bool {
 
 fn learned_trial(ai: &AiEngine) -> daygle_dns_ml::learn::Trial {
     daygle_dns_ml::learn::Trial::from_json(&ai.maintained_status()["trial"])
+}
+
+// ── Graduated authority ─────────────────────────────────────────────────────
+
+/// Authority is separate from autonomy, and off by default. With it on, a
+/// model-only finding at `monitor` is recorded and never reaches the block
+/// snapshot, while the operator can grant that source enforcement without a
+/// restart. Operator overrides still win over everything.
+#[test]
+fn graduated_authority_holds_model_findings_until_they_are_trusted() {
+    let dir = TempDir::new().unwrap();
+    let mut settings = settings(AiMode::Enforce);
+    settings.authority.enabled = true;
+    settings.authority.model_stage = AuthorityStage::Monitor;
+    let ai = AiEngine::new(
+        &settings,
+        &dir.path().join("zones.db").to_string_lossy(),
+        Arc::new(daygle_dns_authoritative::ZoneStore::open(":memory:").unwrap()),
+        Arc::new(LogStore::new(200)),
+    )
+    .unwrap();
+    ai.store.observe("model-only.example").unwrap();
+    ai.store
+        .save_verdict(
+            Channel::Threat,
+            "model-only.example",
+            "phishing",
+            "threat",
+            "classified",
+            0.999,
+            "fasttext",
+            "model, phishing",
+            3_600,
+        )
+        .unwrap();
+    ai.refresh_snapshot_now();
+    assert!(
+        ai.snapshot().load().is_empty(),
+        "a monitored source is recorded but never blocks"
+    );
+
+    // The same finding blocks once its source has enforcement authority.
+    let mut enforcing = settings.clone();
+    enforcing.authority.model_stage = AuthorityStage::Enforce;
+    ai.apply_settings(&enforcing);
+    ai.refresh_snapshot_now();
+    assert!(ai.snapshot().load().contains_key("model-only.example"));
+
+    // The operator's own decision still wins over the snapshot.
+    ai.set_not_threat_override("model-only.example", "test")
+        .unwrap();
+    assert!(ai.snapshot().load().is_empty());
 }
 
 // ── Store semantics ─────────────────────────────────────────────────────────

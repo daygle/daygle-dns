@@ -1658,6 +1658,16 @@ GET  /api/ai/threshold
 POST /api/ai/threshold/trial
 POST /api/ai/threshold/apply    {"id": 3}
 POST /api/ai/threshold/rollback {"id": 3}
+GET  /api/ai/signals?domain=x.example
+GET  /api/ai/calibration
+POST /api/ai/calibration/fit
+POST /api/ai/calibration/apply   {"version": "cal-..."}
+POST /api/ai/calibration/disable
+GET  /api/ai/candidates
+POST /api/ai/candidates/snapshot
+POST /api/ai/candidates/promote  {"id": 4}
+POST /api/ai/candidates/rollback
+GET  /api/ai/authority
 GET  /api/ai/overrides
 POST /api/ai/override          {"domain": "x.example", "action": "allow|not_threat|clear|category|clear_category", "category": "gambling", "reason": "..."}
 POST /api/ai/rescan
@@ -1713,6 +1723,30 @@ store's threat verdicts by the same confidence `ai.block_threshold` compares,
 chooses the lowest threshold whose false-positive rate on established and
 unseen domains meets the target, validates it on a held-out fifth of the
 evidence, records it with the model version and returns `{trial, message}`.
+The trial also reports `provenance` (where each label came from and how far it
+can be trusted: operator corrections strong, feed listings moderate,
+established/popular weak, unseen none) and `temporal` (the candidate measured
+on verdicts classified before and after the 70th-percentile time), so a
+threshold is checked against newer domains and threats, not only a random
+split. The hold-out is keyed on the registrable domain, so subdomains of one
+site cannot land on both sides.
+
+`GET /api/ai/signals?domain=` returns the structured observations behind one
+threat verdict - source, direction, value, explanation, timestamp and
+hostname/registrable-domain scope for the model, verifier, feed, popularity,
+usage history, domain age, name shape, page and language model - plus the
+fused view and the calibrated score. `GET /api/ai/calibration` reports the map
+in force and every recorded map with its held-out Brier/ECE; `POST
+/api/ai/calibration/fit` fits and evaluates one without activating it, `POST
+/api/ai/calibration/apply` puts it in force (409 when it is worse than the map
+in force) and `POST /api/ai/calibration/disable` returns to the uncalibrated
+score. `GET /api/ai/candidates` lists the atomic candidate versions (model
+artifact hash, threshold, calibration, weights, scoring config, validation
+report); `snapshot` records the current system, `promote` activates one as a
+whole and `rollback` restores the complete previous one. `GET
+/api/ai/authority` reports each source's stage and measured false-positive
+record. Details in [AI_SCORING_AUDIT.md](AI_SCORING_AUDIT.md).
+
 Nothing is applied. `POST /api/ai/threshold/apply` with `{"id": n}` puts that
 trial's candidate in force and publishes it as `ai.block_threshold`, recording
 the model that was live at that moment as `applied_model`; a trial that did

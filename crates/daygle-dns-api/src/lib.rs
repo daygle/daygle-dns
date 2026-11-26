@@ -699,6 +699,31 @@ pub fn router(state: AppState) -> Router {
         .route("/ai/threats", get(handlers::ai_threats))
         .route("/ai/threats/export", get(handlers::ai_threats_export))
         .route("/ai/explain", get(handlers::ai_explain))
+        .route("/ai/signals", get(handlers::ai_signals))
+        .route("/ai/calibration", get(handlers::ai_calibration))
+        .route("/ai/calibration/fit", post(handlers::ai_calibration_fit))
+        .route(
+            "/ai/calibration/apply",
+            post(handlers::ai_calibration_apply),
+        )
+        .route(
+            "/ai/calibration/disable",
+            post(handlers::ai_calibration_disable),
+        )
+        .route("/ai/candidates", get(handlers::ai_candidates))
+        .route(
+            "/ai/candidates/snapshot",
+            post(handlers::ai_candidates_snapshot),
+        )
+        .route(
+            "/ai/candidates/promote",
+            post(handlers::ai_candidates_promote),
+        )
+        .route(
+            "/ai/candidates/rollback",
+            post(handlers::ai_candidates_rollback),
+        )
+        .route("/ai/authority", get(handlers::ai_authority))
         .route("/ai/corrections", get(handlers::ai_corrections))
         .route("/ai/retrain", post(handlers::ai_retrain))
         .route("/ai/threshold", get(handlers::ai_threshold))
