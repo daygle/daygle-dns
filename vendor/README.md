@@ -48,7 +48,23 @@ All are worth offering upstream.
      as an answer; its glue is kept only inside the current zone.
    Strict mode still stops at an NXDOMAIN (RFC 8020).
 
-4. **No deprecation warnings on newer toolchains** (`hickory-resolver`
+4. **A zone cut probe that cannot be read lets the parent's DS answer
+   decide** (`hickory-net` `dnssec/mod.rs`, `find_ds_records`). The probe
+   asks the servers of the zone below a possible cut for their NS records,
+   and any error other than NXDOMAIN or NODATA ended the search as bogus.
+   A zone whose servers send nothing this resolver can read (both of
+   `ptsecurity.com`'s answer FORMERR to every query carrying EDNS) was
+   therefore never proved insecure, and every answer from it, positive or
+   negative, was bogus. Now the DS at that name is asked for, as it would be
+   after a successful probe: a signed proof of no DS at a delegation makes
+   the answer insecure, a DS keeps it secure, and anything else moves the
+   search one label up. The DS answer is validated exactly as before, so
+   nothing becomes provable that a forged probe reply could not already
+   reach. Covered by the tests in
+   `crates/daygle-dns-recursive/src/recursor/validator_tests.rs`, against a
+   signed fake root.
+
+5. **No deprecation warnings on newer toolchains** (`hickory-resolver`
    `name_server.rs`, `recursor/handle.rs`). Newer Rust renamed
    `fetch_update` to `try_update`; the two calls keep the old name, which
    still builds on the minimum supported Rust (1.95), under

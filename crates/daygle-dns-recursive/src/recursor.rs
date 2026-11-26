@@ -1441,6 +1441,9 @@ pub type SharedRecursor = Arc<arc_swap::ArcSwap<RecursorSlot>>;
 mod hierarchy_tests;
 
 #[cfg(test)]
+mod validator_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use hickory_proto::rr::rdata::{A, CNAME};
