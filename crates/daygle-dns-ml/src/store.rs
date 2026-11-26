@@ -28,7 +28,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use daygle_dns_core::config::PageRule;
+use daygle_dns_core::config::{FusionMode, PageRule};
 use daygle_dns_core::error::{DaygleError, Result};
 use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -825,27 +825,34 @@ impl AiStore {
     /// parent override exempts and, when the threat channel shares the
     /// classifier, to the auto-block labels. Content-channel rows are
     /// categorizations: they never reach the snapshot.
-    pub fn fresh_blocked(&self, now_epoch: i64, threshold: f32) -> Result<Vec<BlockCandidate>> {
+    pub fn fresh_blocked(
+        &self,
+        now_epoch: i64,
+        threshold: f32,
+        fusion: FusionMode,
+    ) -> Result<Vec<BlockCandidate>> {
         let conn = self.lock()?;
         // A domain the operator relabelled is decided by that label (see
         // [`Self::operator_threats`]), never by the model's verdict.
         //
-        // The score compared here is the calibrated one when a calibration
-        // map was in force for the verdict, and the confidence otherwise. The
-        // calibration version says which, so a map that legitimately maps a
-        // name to zero is not mistaken for "no map". [`Self::gate_samples`]
-        // reads the same expression, so a threshold trial measures the
-        // decision the gate actually makes. A verdict whose evidence carries a
-        // feed listing is `feed`-sourced, which the graduated authority layer
-        // treats separately from a model-only one.
-        let mut stmt = conn.prepare(
+        // The score compared here is [`self::threshold::GATE_SCORE`]: the
+        // calibrated assessment when a map was in force for the verdict, else
+        // the assessment score (the fused one when fusion decides, the
+        // confidence otherwise). A verdict scored under another fusion mode
+        // falls back to its confidence rather than being read as if this mode
+        // had produced it. [`Self::gate_samples`] reads the same expression, so
+        // a threshold trial measures the decision the gate actually makes. A
+        // verdict whose evidence carries a feed listing is `feed`-sourced,
+        // which the graduated authority layer treats separately from a
+        // model-only one.
+        let mut stmt = conn.prepare(&format!(
             "SELECT domain, category, expires_at,
                     CASE WHEN instr(evidence, ', listed by ') > 0 THEN 'feed' ELSE 'model' END
              FROM ai_verdicts
              WHERE channel = 'threat' AND status = 'classified'
                AND severity != 'disputed'
-               AND CASE WHEN calibration_version <> '' THEN calibrated_score ELSE confidence END >= ?1
-               AND expires_at > ?2
+               AND {gate} >= :threshold
+               AND expires_at > :now
                AND NOT EXISTS (
                    SELECT 1 FROM ai_overrides o
                    WHERE o.domain = ai_verdicts.domain
@@ -855,19 +862,27 @@ impl AiStore {
                    SELECT 1 FROM ai_category_overrides c
                    WHERE c.domain = ai_verdicts.domain
                )",
-        )?;
+            gate = self::threshold::GATE_SCORE
+        ))?;
         let collected = stmt
-            .query_map(params![threshold, now_epoch], |r| {
-                Ok(BlockCandidate {
-                    domain: r.get(0)?,
-                    category: r.get(1)?,
-                    expires_at: r.get(2)?,
-                    source: match r.get::<_, String>(3)?.as_str() {
-                        "feed" => BlockSource::Feed,
-                        _ => BlockSource::Model,
-                    },
-                })
-            })?
+            .query_map(
+                rusqlite::named_params! {
+                    ":fusion": fusion.as_str(),
+                    ":threshold": threshold,
+                    ":now": now_epoch,
+                },
+                |r| {
+                    Ok(BlockCandidate {
+                        domain: r.get(0)?,
+                        category: r.get(1)?,
+                        expires_at: r.get(2)?,
+                        source: match r.get::<_, String>(3)?.as_str() {
+                            "feed" => BlockSource::Feed,
+                            _ => BlockSource::Model,
+                        },
+                    })
+                },
+            )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(collected)
     }
@@ -1473,44 +1488,53 @@ impl AiStore {
         }))
     }
 
-    /// Stored threats that may block, with the score that qualified them
-    /// (the calibrated score when a map was in force, else the confidence):
-    /// fresh, undisputed, at or above `threshold`, and vetoed by no exact
-    /// override. Strongest first. [`crate::AiEngine::export_threats`]
-    /// narrows this to the block snapshot's rules before it is served, so the
-    /// exported list is the enforcement list.
+    /// Stored threats that may block, with the score that qualified them: the
+    /// one expression [`self::threshold::GATE_SCORE`] the gate compares, so the
+    /// exported list is the enforcement list - fresh, undisputed, at or above
+    /// `threshold`, and vetoed by no exact override. Strongest first.
+    /// [`crate::AiEngine::export_threats`] narrows this to the block snapshot's
+    /// rules before it is served.
     pub fn export_threats(
         &self,
         now_epoch: i64,
         threshold: f32,
+        fusion: FusionMode,
     ) -> Result<Vec<(String, String, f32, i64)>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT domain, category,
-                    CASE WHEN calibration_version <> '' THEN calibrated_score ELSE confidence END,
+                    {gate},
                     expires_at
              FROM ai_verdicts
              WHERE channel = 'threat' AND status = 'classified'
                AND severity != 'disputed'
-               AND CASE WHEN calibration_version <> '' THEN calibrated_score ELSE confidence END >= ?1
-               AND expires_at > ?2
+               AND {gate} >= :threshold
+               AND expires_at > :now
                AND NOT EXISTS (
                    SELECT 1 FROM ai_overrides o
                    WHERE o.domain = ai_verdicts.domain
                      AND o.action IN ('allow', 'not_threat')
                )
-             ORDER BY CASE WHEN calibration_version <> '' THEN calibrated_score ELSE confidence END DESC,
+             ORDER BY {gate} DESC,
                       domain",
-        )?;
+            gate = self::threshold::GATE_SCORE
+        ))?;
         let collected = stmt
-            .query_map(params![threshold, now_epoch], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, f64>(2)? as f32,
-                    r.get::<_, i64>(3)?,
-                ))
-            })?
+            .query_map(
+                rusqlite::named_params! {
+                    ":fusion": fusion.as_str(),
+                    ":threshold": threshold,
+                    ":now": now_epoch,
+                },
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, f64>(2)? as f32,
+                        r.get::<_, i64>(3)?,
+                    ))
+                },
+            )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(collected)
     }

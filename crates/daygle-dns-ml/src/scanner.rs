@@ -484,6 +484,19 @@ impl Scanner {
         }
     }
 
+    /// Re-score every stored threat verdict under `cfg`'s fusion mode, from the
+    /// observations kept beside it. The score of record is a function of the
+    /// mode, so a verdict stored under another one must be rewritten before the
+    /// new mode affects enforcement - otherwise the gate would compare (or the
+    /// trial fit on) a score the previous configuration produced. Called when
+    /// the mode changes; returns how many verdicts were rewritten.
+    pub fn rescore_assessments(&self, cfg: &AiSettings) -> Result<usize> {
+        let calibration = self.calibration.load_full();
+        let weights = self.weights.load_full();
+        self.store
+            .rescore_assessments(cfg.fusion, &weights, calibration.as_ref().as_ref())
+    }
+
     /// Recompute one stored verdict's observations and calibrated score after
     /// a later stage (the page rule or the language model) moved its
     /// confidence. Without this the gate would keep comparing a calibration
@@ -553,14 +566,15 @@ impl Scanner {
             },
         );
         let fused = (cfg.fusion != FusionMode::Off).then(|| fusion::fuse(&observations, &weights));
-        let assessment_score = match (&cfg.fusion, &fused) {
-            (FusionMode::Decide, Some(fused)) => fused.effective_score(),
-            _ => confidence,
-        };
-        let (calibrated, version) = match calibration.as_ref() {
-            Some(map) => (Some(map.apply(assessment_score)), map.version.clone()),
-            None => (None, String::new()),
-        };
+        // One score of record, shared with the re-scoring pass and the gate:
+        // fusion decides it in `decide`, calibration maps it when a map is in
+        // force.
+        let score = assessment::score_of_record(
+            cfg.fusion,
+            confidence,
+            fused.as_ref(),
+            calibration.as_ref().as_ref(),
+        );
         if let Err(e) = self
             .store
             .save_observations(domain, "threat", now, &observations)
@@ -569,14 +583,10 @@ impl Scanner {
                 "AI could not store the signals behind {domain}: {e}"
             ));
         }
-        if let Err(e) = self.store.save_assessment(
-            domain,
-            "threat",
-            calibrated,
-            &version,
-            fused.as_ref().map(|f| f.score),
-            assessment_score,
-        ) {
+        if let Err(e) = self
+            .store
+            .save_assessment(domain, "threat", cfg.fusion, &score)
+        {
             self.log_warn(format!(
                 "AI could not store the assessment of {domain}: {e}"
             ));
@@ -1069,7 +1079,10 @@ impl Scanner {
         };
         // The label list is what separates a threat from an ordinary
         // category, so it gates blocking too.
-        for candidate in self.store.fresh_blocked(now, cfg.block_threshold)? {
+        for candidate in self
+            .store
+            .fresh_blocked(now, cfg.block_threshold, cfg.fusion)?
+        {
             if cfg.authority.enabled {
                 let source = crate::authority::Source::of(&candidate.source);
                 let may_block = crate::authority::decision_for(&decisions, source)

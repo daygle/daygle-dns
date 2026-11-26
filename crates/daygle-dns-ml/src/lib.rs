@@ -175,6 +175,10 @@ pub struct SignalReport {
     /// The calibrated score, when a calibration map is in force.
     pub calibrated: Option<f32>,
     pub calibration_version: String,
+    /// The score the gate compares under the live fusion mode: the calibrated
+    /// assessment when a map was in force, else the assessment score (the fused
+    /// one when fusion decides, the confidence otherwise).
+    pub gate_score: f32,
 }
 
 impl AiEngine {
@@ -710,6 +714,25 @@ impl AiEngine {
                 ),
             }
         }
+        // Fusion decides which score the gate compares, so a mode change makes
+        // every stored assessment describe the previous rule. Re-score them
+        // before the snapshots are rebuilt: enforcement never compares a score
+        // another mode produced, and the trial and the export then read the
+        // numbers the gate uses.
+        if old.fusion != new.fusion {
+            match self.scanner.rescore_assessments(new) {
+                Ok(0) => {}
+                Ok(rescored) => tracing::info!(
+                    rescored,
+                    fusion = new.fusion.as_str(),
+                    "re-scored stored verdicts for the new fusion mode"
+                ),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "could not re-score stored verdicts for the changed fusion mode; they keep their confidence until reclassified"
+                ),
+            }
+        }
         self.refresh_snapshot_now();
         self.trigger_rescan();
         restart
@@ -795,7 +818,7 @@ impl AiEngine {
         // with their label and no expiry, in place of the model's row.
         let mut rows: Vec<(String, String, f32, i64)> = self
             .store
-            .export_threats(now, cfg.block_threshold)?
+            .export_threats(now, cfg.block_threshold, cfg.fusion)?
             .into_iter()
             .filter(|(domain, ..)| {
                 eligible
@@ -868,6 +891,12 @@ impl AiEngine {
                 }
             })
             .unwrap_or((None, String::new()));
+        // The number the gate compares for this verdict, read through the same
+        // expression the gate, the trial and the export use.
+        let gate_score = self
+            .store
+            .gate_score(domain, "threat", self.settings.load().fusion)?
+            .unwrap_or(row.confidence);
         Ok(Some(SignalReport {
             domain: domain.to_string(),
             fusion: fusion::fuse(&observations, &self.scanner.signal_weights()),
@@ -878,6 +907,7 @@ impl AiEngine {
             severity: row.severity,
             calibrated,
             calibration_version,
+            gate_score,
         }))
     }
 

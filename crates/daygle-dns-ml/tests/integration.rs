@@ -4,8 +4,11 @@
 
 use std::sync::Arc;
 
-use daygle_dns_core::config::{AiMode, AiSettings, AuthorityStage, PageRule};
+use daygle_dns_core::config::{AiMode, AiSettings, AuthorityStage, FusionMode, PageRule};
 use daygle_dns_core::LogStore;
+use daygle_dns_ml::assessment::{
+    AssessmentScore, Direction, ObservationScope, Scope, SignalObservation, SignalSource,
+};
 use daygle_dns_ml::backend::Channel;
 use daygle_dns_ml::store::{AiStore, VerdictRow};
 use daygle_dns_ml::AiEngine;
@@ -143,6 +146,200 @@ fn graduated_authority_holds_model_findings_until_they_are_trusted() {
 
 // ── Store semantics ─────────────────────────────────────────────────────────
 
+/// Fusion is not report-only. With `decide` and **no** calibration map, the
+/// gate, the threat export and the threshold trial read the fused assessment
+/// score: here outside evidence pulls it below the threshold the model's
+/// confidence clears.
+#[test]
+fn fusion_decide_changes_the_gate_score_without_calibration() {
+    let dir = TempDir::new().unwrap();
+    let cfg = AiSettings {
+        fusion: FusionMode::Decide,
+        block_threshold: 0.9,
+        ..settings(AiMode::Enforce)
+    };
+    let ai = engine(&dir, cfg.clone());
+    ai.store.observe("disputed-model.example").unwrap();
+    ai.store
+        .save_verdict(
+            Channel::Threat,
+            "disputed-model.example",
+            "phishing",
+            "threat",
+            "classified",
+            0.95,
+            "fasttext",
+            "model, phishing at 0.95",
+            3_600,
+        )
+        .unwrap();
+    // What `assess_row` stores under `decide`: the fused score, below the
+    // threshold the confidence clears.
+    ai.store
+        .save_assessment(
+            "disputed-model.example",
+            "threat",
+            FusionMode::Decide,
+            &AssessmentScore {
+                assessment: 0.75,
+                calibrated: None,
+                calibration_version: String::new(),
+                fused: Some(0.75),
+            },
+        )
+        .unwrap();
+
+    let now = chrono::Utc::now().timestamp();
+    assert!(
+        ai.store
+            .fresh_blocked(now, cfg.block_threshold, cfg.fusion)
+            .unwrap()
+            .is_empty(),
+        "the fused score, not the confidence, decides"
+    );
+    ai.refresh_snapshot_now();
+    assert!(ai.snapshot().load().is_empty());
+    assert!(ai.export_threats().unwrap().is_empty());
+
+    // The trial reads the same number: its sample is the fused 0.75, not the
+    // 0.95 confidence, and the export agrees.
+    let samples = daygle_dns_ml::threshold::collect(
+        &ai.store,
+        &daygle_dns_ml::intel::IntelIndex::default(),
+        &cfg,
+        100,
+    )
+    .unwrap();
+    let sample = samples
+        .iter()
+        .find(|sample| sample.domain == "disputed-model.example")
+        .expect("the verdict is a trial sample");
+    assert!((sample.score - 0.75).abs() < 1e-6, "{sample:?}");
+    assert_eq!(
+        ai.store.gate_scores(10, cfg.fusion).unwrap(),
+        vec![("disputed-model.example".to_string(), 0.75)]
+    );
+    assert!(
+        ai.store
+            .export_threats(now, cfg.block_threshold, cfg.fusion)
+            .unwrap()
+            .is_empty(),
+        "the export compares the same score the gate does"
+    );
+}
+
+/// A verdict stored under one fusion mode is not read under another: switching
+/// the mode re-scores the stored verdicts from the observations kept beside them
+/// before the snapshot is rebuilt.
+#[test]
+fn switching_fusion_mode_rescores_stored_verdicts() {
+    let dir = TempDir::new().unwrap();
+    let monitor = AiSettings {
+        block_threshold: 0.9,
+        ..settings(AiMode::Enforce)
+    };
+    let ai = engine(&dir, monitor.clone());
+    ai.store.observe("popular-model.example").unwrap();
+    ai.store
+        .save_verdict(
+            Channel::Threat,
+            "popular-model.example",
+            "phishing",
+            "threat",
+            "classified",
+            0.95,
+            "fasttext",
+            "model, phishing at 0.95",
+            3_600,
+        )
+        .unwrap();
+    let now = chrono::Utc::now().timestamp();
+    let observation =
+        |source: SignalSource, direction: Direction, value: Option<f32>, note: &str| {
+            SignalObservation::new(
+                source,
+                direction,
+                value,
+                note.to_string(),
+                now,
+                ObservationScope {
+                    value: "popular-model.example".to_string(),
+                    kind: Scope::Hostname,
+                },
+            )
+        };
+    ai.store
+        .save_observations(
+            "popular-model.example",
+            "threat",
+            now,
+            &[
+                observation(
+                    SignalSource::Model,
+                    Direction::Threat,
+                    Some(0.9),
+                    "the model read it 0.90",
+                ),
+                observation(
+                    SignalSource::Popularity,
+                    Direction::Benign,
+                    None,
+                    "a popular site, so the reading is disputed",
+                ),
+            ],
+        )
+        .unwrap();
+    ai.store
+        .save_assessment(
+            "popular-model.example",
+            "threat",
+            FusionMode::Monitor,
+            &AssessmentScore {
+                assessment: 0.95,
+                calibrated: None,
+                calibration_version: String::new(),
+                fused: Some(0.8),
+            },
+        )
+        .unwrap();
+    ai.refresh_snapshot_now();
+    assert_eq!(
+        ai.store.gate_scores(10, FusionMode::Monitor).unwrap(),
+        vec![("popular-model.example".to_string(), 0.95)],
+        "monitor compares the confidence"
+    );
+    assert!(ai.snapshot().load().contains_key("popular-model.example"));
+
+    // The fused score (0.9 model minus the 0.1 popularity weight) is below the
+    // threshold the confidence cleared, so enforcement changes - but only on a
+    // score the new mode produced.
+    let mut decide = monitor.clone();
+    decide.fusion = FusionMode::Decide;
+    ai.apply_settings(&decide);
+    let scores = ai.store.gate_scores(10, FusionMode::Decide).unwrap();
+    assert_eq!(scores.len(), 1);
+    assert!(
+        (scores[0].1 - 0.8).abs() < 1e-5,
+        "the switch re-scores the stored verdict with the fused assessment: {scores:?}"
+    );
+    assert!(
+        ai.snapshot().load().is_empty(),
+        "0.8 is below the threshold the confidence cleared"
+    );
+    assert!(ai.export_threats().unwrap().is_empty());
+
+    // And back: monitor compares the confidence again, re-scored rather than
+    // keeping the fused score the other mode stored.
+    ai.apply_settings(&monitor);
+    let scores = ai.store.gate_scores(10, FusionMode::Monitor).unwrap();
+    assert_eq!(scores.len(), 1);
+    assert!(
+        (scores[0].1 - 0.95).abs() < 1e-5,
+        "the confidence is back: {scores:?}"
+    );
+    assert!(ai.snapshot().load().contains_key("popular-model.example"));
+}
+
 /// A database from before the channel split stored one verdict per domain.
 /// Opening it must keep every threat verdict blocking, and queue the channel
 /// that never ran so the next scan fills it in.
@@ -182,7 +379,13 @@ fn store_upgrades_a_pre_channel_database() {
     let now = chrono::Utc::now().timestamp();
     // The old threat verdict still blocks: an upgrade must not unblock
     // domains while the next scan runs.
-    assert_eq!(store.fresh_blocked(now, 0.99).unwrap().len(), 1);
+    assert_eq!(
+        store
+            .fresh_blocked(now, 0.99, FusionMode::Monitor)
+            .unwrap()
+            .len(),
+        1
+    );
 
     let (rows, total) = store.list_verdicts(None, None, 10, 0).unwrap();
     assert_eq!(total, 4, "each domain gains its missing channel: {rows:?}");
@@ -224,7 +427,10 @@ fn content_categorizations_never_auto_block() {
         .unwrap();
     let now = chrono::Utc::now().timestamp();
     assert!(
-        store.fresh_blocked(now, 0.99).unwrap().is_empty(),
+        store
+            .fresh_blocked(now, 0.99, FusionMode::Monitor)
+            .unwrap()
+            .is_empty(),
         "a content row must never be block-eligible"
     );
 
@@ -242,7 +448,13 @@ fn content_categorizations_never_auto_block() {
             3600,
         )
         .unwrap();
-    assert_eq!(store.fresh_blocked(now, 0.99).unwrap().len(), 1);
+    assert_eq!(
+        store
+            .fresh_blocked(now, 0.99, FusionMode::Monitor)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -297,7 +509,13 @@ fn verdict_lifecycle_and_expiry() {
 
     // Fresh threat is listed as block-eligible.
     let now = chrono::Utc::now().timestamp();
-    assert_eq!(store.fresh_blocked(now, 0.99).unwrap().len(), 1);
+    assert_eq!(
+        store
+            .fresh_blocked(now, 0.99, FusionMode::Monitor)
+            .unwrap()
+            .len(),
+        1
+    );
 
     // Expiry re-queues a domain still being queried to pending and clears
     // the category.
@@ -312,7 +530,7 @@ fn verdict_lifecycle_and_expiry() {
     // No longer fresh ⇒ no longer block-eligible (freshly-scanned again).
     assert_eq!(
         store
-            .fresh_blocked(now + 7 * 86400 + 2, 0.99)
+            .fresh_blocked(now + 7 * 86400 + 2, 0.99, FusionMode::Monitor)
             .unwrap()
             .len(),
         0,
@@ -475,18 +693,33 @@ fn allow_override_vetoes_block_snapshot() {
         )
         .unwrap();
     let now = chrono::Utc::now().timestamp();
-    assert_eq!(store.fresh_blocked(now, 0.99).unwrap().len(), 1);
+    assert_eq!(
+        store
+            .fresh_blocked(now, 0.99, FusionMode::Monitor)
+            .unwrap()
+            .len(),
+        1
+    );
 
     store
         .set_override("site.example.org", "allow", "customer wants it")
         .unwrap();
     assert_eq!(
-        store.fresh_blocked(now, 0.99).unwrap().len(),
+        store
+            .fresh_blocked(now, 0.99, FusionMode::Monitor)
+            .unwrap()
+            .len(),
         0,
         "an allow override must suppress block eligibility"
     );
     store.clear_override("site.example.org").unwrap();
-    assert_eq!(store.fresh_blocked(now, 0.99).unwrap().len(), 1);
+    assert_eq!(
+        store
+            .fresh_blocked(now, 0.99, FusionMode::Monitor)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 // ── Scanner cycle against a real ZoneStore ──────────────────────────────────
@@ -667,7 +900,13 @@ fn engine_snapshot_never_contains_below_threshold_verdicts() {
         )
         .unwrap();
     let now = chrono::Utc::now().timestamp();
-    assert_eq!(store.fresh_blocked(now, 0.99).unwrap().len(), 0);
+    assert_eq!(
+        store
+            .fresh_blocked(now, 0.99, FusionMode::Monitor)
+            .unwrap()
+            .len(),
+        0
+    );
 }
 
 #[test]
@@ -2180,14 +2419,23 @@ fn marking_a_threat_not_a_threat_stops_blocking_and_export() {
         )
         .unwrap();
     let now = chrono::Utc::now().timestamp();
-    assert_eq!(ai.store.export_threats(now, 0.25).unwrap().len(), 1);
+    assert_eq!(
+        ai.store
+            .export_threats(now, 0.25, FusionMode::Monitor)
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(ai.blockable_counts().unwrap().contains_key("gambling"));
 
     ai.set_not_threat_override("casino-bonus.example", "not gambling")
         .unwrap();
     assert!(ai.blockable_counts().unwrap().is_empty());
     assert!(
-        ai.store.export_threats(now, 0.25).unwrap().is_empty(),
+        ai.store
+            .export_threats(now, 0.25, FusionMode::Monitor)
+            .unwrap()
+            .is_empty(),
         "a corrected detection must leave the exported threat list"
     );
     // The verdict itself survives, for audit and for the console (the other
@@ -2434,7 +2682,10 @@ fn disputed_threats_never_auto_block() {
         )
         .unwrap();
     let now = chrono::Utc::now().timestamp();
-    assert!(store.fresh_blocked(now, 0.99).unwrap().is_empty());
+    assert!(store
+        .fresh_blocked(now, 0.99, FusionMode::Monitor)
+        .unwrap()
+        .is_empty());
 }
 
 /// Only internet names outside the server's own zones are classified:

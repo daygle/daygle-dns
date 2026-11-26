@@ -280,7 +280,10 @@ counted twice, independent evidence moves the score by a bounded amount, and
 feed corroboration and popular/established disputes stay separate hard
 mechanisms exactly as before. `monitor` (the default) records the fused score
 beside the verdict without changing what blocks; `decide` makes it the
-assessment; `off` records observations only.
+assessment, so the gate compares it - with or without a calibration map; `off`
+records observations only. Changing the mode re-scores the stored verdicts from
+their observations before the block snapshot is rebuilt, so enforcement never
+compares a score the previous mode produced.
 
 **Calibration** maps the assessment score to a calibrated probability. A map
 is fitted with isotonic regression on one part of the labelled evidence and
@@ -288,9 +291,11 @@ evaluated on a held-out part split by registrable domain, reporting Brier
 score, expected calibration error and a reliability table. A candidate map
 that scores worse than the one in force is refused. Nothing is applied until
 you apply it (`POST /api/ai/calibration/apply`), and until then the score is
-an assessment score, **not** a real-world probability. The calibrated score is
-the one the gate compares, the one a threshold trial fits, and the one the
-console and the exported threat list read.
+an assessment score, **not** a real-world probability. The score of record is
+the calibrated assessment when a map is in force, else the assessment score (the
+fused score under `decide`, the confidence otherwise). The gate, the threshold
+trial, the console's explanation and the exported threat list all read that one
+number.
 
 **Versioned candidates** (`/api/ai/candidates`) hold the whole scoring system
 as one version - the model artifact bytes and hash, the threshold, the

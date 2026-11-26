@@ -512,7 +512,12 @@ pub fn collect(
     settings: &AiSettings,
     limit: u32,
 ) -> Result<Vec<Sample>> {
-    collect_rows(store, intel, settings, store.gate_samples(limit)?)
+    collect_rows(
+        store,
+        intel,
+        settings,
+        store.gate_samples(limit, settings.fusion)?,
+    )
 }
 
 /// [`collect`] on the score calibration is fitted against: the assessment

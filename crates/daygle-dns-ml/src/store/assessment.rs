@@ -9,12 +9,13 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 
+use daygle_dns_core::config::FusionMode;
 use daygle_dns_core::error::{DaygleError, Result};
 
 use super::{now_epoch, AiStore};
-use crate::assessment::SignalObservation;
+use crate::assessment::{score_of_record, AssessmentScore, SignalObservation};
 use crate::calibration::{CalibrationMap, Metrics};
-use crate::fusion::SignalWeights;
+use crate::fusion::{self, SignalWeights};
 
 pub(super) const TABLES: &str = "
 CREATE TABLE IF NOT EXISTS ai_signal_observations (
@@ -82,6 +83,27 @@ pub(super) fn upgrade(conn: &Connection) -> rusqlite::Result<()> {
             |r| r.get(0),
         )
     };
+    // The fusion mode whose assessment score is stored on the row. A row whose
+    // stored assessment differs from its confidence was scored by fusion in
+    // `decide` mode (the other modes store the confidence itself), so recording
+    // that keeps it read by the same rule after the upgrade. Rows where the two
+    // agree read the same under either mode. The column is added before the
+    // assessment columns on a database older than them, where there is nothing
+    // to backfill.
+    if !has_column("assessment_mode")? {
+        conn.execute(
+            "ALTER TABLE ai_verdicts ADD COLUMN assessment_mode TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+        if has_column("assessment_score")? {
+            conn.execute(
+                "UPDATE ai_verdicts SET assessment_mode = 'decide'
+                 WHERE assessment_score > 0
+                   AND abs(assessment_score - confidence) > 0.000001",
+                [],
+            )?;
+        }
+    }
     if !has_column("calibrated_score")? {
         conn.execute(
             "ALTER TABLE ai_verdicts ADD COLUMN calibrated_score REAL NOT NULL DEFAULT 0",
@@ -255,34 +277,99 @@ impl AiStore {
         }))
     }
 
-    /// Store what fusion and calibration said about one verdict. The gate
-    /// reads `calibrated` when it is set; 0 means "no calibration was in
-    /// force", and the confidence is used as before.
+    /// Store one verdict's score of record: the calibrated score when a map was
+    /// in force, the assessment score it was computed from, the fused view, and
+    /// the fusion mode that produced them. The gate compares this; recording the
+    /// mode is what stops a verdict scored under another mode being read as if
+    /// the current one had produced it.
     pub fn save_assessment(
         &self,
         domain: &str,
         channel: &str,
-        calibrated: Option<f32>,
-        calibration_version: &str,
-        fusion_score: Option<f32>,
-        assessment_score: f32,
+        fusion: FusionMode,
+        score: &AssessmentScore,
     ) -> Result<()> {
         let conn = self.lock()?;
         conn.execute(
             "UPDATE ai_verdicts
              SET calibrated_score = ?3, calibration_version = ?4, fusion_score = ?5,
-                 assessment_score = ?6
+                 assessment_score = ?6, assessment_mode = ?7
              WHERE domain = ?1 AND channel = ?2",
             params![
                 domain,
                 channel,
-                calibrated.unwrap_or(0.0),
-                calibration_version,
-                fusion_score.unwrap_or(0.0),
-                assessment_score,
+                score.calibrated.unwrap_or(0.0),
+                score.calibration_version.as_str(),
+                score.fused.unwrap_or(0.0),
+                score.assessment,
+                fusion.as_str(),
             ],
         )?;
         Ok(())
+    }
+
+    /// Re-score every classified threat verdict under `fusion`, from the
+    /// observations stored beside it: the score of record is a function of the
+    /// mode, so a stored score describes the mode that produced it and must be
+    /// rewritten when that changes. A verdict whose observations are gone has no
+    /// fused score: it keeps its confidence (what it was compared by before
+    /// fusion) rather than becoming a zero, and is recorded under the current
+    /// mode so it is not read as a decided one. One transaction.
+    pub fn rescore_assessments(
+        &self,
+        fusion: FusionMode,
+        weights: &SignalWeights,
+        calibration: Option<&CalibrationMap>,
+    ) -> Result<usize> {
+        let mut conn = self.lock()?;
+        let rows: Vec<(String, f32, Option<String>)> = {
+            let mut stmt = conn.prepare(
+                "SELECT v.domain, v.confidence, o.observations
+                 FROM ai_verdicts v
+                 LEFT JOIN ai_signal_observations o
+                   ON o.domain = v.domain AND o.channel = v.channel
+                 WHERE v.channel = 'threat' AND v.status = 'classified'",
+            )?;
+            let collected = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, f64>(1)? as f32,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            collected
+        };
+        let tx = conn.transaction()?;
+        let mut written = 0usize;
+        {
+            let mut update = tx.prepare(
+                "UPDATE ai_verdicts
+                 SET calibrated_score = ?2, calibration_version = ?3, fusion_score = ?4,
+                     assessment_score = ?5, assessment_mode = ?6
+                 WHERE domain = ?1 AND channel = 'threat'",
+            )?;
+            for (domain, confidence, observations) in &rows {
+                let observations: Vec<SignalObservation> = observations
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str(json).ok())
+                    .unwrap_or_default();
+                let fused = (fusion != FusionMode::Off && !observations.is_empty())
+                    .then(|| fusion::fuse(&observations, weights));
+                let score = score_of_record(fusion, *confidence, fused.as_ref(), calibration);
+                written += update.execute(params![
+                    domain,
+                    score.calibrated.unwrap_or(0.0),
+                    score.calibration_version.as_str(),
+                    score.fused.unwrap_or(0.0),
+                    score.assessment,
+                    fusion.as_str(),
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(written)
     }
 
     /// What the assessment stored beside one verdict: `(calibrated score,

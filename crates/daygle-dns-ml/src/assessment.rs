@@ -20,9 +20,63 @@
 use serde::{Deserialize, Serialize};
 
 use crate::age;
+use crate::calibration::CalibrationMap;
 use crate::evidence::{LISTED_CONFIDENCE, LISTED_NOTE, UNFLAGGED_NOTE};
+use crate::fusion;
 use crate::intel::{IntelIndex, Listed};
 use crate::store::AiStore;
+use daygle_dns_core::config::FusionMode;
+
+/// The score of record for one verdict: the number the block gate compares and
+/// the threshold trial, the threat export and the console report.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssessmentScore {
+    /// The assessment the calibration map was applied to: the fused score when
+    /// fusion decides, else the verdict's confidence.
+    pub assessment: f32,
+    /// The calibrated score, when a calibration map was in force.
+    pub calibrated: Option<f32>,
+    /// The map's version, empty when none was in force.
+    pub calibration_version: String,
+    /// The fused view's score, recorded for the report even when it did not
+    /// decide the assessment.
+    pub fused: Option<f32>,
+}
+
+impl AssessmentScore {
+    /// The score of record: the calibrated assessment when a map was in force,
+    /// else the assessment score itself.
+    pub fn gate(&self) -> f32 {
+        self.calibrated.unwrap_or(self.assessment)
+    }
+}
+
+/// Compute one verdict's score of record. Fusion decides only in
+/// [`FusionMode::Decide`]: `off` and `monitor` keep the confidence as the
+/// assessment. Calibration maps whatever that assessment score is, so the
+/// calibrated score is the gate score whenever a map is in force. A verdict
+/// with no fused view (its observations are gone) keeps its confidence even in
+/// `decide`: there is no fused score to decide with, and treating the absence
+/// as a zero would unblock a name the model still flags.
+pub fn score_of_record(
+    fusion: FusionMode,
+    confidence: f32,
+    fused: Option<&fusion::Fusion>,
+    calibration: Option<&CalibrationMap>,
+) -> AssessmentScore {
+    let assessment = match (fusion, fused) {
+        (FusionMode::Decide, Some(fused)) => fused.effective_score(),
+        _ => confidence,
+    };
+    AssessmentScore {
+        assessment,
+        calibrated: calibration.map(|map| map.apply(assessment)),
+        calibration_version: calibration
+            .map(|map| map.version.clone())
+            .unwrap_or_default(),
+        fused: fused.map(|fused| fused.score),
+    }
+}
 
 /// Where one observation came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -2319,6 +2319,7 @@ pub async fn ai_explain(
                     .unwrap_or_default(),
                 "fusion": signal_report.as_ref().map(|report| report.fusion.clone()),
                 "calibrated_score": signal_report.as_ref().and_then(|report| report.calibrated),
+                "gate_score": signal_report.as_ref().map(|report| report.gate_score),
                 "blocked": blocked_category.is_some(),
                 "decision": enforcement_decision(
                     blocked_category.is_some(),
@@ -2351,7 +2352,10 @@ pub async fn ai_explain(
                     "backend": t.backend,
                     "evidence": t.evidence,
                     "observations": t.observations,
-                    "over_threshold": t.confidence >= settings.block_threshold,
+                    "over_threshold": signal_report
+                        .as_ref()
+                        .map_or(t.confidence, |report| report.gate_score)
+                        >= settings.block_threshold,
                     "label_treated_as_threat": settings.is_auto_block_category(&t.category),
                     "classified_at": stamp(t.classified_at),
                     "expires_at": stamp(t.expires_at),
