@@ -2727,9 +2727,6 @@ impl DnsDispatcher {
         (mapped > 0).then_some(records)
     }
 
-    /// The first CNAME target in `answers` that the blocklists, the
-    /// client's per-client rules or its filtering groups block, with the
-    /// blocking decision. Allowlisted targets are skipped.
     /// Why a resolved answer for `qname` must not reach `client`: it holds a
     /// local network address for a public name (Settings -> Recursion's
     /// rebinding protection, or a filtering group's switch), or a payload
@@ -2860,6 +2857,9 @@ impl DnsDispatcher {
         ))
     }
 
+    /// The first CNAME target in `answers` that the blocklists, the
+    /// client's per-client rules or its filtering groups block, with the
+    /// blocking decision. Allowlisted targets are skipped.
     async fn blocked_cname_target(
         &self,
         policy: &PolicyEngine,
