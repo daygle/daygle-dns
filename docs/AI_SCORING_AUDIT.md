@@ -61,10 +61,13 @@ change was made to fix one.
 
 Stage 3 keeps that property while making the calibrated score the one score:
 `gate_scores()` now delegates to `gate_samples()`, which reads
-`COALESCE(NULLIF(calibrated_score, 0), confidence)` - exactly the expression
-`fresh_blocked()` compares. With no calibration map active, `calibrated_score`
-is 0 and both read `confidence`, unchanged. The invariant is pinned by
-`store::threshold::tests::the_trial_reads_the_confidence_the_gate_compares`.
+`CASE WHEN calibration_version <> '' THEN calibrated_score ELSE confidence END`
+- exactly the expression `fresh_blocked()` compares. With no calibration map
+active, `calibration_version` is empty and both read `confidence`, unchanged;
+the version, not the score's value, distinguishes "no map" from a map that
+legitimately calibrates a name to zero. The invariant is pinned by
+`store::threshold::tests::the_trial_reads_the_confidence_the_gate_compares` and
+`a_calibrated_zero_is_not_a_missing_calibration`.
 
 ### Scoring methods that could confuse (found in the audit)
 
@@ -180,6 +183,11 @@ the acceptance gate compares two point estimates without confidence
 intervals; ECE depends on ten fixed bins; and a verdict whose confidence is
 raised by the page/LLM stage is reassessed, but any other direct confidence
 write outside those paths would leave the stored calibrated score stale.
+A map is refused at apply time when the live model is not the model it was
+fitted for. Fitting while a map is already active reads that map's output
+rather than the pre-calibration assessment score, so a second generation of
+maps is measured in the wrong score space; that is an open review item, not
+yet fixed.
 
 ## Stage 4 - Atomic candidate version
 

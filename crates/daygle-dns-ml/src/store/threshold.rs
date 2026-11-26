@@ -263,13 +263,18 @@ impl AiStore {
     pub fn gate_samples(&self, limit: u32) -> Result<Vec<(String, f32, i64)>> {
         let conn = self.lock()?;
         // The same expression `fresh_blocked` compares: the calibrated score
-        // when a map was in force for the verdict, else the confidence.
+        // when a map was in force for the verdict, else the confidence. The
+        // version, not the score's value, says which: a map may legitimately
+        // calibrate a name to zero.
         let mut stmt = conn.prepare(
-            "SELECT domain, COALESCE(NULLIF(calibrated_score, 0), confidence), classified_at
+            "SELECT domain,
+                    CASE WHEN calibration_version <> '' THEN calibrated_score ELSE confidence END,
+                    classified_at
              FROM ai_verdicts
              WHERE channel = 'threat' AND status = 'classified'
-               AND COALESCE(NULLIF(calibrated_score, 0), confidence) > 0
-             ORDER BY COALESCE(NULLIF(calibrated_score, 0), confidence) DESC, domain LIMIT ?1",
+               AND CASE WHEN calibration_version <> '' THEN calibrated_score ELSE confidence END > 0
+             ORDER BY CASE WHEN calibration_version <> '' THEN calibrated_score ELSE confidence END DESC,
+                      domain LIMIT ?1",
         )?;
         let collected = stmt
             .query_map(params![limit.clamp(1, 200_000)], |r| {
@@ -413,6 +418,57 @@ mod tests {
             store.gate_scores(10).unwrap(),
             vec![("age-raised.example".to_string(), 0.97)]
         );
+    }
+
+    /// A map may legitimately calibrate a name to exactly zero. That is a
+    /// calibrated score, not a missing one: the gate must read the zero
+    /// rather than fall back to the confidence it no longer stands for.
+    #[test]
+    fn a_calibrated_zero_is_not_a_missing_calibration() {
+        let (_dir, store) = store();
+        store.observe("calibrated-away.example").unwrap();
+        store
+            .save_verdicts(&[crate::store::NewVerdict {
+                domain: "calibrated-away.example".to_string(),
+                channel: crate::store::Channel::Threat,
+                category: "phishing".to_string(),
+                severity: "threat".to_string(),
+                status: "classified".to_string(),
+                confidence: 0.99,
+                backend: "fasttext".to_string(),
+                evidence: "model, phishing at 0.99".to_string(),
+                threat_score: 0.99,
+                expires_after_secs: 3_600,
+            }])
+            .unwrap();
+        store
+            .save_assessment(
+                "calibrated-away.example",
+                "threat",
+                Some(0.0),
+                "cal-zero",
+                None,
+            )
+            .unwrap();
+
+        let now = chrono::Utc::now().timestamp();
+        let blocked = store.fresh_blocked(now, 0.5).unwrap();
+        assert!(
+            blocked
+                .iter()
+                .all(|row| row.domain != "calibrated-away.example"),
+            "a calibrated zero must not block"
+        );
+        assert!(store
+            .export_threats(now, 0.5)
+            .unwrap()
+            .iter()
+            .all(|(domain, ..)| domain != "calibrated-away.example"));
+        assert!(store
+            .gate_samples(10)
+            .unwrap()
+            .iter()
+            .all(|(domain, ..)| domain != "calibrated-away.example"));
     }
 
     #[test]

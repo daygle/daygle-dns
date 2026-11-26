@@ -855,10 +855,18 @@ impl AiEngine {
                 )
             }
         };
+        // The version, not the value, says whether a map was in force: a map
+        // may legitimately calibrate a name to zero.
         let (calibrated, calibration_version) = self
             .store
             .verdict_scores(domain, "threat")?
-            .map(|(score, version, _)| (Some(score).filter(|s| *s > 0.0), version))
+            .map(|(score, version, _)| {
+                if version.is_empty() {
+                    (None, version)
+                } else {
+                    (Some(score), version)
+                }
+            })
             .unwrap_or((None, String::new()));
         Ok(Some(SignalReport {
             domain: domain.to_string(),
@@ -965,6 +973,16 @@ impl AiEngine {
             .into_iter()
             .find(|record| record.map.version == version)
             .ok_or_else(|| DaygleError::NotFound(format!("no calibration map {version}")))?;
+        // A map is fitted to one model's score distribution. A retrain after
+        // the fit replaces that distribution, so the held-out report no longer
+        // describes the scores the map would be applied to.
+        let live = threshold::model_version(&self.live_model_path());
+        if record.map.source_model != live {
+            return Err(DaygleError::Config(format!(
+                "that calibration map was fitted for {}, but the live model is {live}: fit it again",
+                record.map.source_model
+            )));
+        }
         let Some(metrics) = record
             .metrics
             .clone()

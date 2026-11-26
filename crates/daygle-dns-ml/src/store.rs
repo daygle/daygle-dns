@@ -830,18 +830,20 @@ impl AiStore {
         // [`Self::operator_threats`]), never by the model's verdict.
         //
         // The score compared here is the calibrated one when a calibration
-        // map was in force for the verdict, and the confidence otherwise.
-        // [`Self::gate_scores`] reads the same expression, so a threshold
-        // trial measures the decision the gate actually makes. A verdict
-        // whose evidence carries a feed listing is `feed`-sourced, which the
-        // graduated authority layer treats separately from a model-only one.
+        // map was in force for the verdict, and the confidence otherwise. The
+        // calibration version says which, so a map that legitimately maps a
+        // name to zero is not mistaken for "no map". [`Self::gate_samples`]
+        // reads the same expression, so a threshold trial measures the
+        // decision the gate actually makes. A verdict whose evidence carries a
+        // feed listing is `feed`-sourced, which the graduated authority layer
+        // treats separately from a model-only one.
         let mut stmt = conn.prepare(
             "SELECT domain, category, expires_at,
                     CASE WHEN instr(evidence, ', listed by ') > 0 THEN 'feed' ELSE 'model' END
              FROM ai_verdicts
              WHERE channel = 'threat' AND status = 'classified'
                AND severity != 'disputed'
-               AND COALESCE(NULLIF(calibrated_score, 0), confidence) >= ?1
+               AND CASE WHEN calibration_version <> '' THEN calibrated_score ELSE confidence END >= ?1
                AND expires_at > ?2
                AND NOT EXISTS (
                    SELECT 1 FROM ai_overrides o
@@ -1484,18 +1486,20 @@ impl AiStore {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
             "SELECT domain, category,
-                    COALESCE(NULLIF(calibrated_score, 0), confidence), expires_at
+                    CASE WHEN calibration_version <> '' THEN calibrated_score ELSE confidence END,
+                    expires_at
              FROM ai_verdicts
              WHERE channel = 'threat' AND status = 'classified'
                AND severity != 'disputed'
-               AND COALESCE(NULLIF(calibrated_score, 0), confidence) >= ?1
+               AND CASE WHEN calibration_version <> '' THEN calibrated_score ELSE confidence END >= ?1
                AND expires_at > ?2
                AND NOT EXISTS (
                    SELECT 1 FROM ai_overrides o
                    WHERE o.domain = ai_verdicts.domain
                      AND o.action IN ('allow', 'not_threat')
                )
-             ORDER BY COALESCE(NULLIF(calibrated_score, 0), confidence) DESC, domain",
+             ORDER BY CASE WHEN calibration_version <> '' THEN calibrated_score ELSE confidence END DESC,
+                      domain",
         )?;
         let collected = stmt
             .query_map(params![threshold, now_epoch], |r| {

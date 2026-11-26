@@ -265,27 +265,36 @@ pub fn fit(samples: &[Labelled], source_model: &str, now: i64) -> Option<Calibra
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    // Pool adjacent violators: merge a block with its successor whenever the
-    // block's positive rate is higher, so the fitted map is non-decreasing.
+    // Every name that scored the same is one block before pooling: two labels
+    // at one score must share that score's rate, not keep the rate of whichever
+    // label the sort put last.
     struct Block {
-        sum_x: f64,
+        raw: f32,
         positives: usize,
         count: usize,
     }
     let mean = |block: &Block| block.positives as f64 / block.count as f64;
-    let mut blocks: Vec<Block> = sorted
-        .iter()
-        .map(|sample| Block {
-            sum_x: f64::from(sample.score),
-            positives: usize::from(sample.threat),
-            count: 1,
-        })
-        .collect();
+    let mut blocks: Vec<Block> = Vec::new();
+    for sample in &sorted {
+        match blocks.last_mut() {
+            Some(last) if (last.raw - sample.score).abs() < 1e-6 => {
+                last.positives += usize::from(sample.threat);
+                last.count += 1;
+            }
+            _ => blocks.push(Block {
+                raw: sample.score,
+                positives: usize::from(sample.threat),
+                count: 1,
+            }),
+        }
+    }
+
+    // Pool adjacent violators: merge a block with its successor whenever the
+    // block's positive rate is higher, so the fitted map is non-decreasing.
     let mut index = 0;
     while index + 1 < blocks.len() {
         if mean(&blocks[index]) > mean(&blocks[index + 1]) {
             let right = blocks.remove(index + 1);
-            blocks[index].sum_x += right.sum_x;
             blocks[index].positives += right.positives;
             blocks[index].count += right.count;
             // A merge can violate against the block before it: step back.
@@ -297,16 +306,7 @@ pub fn fit(samples: &[Labelled], source_model: &str, now: i64) -> Option<Calibra
 
     let mut points: Vec<(f32, f32)> = Vec::new();
     for block in &blocks {
-        let raw = (block.sum_x / block.count as f64) as f32;
-        let calibrated = block.positives as f32 / block.count as f32;
-        match points.last_mut() {
-            // Keep `raw` strictly ascending: a later block that pooled to the
-            // same raw score is one breakpoint.
-            Some(last) if (last.0 - raw).abs() < 1e-6 => {
-                last.1 = last.1.max(calibrated);
-            }
-            _ => points.push((raw, calibrated)),
-        }
+        points.push((block.raw, block.positives as f32 / block.count as f32));
     }
     if points.is_empty() {
         return None;
@@ -535,5 +535,31 @@ mod tests {
         let verdict = accept(&metrics, None);
         assert!(verdict.accepted);
         assert!(verdict.reason.contains("no calibrated map is in force"));
+    }
+
+    /// Tied raw scores must share one rate. Sorting by score alone used to
+    /// leave a benign block and a threat block at the same x, and the emitted
+    /// points kept the larger rate: every name at that score mapped to 1.0.
+    #[test]
+    fn tied_scores_share_their_pooled_rate() {
+        let mut samples = Vec::new();
+        for _ in 0..20 {
+            samples.push(Labelled {
+                score: 0.5,
+                threat: false,
+            });
+        }
+        for _ in 0..20 {
+            samples.push(Labelled {
+                score: 0.5,
+                threat: true,
+            });
+        }
+        let map = fit(&samples, "builtin", 0).expect("a map from tied scores");
+        assert!(
+            (map.apply(0.5) - 0.5).abs() < 1e-6,
+            "tied scores must pool to 0.5, got {}",
+            map.apply(0.5)
+        );
     }
 }
