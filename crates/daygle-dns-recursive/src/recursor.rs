@@ -1266,7 +1266,7 @@ where
 /// the parent, which answers it.
 ///
 /// `zone` is the owner of the SOA that denied the name, so it is a zone apex
-/// - only one has an SOA - and only a NODATA answer counts: the name exists
+/// (only one has an SOA), and only a NODATA answer counts: the name exists
 /// and has no DS. NXDOMAIN says nothing about a zone that does not exist at
 /// the parent, and a failure proves nothing at all.
 async fn has_no_ds<F, Fut>(resolve: &F, zone: &Name) -> bool
