@@ -1368,10 +1368,11 @@ fn recursor_error_code(e: &RecursorError) -> Option<u16> {
 /// bounds the forwarding resolver applies).
 fn ttl_config(settings: &RecursiveSettings) -> TtlConfig {
     let max = (settings.max_cache_ttl > 0).then_some(settings.max_cache_ttl);
-    let bounds = |min: u32| {
+    let bounds = |min: u32, negative_min: u32| {
         serde_json::json!({
             "positive_min_ttl": min,
             "positive_max_ttl": max,
+            "negative_min_ttl": negative_min,
             "negative_max_ttl": settings.negative_cache_ttl,
         })
     };
@@ -1387,9 +1388,19 @@ fn ttl_config(settings: &RecursiveSettings) -> TtlConfig {
         .min_cache_ttl
         .max(NS_MIN_CACHE_TTL)
         .min(max.unwrap_or(u32::MAX));
+    // The same goes for an NS question answered "no records" (a NODATA with
+    // the zone's SOA), which is what most of those questions get: every name
+    // on the way down that is not a zone cut, asked again by the validator
+    // while it looks for the cut. The SOA says how long to keep that, and some
+    // say seconds: Huawei Cloud's CDN zones say 10, so
+    // `email-static.useinsider.com`, a chain through two of them, asked the
+    // same questions twice in one 15 s lookup. An NXDOMAIN or a referral keeps
+    // its own TTL (see the vendored cache), and `negative_cache_ttl` still
+    // caps the floor.
+    let ns_negative_min = NS_MIN_CACHE_TTL.min(settings.negative_cache_ttl);
     serde_json::from_value(serde_json::json!({
-        "default": bounds(settings.min_cache_ttl),
-        "NS": bounds(ns_min),
+        "default": bounds(settings.min_cache_ttl, 0),
+        "NS": bounds(ns_min, ns_negative_min),
     }))
     .unwrap_or_else(|e| {
         warn!("cannot build the cache TTL limits ({e}); using the defaults");
@@ -2146,7 +2157,20 @@ mod tests {
         // The NS bounds replace the defaults for NS questions, so they keep
         // the negative limit too.
         let negative = config.negative_response_ttl_bounds(RecordType::NS);
-        assert_eq!(secs(*negative.end()), 3600);
+        assert_eq!(
+            (secs(*negative.start()), secs(*negative.end())),
+            (300, 3600)
+        );
+        // Other questions keep the zone's own negative TTL.
+        let negative = config.negative_response_ttl_bounds(RecordType::A);
+        assert_eq!(secs(*negative.start()), 0);
+        // A shorter `negative_cache_ttl` caps the NS floor.
+        let short = RecursiveSettings {
+            negative_cache_ttl: 60,
+            ..settings.clone()
+        };
+        let negative = ttl_config(&short).negative_response_ttl_bounds(RecordType::NS);
+        assert_eq!((secs(*negative.start()), secs(*negative.end())), (60, 60));
 
         // A longer configured minimum wins, and a shorter maximum caps it.
         settings.min_cache_ttl = 900;

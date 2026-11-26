@@ -15,7 +15,7 @@ use crate::{
     config,
     net::{DnsError, NetError, NoRecords},
     proto::{
-        op::{Message, Query},
+        op::{Message, Query, ResponseCode},
         rr::RecordType,
     },
 };
@@ -72,10 +72,24 @@ impl ResponseCache {
                 (ttl, Ok(message))
             }
             Err(NetError::Dns(DnsError::NoRecordsFound(no_records))) => {
-                let (negative_min_ttl, negative_max_ttl) = self
+                let (mut negative_min_ttl, negative_max_ttl) = self
                     .ttl_config
                     .negative_response_ttl_bounds(query.query_type())
                     .into_inner();
+                // For NS questions, the ones the recursor walks down to a zone cut with, a floor
+                // is for a plain NODATA only: the name exists, has no NS records, and the zone's
+                // SOA says so. An NXDOMAIN keeps the zone's own TTL (some servers wrongly answer
+                // it for an empty non-terminal on the way down, and the recursor then probes the
+                // full name instead, which a lengthened NXDOMAIN above it would deny), and so does
+                // a referral, which comes back as no records with the delegation attached and is
+                // only valid in the zone it came from. Other questions keep the configured floor
+                // as it is.
+                let nodata = no_records.response_code == ResponseCode::NoError
+                    && no_records.soa.is_some()
+                    && no_records.ns.is_none();
+                if query.query_type() == RecordType::NS && !nodata {
+                    negative_min_ttl = Duration::ZERO;
+                }
                 let ttl = if let Some(ttl) = no_records.negative_ttl {
                     Duration::from_secs(u64::from(ttl)).clamp(negative_min_ttl, negative_max_ttl)
                 } else {
