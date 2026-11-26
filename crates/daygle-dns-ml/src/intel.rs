@@ -93,6 +93,34 @@ pub struct PopularList {
     pub latest_url: &'static str,
 }
 
+/// Whether a feed lists a name itself or through a wildcard entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Listed {
+    /// The feed lists this exact name.
+    Exact,
+    /// The feed lists a wildcard entry (`*.example`) that names this domain
+    /// or a parent of it.
+    Wildcard,
+}
+
+impl Listed {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Listed::Exact => "exact",
+            Listed::Wildcard => "wildcard",
+        }
+    }
+}
+
+/// A feed hit on a name: which feed, how it was listed and the name the feed
+/// actually lists (the domain, or the parent of a wildcard entry).
+#[derive(Debug, Clone)]
+pub struct Attribution {
+    pub feed: &'static IntelFeed,
+    pub listed: Listed,
+    pub listed_name: String,
+}
+
 pub const POPULAR: PopularList = PopularList {
     id: "tranco",
     source: "Tranco top 100,000",
@@ -217,15 +245,64 @@ impl IntelIndex {
     /// The feed that lists `domain`: the name itself, or a parent a wildcard
     /// entry covers (`*.example` lists `a.example` and `example`).
     pub fn feed_for(&self, domain: &str) -> Option<&'static IntelFeed> {
+        self.attribution(domain).map(|found| found.feed)
+    }
+
+    /// A parent of `domain` a feed lists exactly. It is never evidence
+    /// against the name itself (only a wildcard entry covers subdomains), but
+    /// it explains a hit the console would otherwise show as absent.
+    pub fn exact_parent(&self, domain: &str) -> Option<Attribution> {
         let domain = domain.trim().trim_end_matches('.');
-        if let Some(at) = self.exact.get(domain).or_else(|| self.wildcard.get(domain)) {
-            return INTEL_FEEDS.get(*at as usize);
+        let mut rest = domain;
+        while let Some((_, parent)) = rest.split_once('.') {
+            rest = parent;
+            if let Some(at) = self.exact.get(rest) {
+                return Some(Attribution {
+                    feed: INTEL_FEEDS.get(*at as usize)?,
+                    listed: Listed::Exact,
+                    listed_name: rest.to_string(),
+                });
+            }
+        }
+        None
+    }
+
+    /// Whether a popular list is loaded: without one, a domain that is not
+    /// popular is unknown, not clear.
+    pub fn has_popular(&self) -> bool {
+        !self.popular.is_empty()
+    }
+
+    /// The feed that lists `domain`, how it lists it and the name it lists.
+    ///
+    /// A plain (non-wildcard) listing only ever condemns its own name: a feed
+    /// listing `example` says nothing about `child.example`. A wildcard entry
+    /// does cover the subdomains it names, which is the feed's own choice.
+    pub fn attribution(&self, domain: &str) -> Option<Attribution> {
+        let domain = domain.trim().trim_end_matches('.');
+        if let Some(at) = self.exact.get(domain) {
+            return Some(Attribution {
+                feed: INTEL_FEEDS.get(*at as usize)?,
+                listed: Listed::Exact,
+                listed_name: domain.to_string(),
+            });
+        }
+        if let Some(at) = self.wildcard.get(domain) {
+            return Some(Attribution {
+                feed: INTEL_FEEDS.get(*at as usize)?,
+                listed: Listed::Wildcard,
+                listed_name: domain.to_string(),
+            });
         }
         let mut rest = domain;
         while let Some((_, parent)) = rest.split_once('.') {
             rest = parent;
             if let Some(at) = self.wildcard.get(rest) {
-                return INTEL_FEEDS.get(*at as usize);
+                return Some(Attribution {
+                    feed: INTEL_FEEDS.get(*at as usize)?,
+                    listed: Listed::Wildcard,
+                    listed_name: rest.to_string(),
+                });
             }
         }
         None
@@ -766,6 +843,29 @@ mod tests {
         assert_eq!(index.label_for("dropper.example."), Some("malware"));
         assert_eq!(index.label_for("ignored.example"), None);
         assert_eq!(index.len(), 3);
+    }
+
+    #[test]
+    fn a_plain_listing_never_condemns_a_subdomain() {
+        let index = index();
+        // `dropper.example` is listed exactly, not as `*.dropper.example`:
+        // its own name is the threat, an unrelated site under that parent is
+        // not. Only a wildcard entry covers subdomains.
+        assert!(index.feed_for("child.dropper.example").is_none());
+        assert!(index.feed_for("a.b.bad-login.example").is_none());
+        assert_eq!(
+            index.feed_for("pay.fakeshop.example").map(|f| f.source),
+            index.feed_for("fakeshop.example").map(|f| f.source)
+        );
+
+        let exact = index.attribution("dropper.example").expect("listed");
+        assert_eq!((exact.listed, exact.listed_name.as_str()), (Listed::Exact, "dropper.example"));
+        let wildcard = index.attribution("pay.fakeshop.example").expect("listed");
+        assert_eq!(
+            (wildcard.listed, wildcard.listed_name.as_str()),
+            (Listed::Wildcard, "fakeshop.example"),
+            "a wildcard hit names the parent the feed actually lists"
+        );
     }
 
     #[test]

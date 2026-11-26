@@ -1402,6 +1402,13 @@ pub struct AiSettings {
     pub enabled: bool,
     /// Train (record-only) or enforce (auto-block) mode.
     pub mode: AiMode,
+    /// Whether the AI works on its own: harvesting and classifying new
+    /// domains, re-checking expired verdicts and retraining without the
+    /// operator. Off ("AI autonomy off") leaves enforcement alone: the
+    /// verdicts and blocks already stored stand, and only their expiry is
+    /// still applied. `mode` is the separate enforcement setting.
+    #[serde(default = "default_autonomy")]
+    pub autonomy: bool,
     /// SQLite database for AI verdicts; empty uses `ai.db` next to the
     /// authoritative zone database.
     pub database: String,
@@ -1430,6 +1437,10 @@ pub struct AiSettings {
     pub auto_block_removals: Vec<String>,
     /// Minimum confidence for a threat-channel verdict to auto-block.
     pub block_threshold: f32,
+    /// Largest share of false positives a threshold candidate may produce on
+    /// established domains and the operator's corrections during a trial.
+    #[serde(default = "default_threshold_fpr_target")]
+    pub threshold_fpr_target: f32,
     /// Threat-channel verdicts below this confidence are skipped entirely.
     /// A categorization floor would be the wrong setting here: this one is
     /// tuned for the precision auto-blocking needs.
@@ -1540,6 +1551,7 @@ impl Default for AiSettings {
         Self {
             enabled: false,
             mode: AiMode::Train,
+            autonomy: true,
             database: String::new(),
             model_path: String::new(),
             workers: 2,
@@ -1553,6 +1565,7 @@ impl Default for AiSettings {
             ],
             auto_block_removals: Vec::new(),
             block_threshold: 0.99,
+            threshold_fpr_target: default_threshold_fpr_target(),
             confidence_floor: 0.2,
             category_confidence_floor: 0.2,
             category_ttl_secs: 90 * 86400,
@@ -1617,6 +1630,18 @@ pub fn valid_llm_url(url: &str) -> bool {
         && !host.contains('@')
         && url.len() <= 256
         && !url.contains(char::is_whitespace)
+}
+
+/// `autonomy` defaults on: an install that predates the setting keeps
+/// classifying and retraining exactly as before.
+fn default_autonomy() -> bool {
+    true
+}
+
+/// One percent of established domains and corrections misread as threats:
+/// the tightest target the trial's sample sizes can still validate.
+fn default_threshold_fpr_target() -> f32 {
+    0.01
 }
 
 /// `auto_retrain` defaults on: installs that predate the field get the
@@ -2658,6 +2683,8 @@ pub struct AiUpdate {
     pub enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<AiMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autonomy: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub database: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2676,6 +2703,8 @@ pub struct AiUpdate {
     pub auto_block_removals: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub block_threshold: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold_fpr_target: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence_floor: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2740,6 +2769,7 @@ impl AiUpdate {
         Self {
             enabled: Some(settings.enabled),
             mode: Some(settings.mode),
+            autonomy: Some(settings.autonomy),
             database: Some(settings.database.clone()),
             model_path: Some(settings.model_path.clone()),
             workers: Some(settings.workers),
@@ -2749,6 +2779,7 @@ impl AiUpdate {
             auto_block_categories: Some(settings.auto_block_categories.clone()),
             auto_block_removals: Some(settings.auto_block_removals.clone()),
             block_threshold: Some(settings.block_threshold),
+            threshold_fpr_target: Some(settings.threshold_fpr_target),
             confidence_floor: Some(settings.confidence_floor),
             category_ttl_secs: Some(settings.category_ttl_secs),
             threat_ttl_secs: Some(settings.threat_ttl_secs),
@@ -2796,6 +2827,9 @@ impl AiUpdate {
         if let Some(v) = self.mode {
             ai.mode = v;
         }
+        if let Some(v) = self.autonomy {
+            ai.autonomy = v;
+        }
         if let Some(v) = &self.database {
             ai.database = v.trim().to_string();
         }
@@ -2828,6 +2862,9 @@ impl AiUpdate {
         }
         if let Some(v) = self.block_threshold {
             ai.block_threshold = v;
+        }
+        if let Some(v) = self.threshold_fpr_target {
+            ai.threshold_fpr_target = v.clamp(0.0, 0.5);
         }
         if let Some(v) = self.confidence_floor {
             ai.confidence_floor = v;

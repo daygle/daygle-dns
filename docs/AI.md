@@ -24,6 +24,23 @@ leave the scanner off.
 - Verdicts are available from the REST API under `/api/ai/*` (see
   [API.md](API.md#ai-scanner)).
 
+## Autonomy and enforcement
+
+Two settings that are easy to confuse, and are kept apart:
+
+- **`ai.autonomy`** (on by default) says whether the scanner may work on its
+  own: harvest domains from the query log, classify them, fetch pages, ask the
+  language model and retrain itself. With it off, the scanner still expires
+  old entries and keeps its block snapshot current, so enforcement follows the
+  verdicts and evidence that already exist; it just finds nothing new.
+- **`ai.mode`** (`train` or `enforce`) says what enforcement does with what
+  the scanner found. Only in enforce mode does a threat block.
+
+Neither one is a safety rail on its own; the rails are separate and always
+on: the per-cycle cap on new blocks, the verifier's disputes, exemptions,
+corrections, expiry, and the retrain gate that refuses a candidate model that
+loses threats.
+
 ## Two channels
 
 The scanner does two separate jobs. Each has its own model, confidence floor
@@ -82,6 +99,7 @@ disputed it.
 
 Enforcement is unchanged: `ai.block_threshold`, the verifier, disputes,
 exemptions and expiry still decide what blocks, and only in enforce mode.
+
 Existing blocks stay: the stored `ai.auto_block_categories` list is read as
 the threat role, so no domain that blocks today stops blocking.
 
@@ -89,6 +107,23 @@ A cycle admits at most 500 new domains to the block snapshot, however many
 qualify: the rest wait for the next cycle and the count is reported in the
 scanner's alert, so a misbehaving model or feed cannot take the network down
 at once.
+
+### Signals
+
+The **Signals** column (and the explain panel) shows each input scored on its
+own, before any of them is combined: the model's own score, the threat-feed
+hit, the popular-sites listing, whether the domain is established on this
+network, its age, and the name itself (a free host, a public suffix, a
+machine-generated name), each marked as threat, benign, neutral or unknown.
+None of them decides. The combined confidence and `ai.block_threshold` still
+do, so a signal can be inspected, and argued with, without changing a
+verdict.
+
+Feed hits are attributed to the exact name or its parent: a parent hit counts
+for the parent and for a wildcard entry, and a plain listing of a parent is
+recorded against the parent only. It never condemns an unrelated subdomain,
+which is what lets a feed list `example.com` without blocking
+`trusted.example.com`.
 
 The model reads only the domain name. When it flags a subdomain, the
 scanner also scores the registered domain above it (by the Public Suffix
@@ -192,6 +227,31 @@ retrainer trains one, prints whether it would refuse it, and fails if a
 candidate that swallows threats is accepted. In the current run it refuses
 both candidates (12 of 12 and 8 of 8 held-out names lost), including the
 scenario where 15 of 30 unseen threats are swallowed.
+
+## Threshold trials
+
+`ai.block_threshold` can be tuned instead of guessed. A trial
+(`POST /api/ai/threshold/trial`, or **Run Trial** on the AI → Threats tab)
+replays the scanner's own scored verdicts and picks the lowest threshold whose
+false-positive rate on established and unseen domains meets
+`ai.threshold_fpr_target` (1% by default). It then checks that threshold on a
+held-out fifth of the evidence, chosen by hashing the domain name so the split
+is stable between runs.
+
+The threshold is chosen by false positives, never by overall accuracy: a
+threshold that catches more threats by calling more harmless domains threats
+is not an improvement. Four groups are reported separately, as four score
+rows: domains established on this network, confirmed threats (a feed or a
+correction says so), the operator's corrections, and unseen domains.
+
+A trial is a record, not a change. It stores the threshold it started from,
+the candidate, the false-positive target, the outcome, the per-group rows and
+the model version it measured (`path@stamp:bytes`, or `builtin`) in one row,
+because a threshold means nothing apart from the model that produced the
+scores. `POST /api/ai/threshold/apply` puts a trial's candidate in force, and
+refuses a trial that did not keep the target on the held-out half.
+`POST /api/ai/threshold/rollback` puts back the threshold that trial replaced;
+that moves the threshold alone, so a model promoted since stays live.
 
 ## Outside evidence
 

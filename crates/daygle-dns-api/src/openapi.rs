@@ -53,6 +53,10 @@ const PATHS: &[(&str, &[Operation])] = &[
     ("/ai/corrections", &[("get", "Ai corrections")]),
     ("/ai/retrain", &[("post", "Ai retrain")]),
     ("/ai/rollback", &[("post", "Ai rollback")]),
+    ("/ai/threshold", &[("get", "Ai threshold")]),
+    ("/ai/threshold/trial", &[("post", "Ai threshold trial")]),
+    ("/ai/threshold/apply", &[("post", "Ai threshold apply")]),
+    ("/ai/threshold/rollback", &[("post", "Ai threshold rollback")]),
     ("/ai/override", &[("post", "Ai override")]),
     ("/ai/overrides", &[("get", "Ai overrides")]),
     ("/ai/rescan", &[("post", "Ai rescan")]),
@@ -3838,6 +3842,66 @@ fn ai_operation(path: &str, method: &str) -> Option<Value> {
                 "404": ai_unavailable,
                 "500": json!({
                     "description": "No previous model is kept.",
+                    "content": { "application/json": { "schema": error } }
+                })
+            }
+        })),
+        ("get", "/ai/threshold") => Some(json!({
+            "responses": {
+                "200": json!({
+                    "description": "The false-positive target, the block threshold in force, the live model's version, the applied trial and the last 20 trials with the model each was measured on."
+                }),
+                "404": ai_unavailable
+            }
+        })),
+        ("post", "/ai/threshold/trial") => Some(json!({
+            "responses": {
+                "200": json!({
+                    "description": "A threshold trial: the lowest threshold whose false-positive rate on established and unseen domains met the target, checked on a held-out fifth of the evidence and recorded with the model version. Nothing is applied."
+                }),
+                "404": ai_unavailable
+            }
+        })),
+        ("post", "/ai/threshold/apply") => Some(json!({
+            "requestBody": json!({
+                "required": true,
+                "content": { "application/json": { "schema": json!({
+                    "type": "object",
+                    "required": ["id"],
+                    "properties": { "id": json!({"type": "integer", "description": "The trial to put in force."}) }
+                }) } }
+            }),
+            "responses": {
+                "200": json!({
+                    "description": "That trial's threshold is published as `ai.block_threshold`. The model is unchanged, and any other applied trial is rolled back."
+                }),
+                "400": json!({
+                    "description": "The trial did not keep the false-positive target on the held-out half.",
+                    "content": { "application/json": { "schema": error } }
+                }),
+                "404": ai_unavailable,
+                "409": json!({
+                    "description": "The trial is already in force.",
+                    "content": { "application/json": { "schema": error } }
+                })
+            }
+        })),
+        ("post", "/ai/threshold/rollback") => Some(json!({
+            "requestBody": json!({
+                "required": true,
+                "content": { "application/json": { "schema": json!({
+                    "type": "object",
+                    "required": ["id"],
+                    "properties": { "id": json!({"type": "integer", "description": "The trial in force to undo."}) }
+                }) } }
+            }),
+            "responses": {
+                "200": json!({
+                    "description": "The threshold that trial replaced is published again. Only the threshold moves; the live model stays."
+                }),
+                "404": ai_unavailable,
+                "409": json!({
+                    "description": "That trial is not the threshold in force.",
                     "content": { "application/json": { "schema": error } }
                 })
             }

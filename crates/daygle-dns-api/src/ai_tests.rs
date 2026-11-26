@@ -1039,6 +1039,89 @@ async fn language_model_requests_are_validated() {
 }
 
 #[tokio::test]
+async fn threshold_trials_are_recorded_and_never_apply_themselves() {
+    let dir = scratch_dir("threshold-http");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai.clone()));
+    let base = ai.settings.load_full().block_threshold;
+
+    let before = json(state.clone(), "/api/ai/threshold").await;
+    assert!((before["block_threshold"].as_f64().unwrap() - base as f64).abs() < 1e-6);
+    assert!((before["fpr_target"].as_f64().unwrap() - 0.01).abs() < 1e-6);
+    assert!(before["in_force"].is_null());
+    assert!(before["trials"].as_array().unwrap().is_empty());
+
+    // No scored threats on a fresh store: the trial is still recorded, and
+    // says why it chose nothing.
+    let (code, _, body) = call(state.clone(), "POST", "/api/ai/threshold/trial", None).await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let trial: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(trial["trial"]["passed"], false);
+    assert_eq!(trial["trial"]["in_force"], false);
+    assert!(trial["message"].as_str().is_some_and(|m| !m.is_empty()));
+    let id = trial["trial"]["id"].as_i64().unwrap();
+
+    // Recording it changed nothing.
+    let after = json(state.clone(), "/api/ai/threshold").await;
+    assert!(after["in_force"].is_null());
+    assert_eq!(after["trials"][0]["id"], id);
+    assert!((after["block_threshold"].as_f64().unwrap() - base as f64).abs() < 1e-6);
+
+    let apply = serde_json::json!({ "id": id });
+    let (code, _, body) = call(
+        state.clone(),
+        "POST",
+        "/api/ai/threshold/apply",
+        Some(apply),
+    )
+    .await;
+    assert_eq!(code, StatusCode::BAD_REQUEST, "{body}");
+    let (code, _, body) = call(
+        state.clone(),
+        "POST",
+        "/api/ai/threshold/apply",
+        Some(serde_json::json!({ "id": id + 99 })),
+    )
+    .await;
+    assert_eq!(code, StatusCode::NOT_FOUND, "{body}");
+    let (code, _, body) = call(
+        state.clone(),
+        "POST",
+        "/api/ai/threshold/rollback",
+        Some(serde_json::json!({ "id": id })),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CONFLICT, "{body}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn autonomy_and_the_false_positive_target_round_trip() {
+    let dir = scratch_dir("threshold-settings");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai.clone()));
+    let (code, _, body) = call(
+        state.clone(),
+        "PUT",
+        "/api/config",
+        Some(serde_json::json!({ "ai": {
+            "autonomy": false,
+            "threshold_fpr_target": 9.0
+        }})),
+    )
+    .await;
+    assert!(code.is_success(), "{body}");
+    let applied = ai.settings.load_full();
+    assert!(!applied.autonomy);
+    assert!((applied.threshold_fpr_target - 0.5).abs() < 1e-6);
+    let status = json(state, "/api/ai/status").await;
+    assert_eq!(status["autonomy"], false);
+    assert!((status["threshold_fpr_target"].as_f64().unwrap() - 0.5).abs() < 1e-6);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn language_model_settings_are_saved_and_bad_ones_refused() {
     let dir = scratch_dir("llm-settings");
     let ai = engine(&dir);

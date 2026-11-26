@@ -247,6 +247,16 @@ impl Scanner {
             }
         }
 
+        // Autonomy off: the AI does no work of its own. Expiry above still
+        // ran (a stale block must not outlive its verdict) and the snapshot
+        // is refreshed so blocks already in force stay correct, but nothing
+        // new is harvested, classified, read or retrained. Enforcement stays
+        // as the operator set it: `mode` is a separate setting.
+        if !cfg.autonomy {
+            self.refresh_snapshot(&cfg, now);
+            return Ok(0);
+        }
+
         // 2. Harvest: record every domain queried since the last cycle
         //    (new ones become pending; known ones count another sighting).
         // Recording a sighting is cheap, so the harvest cap is generous;

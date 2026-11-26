@@ -35,11 +35,13 @@ use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExten
 use crate::backend::Channel;
 
 mod evidence;
+mod threshold;
 use crate::page::TextVerdict;
 pub use evidence::{
     client_tag, FeedState, Sighting, AGE_RETRY_SECS, ESTABLISHED_CLIENTS, ESTABLISHED_DAYS,
     PAGE_TEXT_CHARS,
 };
+pub use threshold::{NewThresholdTrial, ThresholdTrial};
 
 /// Filters shared by the paginated verdict and threat lists.
 #[derive(Debug, Default)]
@@ -348,8 +350,9 @@ impl AiStore {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.execute_batch(&format!(
             "{VERDICTS_TABLE};\n{OVERRIDES_TABLE};\n{CATEGORY_OVERRIDES_TABLE};\n\
-             {PAGE_ADJUSTMENTS_TABLE};\n{PAGE_READINGS_TABLE};\n{}",
-            evidence::TABLES
+             {PAGE_ADJUSTMENTS_TABLE};\n{PAGE_READINGS_TABLE};\n{}\n{}",
+            evidence::TABLES,
+            threshold::TABLES
         ))?;
         evidence::upgrade(&conn)?;
         let has_column = |name: &str| -> Result<bool> {

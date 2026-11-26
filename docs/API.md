@@ -1654,6 +1654,10 @@ GET  /api/ai/explain?domain=x.example
 GET  /api/ai/corrections?format=csv
 POST /api/ai/retrain
 POST /api/ai/rollback
+GET  /api/ai/threshold
+POST /api/ai/threshold/trial
+POST /api/ai/threshold/apply    {"id": 3}
+POST /api/ai/threshold/rollback {"id": 3}
 GET  /api/ai/overrides
 POST /api/ai/override          {"domain": "x.example", "action": "allow|not_threat|clear|category|clear_category", "category": "gambling", "reason": "..."}
 POST /api/ai/rescan
@@ -1696,6 +1700,38 @@ or above `ai.block_threshold`, neither it nor a parent domain is exempt, and
 its label is one of the effective threat labels. A content-channel verdict never qualifies, whatever it is called. A threat
 verdict the MiniLM verifier disagreed with (severity `disputed`, decided at
 `ai.verifier_threshold`) never qualifies.
+`[ai] autonomy` (on by default) is whether the scanner may work on its own:
+harvest, classify, fetch pages, ask the language model and retrain. With it
+off the cycle still runs the expiry check and refreshes the block snapshot;
+`ai.mode` is unaffected, so existing threats keep enforcing.
+
+`GET /api/ai/threshold` reports `block_threshold`, `fpr_target`
+(`ai.threshold_fpr_target`), `model` (the live model's `path@stamp:bytes`,
+`builtin` when there is none), `in_force` (the applied trial, or `null`) and
+the last 20 `trials`. `POST /api/ai/threshold/trial` runs one: it chooses the
+lowest threshold whose false-positive rate on established and unseen domains
+meets the target, validates it on a held-out fifth of the evidence, records
+it with the model version and returns `{trial, message}`. Nothing is applied.
+`POST /api/ai/threshold/apply` with `{"id": n}` puts that trial's candidate in
+force and publishes it as `ai.block_threshold`; a trial that did not pass is a
+`400`, an unknown id a `404`, and one already in force a `409` (applying a
+trial rolls back whichever one was). `POST /api/ai/threshold/rollback` with the
+id in force puts back the threshold that trial replaced, again without
+touching the model; a trial that is not in force is a `409`. Each trial row
+carries `model`, `base_threshold`, `candidate`, `fpr_target`, `passed`,
+`in_force`, the RFC 3339 stamps, `restored_threshold` once undone, and
+`report` (samples, tuning/held-out splits, one row per group: established,
+confirmed threats, corrections, unseen domains, and a `summary` sentence).
+
+Every threat row and `/api/ai/explain` also carry `signals`: the scored inputs
+shown on their own - `model`, `feed`, `popular`, `established`, `age`, `name` -
+each with a `direction` (`threat`, `benign`, `neutral`, `unknown`), a `value`
+(or `null`) and a `detail` line. They are for inspection: none of them feeds
+the decision, which the confidence and `ai.block_threshold` still make. A
+feed hit is attributed to the exact name or its wildcard parent; a plain
+listing of a parent is recorded against the parent and never condemns an
+unrelated subdomain.
+
 The built-in heuristic rules score at most 0.35, so they never auto-block on
 their own. Only internet names are classified: single-label names, reverse
 lookups, local-only suffixes (`.local`, `.home.arpa`, `.internal`, `.lan`,

@@ -54,7 +54,9 @@ pub mod plugin;
 #[cfg(feature = "verifier-onnx")]
 pub mod reference;
 pub mod scanner;
+pub mod signals;
 pub mod store;
+pub mod threshold;
 pub mod verify;
 
 #[cfg(feature = "verifier-onnx")]
@@ -77,6 +79,9 @@ use crate::backend::{Channel, DomainClassifier};
 use crate::scanner::{BlockSnapshot, CategorySnapshot, Scanner};
 use crate::store::AiStore;
 use std::path::Path;
+
+/// How many scored verdicts one threshold trial reads.
+const THRESHOLD_SAMPLES: u32 = 50_000;
 
 /// Rebuilds the threat channel in place.
 type ReloadThreat = dyn Fn() -> Result<()> + Send + Sync;
@@ -396,6 +401,38 @@ impl AiEngine {
         self.intel.index().feed_for(domain)
     }
 
+    /// The evidence inputs behind a stored threat verdict, each scored on its
+    /// own: what the console shows as the Signals column and in the explain
+    /// panel. None of them decides anything yet (see [`crate::signals`]).
+    pub fn verdict_signals(
+        &self,
+        domain: &str,
+        threat_score: f32,
+        evidence: &str,
+    ) -> Vec<signals::Signal> {
+        let index = self.intel.index();
+        signals::for_verdict(
+            &signals::Context {
+                store: &self.store,
+                intel: &index,
+            },
+            domain,
+            threat_score,
+            evidence,
+        )
+    }
+
+    /// The threshold trial in force (if any) and the most recent trials.
+    pub fn threshold_status(
+        &self,
+        limit: u32,
+    ) -> Result<(Option<store::ThresholdTrial>, Vec<store::ThresholdTrial>)> {
+        Ok((
+            self.store.applied_threshold_trial()?,
+            self.store.threshold_trials(limit)?,
+        ))
+    }
+
     /// Download every threat feed now (the update-feeds API).
     pub fn update_threat_feeds(&self) {
         self.intel.update_now();
@@ -442,7 +479,36 @@ impl AiEngine {
     /// reference. The scan loop calls the same step after each cycle.
     /// Returns the build, if one ran.
     pub fn run_due_maintenance(&self) -> Option<Result<learn::TrainingStats>> {
+        // With autonomy off the AI does not build, trial or promote models on
+        // its own; the operator's explicit retrain still runs.
+        if !self.settings.load().autonomy {
+            return None;
+        }
         self.maintenance.run()
+    }
+
+    /// Run a threshold trial over the stored verdicts and the operator's
+    /// corrections, and record it. It changes nothing: the candidate is
+    /// applied only when the operator says so.
+    pub fn run_threshold_trial(&self) -> Result<store::ThresholdTrial> {
+        let settings = self.settings.load_full();
+        let index = self.intel.index();
+        let samples =
+            threshold::collect(&self.store, &index, &settings, THRESHOLD_SAMPLES)?;
+        let report = threshold::run(
+            &samples,
+            settings.threshold_fpr_target,
+            settings.block_threshold,
+        );
+        let record = store::NewThresholdTrial {
+            model: threshold::model_version(&self.live_model_path()),
+            base_threshold: settings.block_threshold,
+            candidate: report.candidate.unwrap_or(settings.block_threshold),
+            fpr_target: settings.threshold_fpr_target,
+            passed: report.passed,
+            report: serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string()),
+        };
+        self.store.save_threshold_trial(&record)
     }
 
     /// Put the previous model back in front of the scanner, live. Reversible:

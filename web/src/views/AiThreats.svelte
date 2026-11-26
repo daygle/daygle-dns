@@ -15,12 +15,24 @@
     { key: 'decision', label: 'Decision' },
     { key: 'confidence', label: 'Confidence' },
     { key: 'score', label: 'Threat Score' },
+    { key: 'signals', label: 'Signals' },
     { key: 'reason', label: 'Why' },
     { key: 'seen', label: 'Seen' },
     { key: 'evidence', label: 'Evidence' },
     { key: 're-check', label: 'Re-Check' },
   ];
   const show = (key) => !isHidden('ai-threats', key);
+  // The scored inputs under a Signal in the Signals column and in the
+  // explain panel. Each is scored on its own; none of them blocks.
+  const SIGNAL_LABELS = {
+    model: 'Model',
+    feed: 'Feed',
+    popular: 'Popular',
+    established: 'Established',
+    age: 'Age',
+    name: 'Name',
+  };
+  const signalLabel = (key) => SIGNAL_LABELS[key] || key;
 
   const PER_PAGE = 50;
   const SEVERITY_FILTERS = [
@@ -364,6 +376,74 @@
     return Math.max(1, Math.ceil(total / PER_PAGE));
   }
 
+  // Threshold trials: the model's version and the threshold are recorded
+  // together, so what a trial measured can always be read back, and undoing
+  // one puts back only the threshold. Nothing here changes enforcement until
+  // Apply is clicked on a trial that passed.
+  let threshold = $state(null);
+  let trialBusy = $state('');
+  let trialNotice = $state(null);
+  let trialError = $state(null);
+  const inForce = $derived(threshold?.in_force || null);
+
+  async function loadThreshold() {
+    try {
+      threshold = await api.aiThreshold();
+    } catch {
+      // The scanner is off (404): there is no threshold to tune.
+      threshold = null;
+    }
+  }
+
+  async function runTrial() {
+    trialBusy = 'run';
+    trialNotice = null;
+    trialError = null;
+    try {
+      const result = await api.aiThresholdTrial();
+      trialNotice = result.message
+        || `Trial #${result.trial.id} recorded. Nothing was applied.`;
+      await loadThreshold();
+    } catch (e) {
+      trialError = formatApiError(e);
+    } finally {
+      trialBusy = '';
+    }
+  }
+
+  async function applyTrial(trial) {
+    if (!confirm(`Set the block threshold to ${percent(trial.candidate)}? The model stays ${trial.model}.`)) return;
+    trialBusy = `apply-${trial.id}`;
+    trialNotice = null;
+    trialError = null;
+    try {
+      const result = await api.aiThresholdApply(trial.id);
+      trialNotice = result.message;
+      await loadThreshold();
+      await load();
+    } catch (e) {
+      trialError = formatApiError(e);
+    } finally {
+      trialBusy = '';
+    }
+  }
+
+  async function rollbackTrial(trial) {
+    trialBusy = `rollback-${trial.id}`;
+    trialNotice = null;
+    trialError = null;
+    try {
+      const result = await api.aiThresholdRollback(trial.id);
+      trialNotice = result.message;
+      await loadThreshold();
+      await load();
+    } catch (e) {
+      trialError = formatApiError(e);
+    } finally {
+      trialBusy = '';
+    }
+  }
+
   function fmt(n) {
     return Number(n || 0).toLocaleString();
   }
@@ -373,6 +453,7 @@
   let searchTimer;
   let firstLoad = true;
   loadCategories();
+  loadThreshold();
 
   $effect(() => {
     search;
@@ -479,6 +560,97 @@
   </div>
 
 
+  {#if threshold}
+    <div class="card" style="margin-bottom: 14px">
+      <div class="spread" style="margin-bottom: 8px; gap: 10px; flex-wrap: wrap">
+        <h3 style="margin: 0">Threshold Trials</h3>
+        {#if isAdmin && threshold.model}
+          <button onclick={runTrial} disabled={!!trialBusy}>
+            {trialBusy === 'run' ? 'Tuning...' : 'Run Trial'}
+          </button>
+        {/if}
+      </div>
+      <p class="muted help" style="margin: 0 0 10px">
+        A trial keeps the lowest block threshold whose false-positive rate on
+        established and unseen domains meets the target
+        ({percent(threshold.fpr_target)}), then checks that threshold on a
+        held-out half of the evidence. The threshold is chosen by false
+        positives, never by overall accuracy. A trial is recorded with the
+        model it measured and changes nothing by itself.
+      </p>
+      <div class="row" style="gap: 8px; flex-wrap: wrap; align-items: center">
+        <span class="muted small">
+          Block threshold {percent(threshold.block_threshold)}, model
+          <code title={threshold.model || 'built in'}>{threshold.model || 'built in'}</code>
+        </span>
+        {#if inForce}
+          <span class="pill ok tag" title="Applied from a threshold trial; the model was not changed">
+            Trial #{inForce.id} In Force
+          </span>
+        {/if}
+      </div>
+      {#if trialNotice}<p class="muted" style="color: var(--ok); margin: 8px 0 0">{trialNotice}</p>{/if}
+      {#if trialError}<p class="dialog-error" style="margin: 8px 0 0">{trialError}</p>{/if}
+      {#if threshold.trials.length}
+        <div class="table-wrap" style="margin-top: 10px">
+          <table>
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Model</th>
+                <th class="num">Threshold</th>
+                <th class="num" title="The false-positive target the threshold was chosen against">Target</th>
+                <th title="Passed: the held-out half stayed within the target">Result</th>
+                {#if isAdmin}<th class="num">Actions</th>{/if}
+              </tr>
+            </thead>
+            <tbody>
+              {#each threshold.trials as t (t.id)}
+                <tr>
+                  <td class="muted nowrap">{stampTime(t.created_at, formatDate)}</td>
+                  <td class="muted evidence" title={t.model || 'built in'}>{t.model || 'built in'}</td>
+                  <td class="num" title={t.passed ? '' : t.report?.summary || ''}>
+                    {percent(t.base_threshold)} → {percent(t.candidate)}
+                  </td>
+                  <td class="num">{percent(t.fpr_target)}</td>
+                  <td>
+                    {#if t.in_force}
+                      <span class="pill ok tag">In Force</span>
+                    {:else if t.passed}
+                      <span class="pill" title="Passed on the held-out half; not applied">Passed</span>
+                    {:else}
+                      <span class="pill err" title={t.report?.summary || 'Did not keep the target on the held-out half'}>Failed</span>
+                    {/if}
+                    {#if t.restored_threshold != null}
+                      <div class="muted" style="font-size: 0.75rem">Undone: back to {percent(t.restored_threshold)}</div>
+                    {/if}
+                  </td>
+                  {#if isAdmin}
+                    <td class="num">
+                      {#if t.in_force}
+                        <button class="secondary" style="padding: 2px 8px; font-size: 0.75rem" title="Put back the threshold this trial replaced; the model is left alone" onclick={() => rollbackTrial(t)} disabled={!!trialBusy}>
+                          {trialBusy === `rollback-${t.id}` ? 'Undoing...' : 'Undo Threshold'}
+                        </button>
+                      {:else if t.passed}
+                        <button class="secondary" style="padding: 2px 8px; font-size: 0.75rem" title="Use this trial's threshold; the model is left alone" onclick={() => applyTrial(t)} disabled={!!trialBusy}>
+                          {trialBusy === `apply-${t.id}` ? 'Applying...' : 'Apply Threshold'}
+                        </button>
+                      {:else}
+                        <span class="muted">-</span>
+                      {/if}
+                    </td>
+                  {/if}
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {:else}
+        <p class="muted small" style="margin: 10px 0 0">No trials recorded yet.</p>
+      {/if}
+    </div>
+  {/if}
+
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 8px">Check a Domain</h3>
     <p class="muted help" style="margin: 0 0 10px">
@@ -551,6 +723,21 @@
             Listed by {explainResult.threat_feed.source} as {titleCase(explainResult.threat_feed.label)}.
           {/if}
         </p>
+        {#if explainResult.signals?.length}
+          <dl class="signals small">
+            {#each explainResult.signals as s (s.signal)}
+              <dt>
+                <span class="pill tag" class:ok={s.direction === 'benign'} class:err={s.direction === 'threat'} title={s.direction}>{signalLabel(s.signal)}</span>
+                {#if s.value != null}<span class="muted">{percent(s.value)}</span>{/if}
+              </dt>
+              <dd class="muted">{s.detail}</dd>
+            {/each}
+          </dl>
+          <p class="muted small" style="margin: 0">
+            These inputs are scored on their own. None of them decides: the
+            confidence and the block threshold still do.
+          </p>
+        {/if}
       </div>
     {/if}
   </div>
@@ -599,6 +786,7 @@
           {#if show('decision')}<th title="What DNS does about the domain: block, override (your decision wins), monitor (reported, not blocking) or allow">Decision</th>{/if}
           {#if show('confidence')}<th class="num">Confidence</th>{/if}
           {#if show('score')}<th class="num" title="The model's own probability for the threat families, before evidence and the block threshold">Threat Score</th>{/if}
+          {#if show('signals')}<th title="Each input scored on its own, for inspection only: none of them decides">Signals</th>{/if}
           {#if show('reason')}<th title="Why the domain was judged a threat">Why</th>{/if}
           {#if show('seen')}<th class="num" title="In how many scans the domain showed up in your DNS traffic">Seen</th>{/if}
           {#if show('evidence')}<th>Evidence</th>{/if}
@@ -662,6 +850,17 @@
             {#if show('score')}
               <td class="num" title={r.threat_score == null ? 'Not scored: this backend reports no per-label probability' : 'The model\'s own threat score'}>
                 {r.threat_score == null ? '—' : percent(r.threat_score)}
+              </td>
+            {/if}
+            {#if show('signals')}
+              <td class="signals-cell">
+                {#each r.signals || [] as s (s.signal)}
+                  <span class="pill tag" class:ok={s.direction === 'benign'} class:err={s.direction === 'threat'} title={`${signalLabel(s.signal)} (${s.direction}): ${s.detail}`}>
+                    {signalLabel(s.signal)}{#if s.value != null} {percent(s.value)}{/if}
+                  </span>
+                {:else}
+                  <span class="muted">-</span>
+                {/each}
               </td>
             {/if}
             {#if show('reason')}
@@ -747,5 +946,7 @@
   .check input { width: auto; }
   .nowrap { white-space: nowrap; }
   .tag { margin-left: 6px; }
+  .signals-cell { max-width: 240px; }
+  .signals-cell .tag { margin: 1px 3px 1px 0; }
   .evidence { max-width: 200px; font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

@@ -1486,6 +1486,15 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         Ok(counts) => counts,
         Err(e) => return map_err(e),
     };
+    let applied_trial = run_blocking({
+        let ai = ai.clone();
+        move || ai.store.applied_threshold_trial()
+    })
+    .await;
+    let applied_trial = match applied_trial {
+        Ok(trial) => trial,
+        Err(e) => return map_err(e),
+    };
     let snapshot = ai.snapshot().load();
     Json(serde_json::json!({
         "enabled": settings.enabled,
@@ -1508,6 +1517,21 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         "category_ttl_secs": settings.category_ttl_secs,
         "threat_ttl_secs": settings.threat_ttl_secs,
         "block_threshold": settings.block_threshold,
+        // Autonomy is what the AI may do unasked; `mode` is what it may
+        // enforce. A build can run the AI's work but never block on it.
+        "autonomy": settings.autonomy,
+        // The threshold trial: the false-positive target, and the trial whose
+        // candidate is in force (the model it was tuned with travels with it).
+        "threshold_fpr_target": settings.threshold_fpr_target,
+        "threshold_trial": applied_trial.map(|t| serde_json::json!({
+            "id": t.id,
+            "model": t.model,
+            "base_threshold": t.base_threshold,
+            "candidate": t.candidate,
+            "fpr_target": t.fpr_target,
+            "applied_at": chrono::DateTime::<chrono::Utc>::from_timestamp(t.applied_at, 0)
+                .map(|t| t.to_rfc3339()),
+        })),
         "auto_block_categories": settings.auto_block_categories,
         // Families forced off, and the resulting set the threat channel uses.
         "auto_block_removals": settings.auto_block_removals,
@@ -1752,32 +1776,46 @@ pub async fn ai_threats(
                 threat_labels: threat_labels.as_deref(),
                 ..Default::default()
             };
-            let listed = ai.store.list_threats_filtered(&filter, page_bounds)?;
-            // Rows the operator marked "not a threat" stay in the list for
-            // audit, so the console needs the marks to label them, and the
-            // operator's relabels so a row shows the corrected category.
-            Ok::<_, daygle_dns_core::error::DaygleError>((
-                listed,
-                ai.store.not_threat_overrides()?,
-                ai.store.category_overrides()?,
-            ))
+            let ((rows, total), not_threat, relabels) = {
+                let listed = ai.store.list_threats_filtered(&filter, page_bounds)?;
+                // Rows the operator marked "not a threat" stay in the list for
+                // audit, so the console needs the marks to label them, and the
+                // operator's relabels so a row shows the corrected category.
+                (
+                    listed,
+                    ai.store.not_threat_overrides()?,
+                    ai.store.category_overrides()?,
+                )
+            };
+            // Every evidence input, scored on its own beside the verdict. These
+            // change nothing: the block decision is still made from the
+            // confidence alone (see `signals` in the AI docs).
+            let rows: Vec<_> = rows
+                .into_iter()
+                .map(|r| {
+                    let signals = ai.verdict_signals(&r.domain, r.threat_score, &r.evidence);
+                    (r, signals)
+                })
+                .collect();
+            Ok::<_, daygle_dns_core::error::DaygleError>((rows, total, not_threat, relabels))
         }
     })
     .await;
     match listed {
-        Ok(((rows, total), not_threat, relabels)) => {
+        Ok((rows, total, not_threat, relabels)) => {
             let snapshot = ai.snapshot().load();
             let categories = ai.category_snapshot();
             let categories = categories.load();
             let groups = state.advanced_blocking.load();
             (StatusCode::OK,
                 axum::Json(serde_json::json!({
-                    "entries": rows.iter().map(|r| {
+                    "entries": rows.iter().map(|(r, signals)| {
                         let role = settings.label_role(&r.category);
                         let blocked = snapshot.contains_key(&r.domain);
                         let overridden = r.overridden;
                         let not_threat = not_threat.contains(&r.domain);
                         serde_json::json!({
+                        "signals": signals,
                         "domain": r.domain,
                         "channel": r.channel,
                         "category": r.category,
@@ -2103,6 +2141,11 @@ pub async fn ai_explain(
                 .map(|(name, _)| name)
                 .filter(|name| *name != domain);
             let threat = rows.iter().find(|r| r.channel == "threat");
+            // The evidence inputs behind the threat verdict, each scored on its
+            // own. They inform the explanation and decide nothing.
+            let signals = threat
+                .map(|t| ai.verdict_signals(&domain, t.threat_score, &t.evidence))
+                .unwrap_or_default();
             let content = rows.iter().find(|r| r.channel == "content");
             let label = relabel
                 .clone()
@@ -2246,6 +2289,8 @@ pub async fn ai_explain(
                 "auto_block_categories": settings.auto_block_categories.clone(),
                 "threat_labels": settings.threat_labels(),
                 "auto_block_removals": settings.auto_block_removals.clone(),
+                "autonomy": settings.autonomy,
+                "signals": signals,
                 "blocked": blocked_category.is_some(),
                 "decision": enforcement_decision(
                     blocked_category.is_some(),
@@ -2416,6 +2461,265 @@ pub async fn ai_rollback(State(state): State<AppState>) -> Response {
         }
         Err(e) => map_err(e),
     }
+}
+
+/// One recorded threshold trial, as the console shows it. The model it was
+/// tuned with travels with it: the threshold alone means nothing.
+fn threshold_trial_json(t: &daygle_dns_ml::store::ThresholdTrial) -> serde_json::Value {
+    let stamp = |epoch: i64| {
+        (epoch > 0)
+            .then(|| {
+                chrono::DateTime::<chrono::Utc>::from_timestamp(epoch, 0).map(|t| t.to_rfc3339())
+            })
+            .flatten()
+    };
+    serde_json::json!({
+        "id": t.id,
+        "model": t.model,
+        "base_threshold": t.base_threshold,
+        "candidate": t.candidate,
+        "fpr_target": t.fpr_target,
+        "passed": t.passed,
+        "in_force": t.in_force(),
+        "created_at": stamp(t.created_at),
+        "applied_at": stamp(t.applied_at),
+        "rolled_back_at": stamp(t.rolled_back_at),
+        "restored_threshold": (t.restored_threshold > 0.0).then_some(t.restored_threshold),
+        "report": t.report,
+    })
+}
+
+/// `GET /api/ai/threshold` - the false-positive target, the threshold in
+/// force, and the trials recorded so far. Nothing here changes a setting.
+pub async fn ai_threshold(State(state): State<AppState>) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let settings = ai.settings.load_full();
+    let status = run_blocking({
+        let ai = ai.clone();
+        move || ai.threshold_status(20)
+    })
+    .await;
+    let (in_force, trials) = match status {
+        Ok(status) => status,
+        Err(e) => return map_err(e),
+    };
+    Json(serde_json::json!({
+        "block_threshold": settings.block_threshold,
+        "fpr_target": settings.threshold_fpr_target,
+        // The live model's identity: a candidate is only meaningful next to
+        // the model it was measured on.
+        "model": daygle_dns_ml::threshold::model_version(&ai.live_model_path()),
+        "in_force": in_force.as_ref().map(threshold_trial_json),
+        "trials": trials.iter().map(threshold_trial_json).collect::<Vec<_>>(),
+    }))
+    .into_response()
+}
+
+/// `POST /api/ai/threshold/trial` - run a threshold trial now: choose the
+/// lowest threshold whose false-positive rate on one half of the evidence
+/// meets `threshold_fpr_target`, then check it on the held-out half. The
+/// result is recorded and nothing is applied: enforcement is unchanged until
+/// the operator applies a trial that passed.
+pub async fn ai_threshold_trial(State(state): State<AppState>) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let outcome = run_blocking({
+        let ai = ai.clone();
+        move || ai.run_threshold_trial()
+    })
+    .await;
+    match outcome {
+        Ok(trial) => {
+            let summary = trial
+                .report
+                .get("summary")
+                .and_then(|s| s.as_str())
+                .unwrap_or_default()
+                .to_string();
+            state.logs.push(
+                daygle_dns_core::LogLevel::Info,
+                "api",
+                format!(
+                    "AI threshold trial #{}: candidate {:.3} ({})",
+                    trial.id,
+                    trial.candidate,
+                    if trial.passed {
+                        "passed, not applied"
+                    } else {
+                        "did not pass, not applied"
+                    }
+                ),
+            );
+            Json(serde_json::json!({
+                "trial": threshold_trial_json(&trial),
+                "message": summary,
+            }))
+            .into_response()
+        }
+        Err(e) => map_err(e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThresholdTrialInput {
+    pub id: i64,
+}
+
+/// Publish a block threshold live (the config swap, the stored overlay and the
+/// running engine together), the same way a settings save does.
+async fn publish_block_threshold(
+    state: &AppState,
+    ai: &Arc<daygle_dns_ml::AiEngine>,
+    threshold: f32,
+) -> daygle_dns_core::error::Result<()> {
+    let mut config = (*state.config.load_full()).clone();
+    config.ai.block_threshold = threshold;
+    state
+        .catalog
+        .store()
+        .put_runtime_settings(&daygle_dns_core::config::RuntimeSettings::capture(&config))?;
+    state.config.store(Arc::new(config.clone()));
+    let restart = run_blocking({
+        let ai = ai.clone();
+        let settings = config.ai.clone();
+        move || ai.apply_settings(&settings)
+    })
+    .await;
+    if restart {
+        state.logs.warn(
+            "api",
+            "the threshold changed, but the AI engine needs a restart to load it".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// `POST /api/ai/threshold/apply` - put a passed trial's candidate threshold
+/// in force. A trial that did not keep the target on the held-out half is
+/// refused; applying one trial rolls back any other that was in force, and
+/// the model is not touched.
+pub async fn ai_threshold_apply(
+    State(state): State<AppState>,
+    Json(input): Json<ThresholdTrialInput>,
+) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let found = run_blocking({
+        let ai = ai.clone();
+        move || ai.store.threshold_trial(input.id)
+    })
+    .await;
+    let trial = match found {
+        Ok(Some(trial)) => trial,
+        Ok(None) => {
+            return error_response(StatusCode::NOT_FOUND, "no such threshold trial");
+        }
+        Err(e) => return map_err(e),
+    };
+    if !trial.passed {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "trial #{} did not keep the false-positive target on the held-out half, so it cannot be applied",
+                trial.id
+            ),
+        );
+    }
+    let marked = run_blocking({
+        let ai = ai.clone();
+        let id = trial.id;
+        move || ai.store.mark_threshold_applied(id)
+    })
+    .await;
+    match marked {
+        Ok(true) => {}
+        Ok(false) => {
+            return error_response(
+                StatusCode::CONFLICT,
+                "that trial is already in force",
+            );
+        }
+        Err(e) => return map_err(e),
+    }
+    // Recorded before the threshold changes, so a failure here leaves the
+    // trial marked applied with the old threshold; undo the mark rather than
+    // claim an application that did not happen.
+    if let Err(e) = publish_block_threshold(&state, &ai, trial.candidate).await {
+        let _ = run_blocking({
+            let ai = ai.clone();
+            let id = trial.id;
+            move || ai.store.mark_threshold_rolled_back(id)
+        })
+        .await;
+        return map_err(e);
+    }
+    state.logs.push(
+        daygle_dns_core::LogLevel::Info,
+        "api",
+        format!(
+            "AI block threshold set to {:.3} by trial #{}",
+            trial.candidate, trial.id
+        ),
+    );
+    Json(serde_json::json!({
+        "applied": true,
+        "id": trial.id,
+        "block_threshold": trial.candidate,
+        "message": format!(
+            "The block threshold is {:.3}. The model ({}) is unchanged.",
+            trial.candidate, trial.model
+        ),
+    }))
+    .into_response()
+}
+
+/// `POST /api/ai/threshold/rollback` - put back the threshold the trial in
+/// force replaced. Only the threshold moves: the model it was tuned with, and
+/// any model since, stays live.
+pub async fn ai_threshold_rollback(
+    State(state): State<AppState>,
+    Json(input): Json<ThresholdTrialInput>,
+) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let rolled = run_blocking({
+        let ai = ai.clone();
+        move || ai.store.mark_threshold_rolled_back(input.id)
+    })
+    .await;
+    let base = match rolled {
+        Ok(Some(base)) => base,
+        Ok(None) => {
+            return error_response(
+                StatusCode::CONFLICT,
+                "that trial is not the threshold in force",
+            );
+        }
+        Err(e) => return map_err(e),
+    };
+    if let Err(e) = publish_block_threshold(&state, &ai, base).await {
+        return map_err(e);
+    }
+    state.logs.push(
+        daygle_dns_core::LogLevel::Info,
+        "api",
+        format!(
+            "AI block threshold rolled back to {base:.3} (trial #{})",
+            input.id
+        ),
+    );
+    Json(serde_json::json!({
+        "applied": true,
+        "block_threshold": base,
+        "message": format!("The block threshold is back to {base:.3}; the model is unchanged."),
+    }))
+    .into_response()
 }
 
 /// `POST /api/ai/retrain` - retrain the classifier from the scanner's
@@ -7066,6 +7370,10 @@ pub struct PolicyUpdate {
 #[serde(deny_unknown_fields)]
 pub struct AiUpdate {
     pub enabled: Option<bool>,
+    /// Let the scanner do its work (harvest, classify, page reads, the local
+    /// language model, self-retraining) without being asked. Enforcement is
+    /// separate: `mode` still decides whether a verdict may block.
+    pub autonomy: Option<bool>,
     pub mode: Option<daygle_dns_core::config::AiMode>,
     /// Verdict-store database path; empty uses `ai.db` next to the zone DB.
     pub database: Option<String>,
@@ -7080,6 +7388,8 @@ pub struct AiUpdate {
     /// Built-in families forced off, whatever the list says.
     pub auto_block_removals: Option<Vec<String>>,
     pub block_threshold: Option<f32>,
+    /// The false-positive rate a threshold trial must hold to (0.0-0.5).
+    pub threshold_fpr_target: Option<f32>,
     pub confidence_floor: Option<f32>,
     pub category_ttl_secs: Option<u64>,
     pub threat_ttl_secs: Option<u64>,
@@ -8042,6 +8352,9 @@ pub async fn update_settings(
         if let Some(v) = a.block_threshold {
             config.ai.block_threshold = v;
         }
+        if let Some(v) = a.threshold_fpr_target {
+            config.ai.threshold_fpr_target = v.clamp(0.0, 0.5);
+        }
         if let Some(v) = a.confidence_floor {
             config.ai.confidence_floor = v;
         }
@@ -8050,6 +8363,9 @@ pub async fn update_settings(
         }
         if let Some(v) = a.threat_ttl_secs {
             config.ai.threat_ttl_secs = v;
+        }
+        if let Some(v) = a.autonomy {
+            config.ai.autonomy = v;
         }
         if let Some(v) = a.auto_retrain {
             config.ai.auto_retrain = v;

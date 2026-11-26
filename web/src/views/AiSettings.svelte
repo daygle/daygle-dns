@@ -11,7 +11,8 @@
   // The fields this form edits, and the units it shows them in (minutes,
   // days, percent); turned back into seconds and fractions on save.
   const KEYS = ['enabled', 'mode', 'workers', 'max_domains_per_scan', 'scan_interval_secs', 'expire_check_secs',
-    'block_threshold', 'confidence_floor', 'category_ttl_secs', 'threat_ttl_secs'];
+    'block_threshold', 'confidence_floor', 'category_ttl_secs', 'threat_ttl_secs',
+    'autonomy', 'threshold_fpr_target'];
 
   let ai_ = $state(null);
   let aiForm = $state({});
@@ -37,6 +38,7 @@
       categoryDays: round2(src.category_ttl_secs / 86400),
       thresholdPct: round2(src.block_threshold * 100),
       floorPct: round2(src.confidence_floor * 100),
+      fprPct: round2((src.threshold_fpr_target ?? 0.01) * 100),
     };
   }
 
@@ -50,6 +52,10 @@
       expire_check_secs: Math.round(Number(aiForm.expireMinutes) * 60),
       block_threshold: Number(aiForm.thresholdPct) / 100,
       confidence_floor: Number(aiForm.floorPct) / 100,
+      threshold_fpr_target: Number(aiForm.fprPct) / 100,
+      // Explicit, not `undefined`: an absent field keeps the saved value, and
+      // an unticked box has to send false.
+      autonomy: !!ai_.autonomy,
       category_ttl_secs: Math.round(Number(aiForm.categoryDays) * 86400),
       threat_ttl_secs: Math.round(Number(aiForm.threatDays) * 86400),
     };
@@ -86,6 +92,9 @@
     }
     if (!(body.confidence_floor >= 0 && body.confidence_floor < body.block_threshold)) {
       return 'Confidence Floor must be at least 0% and below the Block Threshold.';
+    }
+    if (!(body.threshold_fpr_target >= 0 && body.threshold_fpr_target <= 0.5)) {
+      return 'False-Positive Target must be between 0 and 50%.';
     }
     if (!(body.workers >= 1 && body.workers <= 32)) return 'Classification Workers must be between 1 and 32.';
     if (!(body.max_domains_per_scan >= 1)) return 'Domains Classified Per Scan must be at least 1.';
@@ -139,6 +148,7 @@
     <h3 style="margin: 0 0 10px">AI Safety Scanner</h3>
     <div class="form-grid">
       <label class="check"><input type="checkbox" bind:checked={ai_.enabled} /> <span>Enable AI Scanner</span></label>
+      <label class="check"><input type="checkbox" bind:checked={ai_.autonomy} /> <span>Let The Scanner Work On Its Own</span></label>
       <label>
         <span>Mode</span>
         <select bind:value={ai_.mode}>
@@ -153,6 +163,12 @@
     <p class="muted help">
       Start in Train mode and check the Threats tab before switching to
       Enforce. Exempt domains are never blocked.
+    </p>
+    <p class="muted help">
+      With autonomy off, the scanner still expires old entries and keeps its
+      block snapshot current, but it stops harvesting domains, classifying,
+      reading pages and retraining itself. Enforcement and Mode are unchanged:
+      a threat already found can still block.
     </p>
 
     <h4>Scanning</h4>
@@ -169,11 +185,17 @@
     <div class="form-grid">
       <label><span>Block Threshold (%)</span><input type="number" min="50" max="100" step="any" bind:value={aiForm.thresholdPct} /></label>
       <label><span>Confidence Floor (%)</span><input type="number" min="0" max="99" step="any" bind:value={aiForm.floorPct} /></label>
+      <label><span>False-Positive Target (%)</span><input type="number" min="0" max="50" step="any" bind:value={aiForm.fprPct} /></label>
     </div>
     <p class="muted help">
       In Enforce mode a threat blocks once its confidence reaches the block
       threshold, unless it is disputed. Detections below the confidence floor
       are ignored. Which labels count as threats is set on the Threats tab.
+    </p>
+    <p class="muted help">
+      The false-positive target is what a threshold trial aims for on
+      established and unseen domains: run one on the Threats tab. A trial never
+      changes the threshold by itself.
     </p>
 
     <h4>Lifetime</h4>
