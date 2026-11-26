@@ -287,6 +287,32 @@ impl AiStore {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(collected)
     }
+
+    /// [`Self::gate_samples`] on the score before calibration: the assessment
+    /// score the active map was applied to. Calibration is fitted on this, so a
+    /// second map never learns from the first map's output.
+    pub fn assessment_samples(&self, limit: u32) -> Result<Vec<(String, f32, i64)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT domain,
+                    CASE WHEN assessment_score > 0 THEN assessment_score ELSE confidence END,
+                    classified_at
+             FROM ai_verdicts
+             WHERE channel = 'threat' AND status = 'classified'
+               AND CASE WHEN assessment_score > 0 THEN assessment_score ELSE confidence END > 0
+             ORDER BY 2 DESC, domain LIMIT ?1",
+        )?;
+        let collected = stmt
+            .query_map(params![limit.clamp(1, 200_000)], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, f32>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(collected)
+    }
 }
 
 #[cfg(test)]
@@ -448,6 +474,7 @@ mod tests {
                 Some(0.0),
                 "cal-zero",
                 None,
+                0.99,
             )
             .unwrap();
 
@@ -469,6 +496,43 @@ mod tests {
             .unwrap()
             .iter()
             .all(|(domain, ..)| domain != "calibrated-away.example"));
+    }
+
+    /// Calibration is fitted on the assessment score, not on what the map in
+    /// force already made of it: a second map must not learn from the first.
+    #[test]
+    fn calibration_reads_the_score_before_the_map() {
+        let (_dir, store) = store();
+        store.observe("mapped.example").unwrap();
+        store
+            .save_verdicts(&[crate::store::NewVerdict {
+                domain: "mapped.example".to_string(),
+                channel: crate::store::Channel::Threat,
+                category: "phishing".to_string(),
+                severity: "threat".to_string(),
+                status: "classified".to_string(),
+                confidence: 0.9,
+                backend: "fasttext".to_string(),
+                evidence: "model, phishing at 0.9".to_string(),
+                threat_score: 0.9,
+                expires_after_secs: 3_600,
+            }])
+            .unwrap();
+        store
+            .save_assessment("mapped.example", "threat", Some(0.2), "cal-a", None, 0.9)
+            .unwrap();
+
+        assert_eq!(
+            store.gate_scores(10).unwrap(),
+            vec![("mapped.example".to_string(), 0.2)]
+        );
+        let assessment: Vec<(String, f32)> = store
+            .assessment_samples(10)
+            .unwrap()
+            .into_iter()
+            .map(|(domain, score, _)| (domain, score))
+            .collect();
+        assert_eq!(assessment, vec![("mapped.example".to_string(), 0.9)]);
     }
 
     #[test]

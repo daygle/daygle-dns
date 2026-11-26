@@ -575,6 +575,7 @@ impl Scanner {
             calibrated,
             &version,
             fused.as_ref().map(|f| f.score),
+            assessment_score,
         ) {
             self.log_warn(format!(
                 "AI could not store the assessment of {domain}: {e}"

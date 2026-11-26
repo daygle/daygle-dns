@@ -2627,6 +2627,45 @@ async fn publish_block_threshold(
     Ok(())
 }
 
+/// Publish a candidate's whole scoring configuration, not only its threshold:
+/// the version's fusion mode, confidence floor, FPR target, threat-label
+/// policy and authority setting travel with it, so promoting or rolling back a
+/// version restores what its hash describes.
+async fn publish_candidate_config(
+    state: &AppState,
+    ai: &Arc<daygle_dns_ml::AiEngine>,
+    candidate: &daygle_dns_ml::store::CandidateVersion,
+) -> daygle_dns_core::error::Result<()> {
+    let mut config = (*state.config.load_full()).clone();
+    if let Ok(update) = serde_json::from_value::<daygle_dns_core::config::AiUpdate>(
+        candidate.scoring_config.clone(),
+    ) {
+        update.apply_to(&mut config.ai);
+    }
+    // The threshold is the candidate's, whatever the overlay said.
+    config.ai.block_threshold = candidate.block_threshold;
+    config.validate()?;
+    state
+        .catalog
+        .store()
+        .put_runtime_settings(&daygle_dns_core::config::RuntimeSettings::capture(&config))?;
+    state.config.store(Arc::new(config.clone()));
+    let restart = run_blocking({
+        let ai = ai.clone();
+        let settings = config.ai.clone();
+        move || ai.apply_settings(&settings)
+    })
+    .await;
+    if restart {
+        state.logs.warn(
+            "api",
+            "the candidate's scoring configuration changed, but the AI engine needs a restart to load it"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// `POST /api/ai/threshold/apply` - put a passed trial's candidate threshold
 /// in force. A trial that did not keep the target on the held-out half is
 /// refused; applying one trial rolls back any other that was in force, and
@@ -2968,7 +3007,7 @@ pub async fn ai_candidates_promote(
         Ok(candidate) => candidate,
         Err(e) => return map_err(e),
     };
-    if let Err(e) = publish_block_threshold(&state, &ai, promoted.block_threshold).await {
+    if let Err(e) = publish_candidate_config(&state, &ai, &promoted).await {
         // The candidate state is rolled back rather than left half applied.
         let _ = run_blocking({
             let ai = ai.clone();
@@ -3025,7 +3064,7 @@ pub async fn ai_candidates_rollback(State(state): State<AppState>) -> Response {
         }
         Err(e) => return map_err(e),
     };
-    if let Err(e) = publish_block_threshold(&state, &ai, restored.block_threshold).await {
+    if let Err(e) = publish_candidate_config(&state, &ai, &restored).await {
         return map_err(e);
     }
     state.logs.push(

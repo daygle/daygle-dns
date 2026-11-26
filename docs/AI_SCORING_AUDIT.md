@@ -184,10 +184,9 @@ intervals; ECE depends on ten fixed bins; and a verdict whose confidence is
 raised by the page/LLM stage is reassessed, but any other direct confidence
 write outside those paths would leave the stored calibrated score stale.
 A map is refused at apply time when the live model is not the model it was
-fitted for. Fitting while a map is already active reads that map's output
-rather than the pre-calibration assessment score, so a second generation of
-maps is measured in the wrong score space; that is an open review item, not
-yet fixed.
+fitted for, and fitting reads the assessment score stored beside each verdict
+(`ai_verdicts.assessment_score`) rather than the gate score, so a later map is
+never fitted to the output of the map already in force.
 
 ## Stage 4 - Atomic candidate version
 
@@ -209,9 +208,11 @@ one version, including the model artifact bytes.
 **Promotion** restores and loads the artifact, marks the candidate active with
 the previous one recorded (`superseded_id`), publishes its calibration
 (identity when it has none) and signal weights, then the API publishes its
-threshold through the existing config path. If loading fails the candidate
-state is rolled back. **Rollback** restores the previous version's bytes,
-threshold, calibration and weights together.
+whole scoring configuration - threshold, fusion mode, confidence floor, FPR
+target, threat-label policy and authority setting - through the existing
+config path, validating the merged configuration first. If loading fails the
+candidate state is rolled back. **Rollback** restores the previous version's
+bytes, threshold, calibration, weights and scoring configuration together.
 
 **Migration:** `ai_candidates`, `ai_model_artifacts`.
 

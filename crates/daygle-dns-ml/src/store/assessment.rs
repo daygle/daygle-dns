@@ -100,6 +100,12 @@ pub(super) fn upgrade(conn: &Connection) -> rusqlite::Result<()> {
             [],
         )?;
     }
+    if !has_column("assessment_score")? {
+        conn.execute(
+            "ALTER TABLE ai_verdicts ADD COLUMN assessment_score REAL NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -259,11 +265,13 @@ impl AiStore {
         calibrated: Option<f32>,
         calibration_version: &str,
         fusion_score: Option<f32>,
+        assessment_score: f32,
     ) -> Result<()> {
         let conn = self.lock()?;
         conn.execute(
             "UPDATE ai_verdicts
-             SET calibrated_score = ?3, calibration_version = ?4, fusion_score = ?5
+             SET calibrated_score = ?3, calibration_version = ?4, fusion_score = ?5,
+                 assessment_score = ?6
              WHERE domain = ?1 AND channel = ?2",
             params![
                 domain,
@@ -271,6 +279,7 @@ impl AiStore {
                 calibrated.unwrap_or(0.0),
                 calibration_version,
                 fusion_score.unwrap_or(0.0),
+                assessment_score,
             ],
         )?;
         Ok(())

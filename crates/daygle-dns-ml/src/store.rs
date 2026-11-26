@@ -236,6 +236,7 @@ const VERDICTS_TABLE: &str = "CREATE TABLE IF NOT EXISTS ai_verdicts (
     calibrated_score REAL NOT NULL DEFAULT 0,
     calibration_version TEXT NOT NULL DEFAULT '',
     fusion_score REAL NOT NULL DEFAULT 0,
+    assessment_score REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (domain, channel)
 )";
 

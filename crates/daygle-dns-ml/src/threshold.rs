@@ -512,6 +512,27 @@ pub fn collect(
     settings: &AiSettings,
     limit: u32,
 ) -> Result<Vec<Sample>> {
+    collect_rows(store, intel, settings, store.gate_samples(limit)?)
+}
+
+/// [`collect`] on the score calibration is fitted against: the assessment
+/// score before any map was applied. Fitting on the gate score while a map is
+/// already in force would learn from that map's own output.
+pub fn collect_for_calibration(
+    store: &AiStore,
+    intel: &IntelIndex,
+    settings: &AiSettings,
+    limit: u32,
+) -> Result<Vec<Sample>> {
+    collect_rows(store, intel, settings, store.assessment_samples(limit)?)
+}
+
+fn collect_rows(
+    store: &AiStore,
+    intel: &IntelIndex,
+    settings: &AiSettings,
+    rows: Vec<(String, f32, i64)>,
+) -> Result<Vec<Sample>> {
     let established: HashSet<String> = store
         .established_domains(u32::MAX)?
         .into_iter()
@@ -525,7 +546,6 @@ pub fn collect(
             .entry(row.domain.to_ascii_lowercase())
             .or_insert((row.action, row.category));
     }
-    let rows = store.gate_samples(limit)?;
     Ok(rows
         .into_iter()
         .map(|(domain, score, scored_at)| {

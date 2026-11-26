@@ -912,7 +912,8 @@ impl AiEngine {
     pub fn fit_calibration(&self) -> Result<serde_json::Value> {
         let settings = self.settings.load_full();
         let index = self.intel.index();
-        let samples = threshold::collect(&self.store, &index, &settings, THRESHOLD_SAMPLES)?;
+        let samples =
+            threshold::collect_for_calibration(&self.store, &index, &settings, THRESHOLD_SAMPLES)?;
         let (mut tuning, mut holdout) = (Vec::new(), Vec::new());
         for sample in &samples {
             let Some(threat) = sample.threat else {
@@ -1040,12 +1041,17 @@ impl AiEngine {
                 block_threshold: settings.block_threshold,
                 calibration,
                 signal_weights: self.scanner.signal_weights(),
+                // The AI overlay shape, so a promotion can restore these
+                // fields through the same settings path the console uses.
                 scoring_config: serde_json::json!({
-                    "fusion": settings.fusion.as_str(),
+                    "block_threshold": settings.block_threshold,
+                    "fusion": settings.fusion,
                     "threshold_fpr_target": settings.threshold_fpr_target,
                     "confidence_floor": settings.confidence_floor,
+                    "authority": settings.authority,
+                    "auto_block_categories": settings.auto_block_categories,
+                    "auto_block_removals": settings.auto_block_removals,
                     "threat_labels": settings.threat_labels(),
-                    "authority_enabled": settings.authority.enabled,
                 }),
                 validation_report: validation,
                 metrics,
