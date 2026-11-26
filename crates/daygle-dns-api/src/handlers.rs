@@ -1691,7 +1691,10 @@ fn enforcement_decision(
 /// label, the model's own score for the threat families, what the model
 /// classified the domain as, and the evidence the pipeline added (a feed
 /// listing, a verifier disagreement, ...).
-fn threat_reason(row: &daygle_dns_ml::store::VerdictRow, role: daygle_dns_core::config::LabelRole) -> String {
+fn threat_reason(
+    row: &daygle_dns_ml::store::VerdictRow,
+    role: daygle_dns_core::config::LabelRole,
+) -> String {
     let score = if row.threat_score > 0.0 {
         format!("{:.0}% threat score", row.threat_score * 100.0)
     } else {
@@ -2643,10 +2646,7 @@ pub async fn ai_threshold_apply(
     match marked {
         Ok(true) => {}
         Ok(false) => {
-            return error_response(
-                StatusCode::CONFLICT,
-                "that trial is already in force",
-            );
+            return error_response(StatusCode::CONFLICT, "that trial is already in force");
         }
         Err(e) => return map_err(e),
     }

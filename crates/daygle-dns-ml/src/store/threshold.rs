@@ -300,6 +300,9 @@ mod tests {
         let undone = store.threshold_trial(first.id).unwrap().unwrap();
         assert!(!undone.in_force());
         assert!((undone.restored_threshold - 0.99).abs() < 1e-6);
-        assert!(store.mark_threshold_rolled_back(first.id).unwrap().is_none());
+        assert!(store
+            .mark_threshold_rolled_back(first.id)
+            .unwrap()
+            .is_none());
     }
 }

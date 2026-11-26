@@ -124,10 +124,7 @@ fn feed(intel: &IntelIndex, domain: &str) -> Signal {
             FEED,
             THREAT,
             Some(crate::evidence::LISTED_CONFIDENCE),
-            format!(
-                "{} {how} as {}",
-                found.feed.source, found.feed.label
-            ),
+            format!("{} {how} as {}", found.feed.source, found.feed.label),
         );
     }
     // A parent listed exactly is not evidence about this name: only a
@@ -165,15 +162,13 @@ fn popular(intel: &IntelIndex, domain: &str) -> Signal {
             POPULAR,
             BENIGN,
             None,
-            format!("its registered domain is on {}", crate::intel::POPULAR.source),
+            format!(
+                "its registered domain is on {}",
+                crate::intel::POPULAR.source
+            ),
         )
     } else {
-        Signal::new(
-            POPULAR,
-            NEUTRAL,
-            None,
-            "not a popular site".to_string(),
-        )
+        Signal::new(POPULAR, NEUTRAL, None, "not a popular site".to_string())
     }
 }
 
@@ -191,10 +186,7 @@ fn established(store: &AiStore, domain: &str) -> Signal {
             ESTABLISHED,
             BENIGN,
             None,
-            format!(
-                "used on {} days by {}+ clients",
-                seen.days, seen.clients
-            ),
+            format!("used on {} days by {}+ clients", seen.days, seen.clients),
         ),
         Some(seen) => Signal::new(
             ESTABLISHED,
@@ -278,13 +270,11 @@ mod tests {
     }
 
     fn index(entries: [(&str, bool); 2]) -> IntelIndex {
-        IntelIndex::from_entries(entries.into_iter().map(|(domain, wildcard)| {
-            (
-                domain.to_string(),
-                wildcard,
-                "phishing_army".to_string(),
-            )
-        }))
+        IntelIndex::from_entries(
+            entries.into_iter().map(|(domain, wildcard)| {
+                (domain.to_string(), wildcard, "phishing_army".to_string())
+            }),
+        )
     }
 
     #[test]
@@ -299,12 +289,20 @@ mod tests {
         let feed = wildcard.iter().find(|s| s.signal == FEED).expect("feed");
         assert_eq!(feed.direction, THREAT);
         assert_eq!(feed.value, Some(crate::evidence::LISTED_CONFIDENCE));
-        assert!(feed.detail.contains("lists bad.example as phishing"), "{}", feed.detail);
+        assert!(
+            feed.detail.contains("lists bad.example as phishing"),
+            "{}",
+            feed.detail
+        );
 
         let plain = for_verdict(&ctx, "child.plain.example", 0.0, "no threat in the name");
         let feed = plain.iter().find(|s| s.signal == FEED).expect("feed");
         assert_eq!(feed.direction, NEUTRAL, "{}", feed.detail);
-        assert!(feed.detail.contains("does not cover this name"), "{}", feed.detail);
+        assert!(
+            feed.detail.contains("does not cover this name"),
+            "{}",
+            feed.detail
+        );
     }
 
     #[test]
@@ -324,7 +322,10 @@ mod tests {
         let ids: Vec<&str> = signals.iter().map(|s| s.signal.as_str()).collect();
         assert_eq!(ids, vec![MODEL, FEED, POPULAR, ESTABLISHED, AGE, NAME]);
         let model = &signals[0];
-        assert_eq!((model.direction.as_str(), model.value), (THREAT, Some(0.62)));
+        assert_eq!(
+            (model.direction.as_str(), model.value),
+            (THREAT, Some(0.62))
+        );
         assert_eq!(signals[2].direction, UNKNOWN, "no popular list loaded");
         assert_eq!(signals[3].direction, UNKNOWN, "never seen on the network");
         assert_eq!(signals[4].direction, THREAT);

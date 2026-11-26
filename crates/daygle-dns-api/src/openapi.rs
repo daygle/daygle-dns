@@ -56,7 +56,10 @@ const PATHS: &[(&str, &[Operation])] = &[
     ("/ai/threshold", &[("get", "Ai threshold")]),
     ("/ai/threshold/trial", &[("post", "Ai threshold trial")]),
     ("/ai/threshold/apply", &[("post", "Ai threshold apply")]),
-    ("/ai/threshold/rollback", &[("post", "Ai threshold rollback")]),
+    (
+        "/ai/threshold/rollback",
+        &[("post", "Ai threshold rollback")],
+    ),
     ("/ai/override", &[("post", "Ai override")]),
     ("/ai/overrides", &[("get", "Ai overrides")]),
     ("/ai/rescan", &[("post", "Ai rescan")]),

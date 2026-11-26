@@ -493,8 +493,7 @@ impl AiEngine {
     pub fn run_threshold_trial(&self) -> Result<store::ThresholdTrial> {
         let settings = self.settings.load_full();
         let index = self.intel.index();
-        let samples =
-            threshold::collect(&self.store, &index, &settings, THRESHOLD_SAMPLES)?;
+        let samples = threshold::collect(&self.store, &index, &settings, THRESHOLD_SAMPLES)?;
         let report = threshold::run(
             &samples,
             settings.threshold_fpr_target,

@@ -859,7 +859,10 @@ mod tests {
         );
 
         let exact = index.attribution("dropper.example").expect("listed");
-        assert_eq!((exact.listed, exact.listed_name.as_str()), (Listed::Exact, "dropper.example"));
+        assert_eq!(
+            (exact.listed, exact.listed_name.as_str()),
+            (Listed::Exact, "dropper.example")
+        );
         let wildcard = index.attribution("pay.fakeshop.example").expect("listed");
         assert_eq!(
             (wildcard.listed, wildcard.listed_name.as_str()),

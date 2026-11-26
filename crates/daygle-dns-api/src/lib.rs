@@ -702,14 +702,8 @@ pub fn router(state: AppState) -> Router {
         .route("/ai/corrections", get(handlers::ai_corrections))
         .route("/ai/retrain", post(handlers::ai_retrain))
         .route("/ai/threshold", get(handlers::ai_threshold))
-        .route(
-            "/ai/threshold/trial",
-            post(handlers::ai_threshold_trial),
-        )
-        .route(
-            "/ai/threshold/apply",
-            post(handlers::ai_threshold_apply),
-        )
+        .route("/ai/threshold/trial", post(handlers::ai_threshold_trial))
+        .route("/ai/threshold/apply", post(handlers::ai_threshold_apply))
         .route(
             "/ai/threshold/rollback",
             post(handlers::ai_threshold_rollback),

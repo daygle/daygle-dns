@@ -186,7 +186,13 @@ impl ChannelBackend {
             .label_scores(input)
             .into_iter()
             .filter(|(label, _)| labels.iter().any(|t| t.eq_ignore_ascii_case(label)))
-            .reduce(|best, candidate| if candidate.1 > best.1 { candidate } else { best })
+            .reduce(|best, candidate| {
+                if candidate.1 > best.1 {
+                    candidate
+                } else {
+                    best
+                }
+            })
     }
 
     /// When `input` is a subdomain, classify the registered domain it sits

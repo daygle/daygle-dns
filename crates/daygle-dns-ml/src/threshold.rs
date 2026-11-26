@@ -500,7 +500,11 @@ mod tests {
         assert_eq!(report.candidate, Some(MIN_THRESHOLD));
         assert!(report.holdout.fpr.unwrap() > 0.0);
         assert!(!report.passed, "{}", report.summary);
-        assert!(report.summary.contains("held-out half"), "{}", report.summary);
+        assert!(
+            report.summary.contains("held-out half"),
+            "{}",
+            report.summary
+        );
     }
 
     #[test]
@@ -525,7 +529,10 @@ mod tests {
         ];
         let report = run(&samples, 0.01, 0.99);
         let names: Vec<&str> = report.groups.iter().map(|g| g.group.as_str()).collect();
-        assert_eq!(names, vec!["established", "confirmed", "correction", "unseen"]);
+        assert_eq!(
+            names,
+            vec!["established", "confirmed", "correction", "unseen"]
+        );
         assert_eq!(report.groups[0].benign, 1);
         assert_eq!(report.groups[1].threats, 1);
         assert_eq!(report.groups[2].benign, 1);
