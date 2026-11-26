@@ -42,8 +42,89 @@ pub const MAX_THRESHOLD: f32 = 1.0;
 pub const GRID_STEP: f32 = 0.005;
 /// Benign names needed on each half before a rate means anything.
 pub const MIN_BENIGN: usize = 20;
-/// One name in this many is held out, by domain hash.
+/// One name in this many is held out, by registrable-domain hash: a whole
+/// family of hostnames lands on the same side, so `login.bad.example` cannot
+/// train the threshold that `pay.bad.example` is then tested on.
 pub const HOLD_OUT_EVERY: u64 = 5;
+
+/// Where a sample's label came from. A feed listing and an established domain
+/// are evidence, not ground truth: they are kept apart so the report never
+/// presents either as unquestionable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LabelSource {
+    /// The operator said what the name is: the strongest label there is.
+    OperatorCorrection,
+    /// A maintained threat feed lists it.
+    FeedListing,
+    /// Many clients have used it for weeks: a presumption of benign, not a
+    /// guarantee.
+    Established,
+    /// On the popular-sites ranking: a presumption of benign.
+    Popular,
+    /// Nobody has judged it.
+    Unseen,
+}
+
+impl LabelSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OperatorCorrection => "operator_correction",
+            Self::FeedListing => "feed_listing",
+            Self::Established => "established",
+            Self::Popular => "popular",
+            Self::Unseen => "unseen",
+        }
+    }
+
+    /// How much the label may be trusted as ground truth.
+    pub fn trust(self) -> &'static str {
+        match self {
+            Self::OperatorCorrection => "strong",
+            Self::FeedListing => "moderate",
+            Self::Established | Self::Popular => "weak",
+            Self::Unseen => "none",
+        }
+    }
+
+    /// The caveat the report repeats beside the count.
+    pub fn note(self) -> &'static str {
+        match self {
+            Self::OperatorCorrection => "the operator's own decision",
+            Self::FeedListing => {
+                "a curated list, but feeds miss and over-list; not ground truth on its own"
+            }
+            Self::Established => {
+                "long use on this network presumes benign; a compromised long-used host would be mislabelled"
+            }
+            Self::Popular => "popularity presumes benign; popular sites can be compromised or squatted",
+            Self::Unseen => "no label; reported but never scored",
+        }
+    }
+}
+
+/// One provenance row: how many samples came from one label source.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvenanceRow {
+    pub label: String,
+    pub trust: String,
+    pub samples: usize,
+    pub threats: usize,
+    pub benign: usize,
+    pub note: String,
+}
+
+/// A time-based evaluation: the candidate chosen on older verdicts, measured
+/// again on the verdicts classified after the cutoff. This is how a threshold
+/// is checked against newer domains and newer threats, which a random split
+/// cannot show.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemporalReport {
+    pub cutoff: i64,
+    pub older: Side,
+    pub newer: Side,
+    pub summary: String,
+}
 
 /// Which population a scored name came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,15 +159,22 @@ impl Group {
     ];
 }
 
-/// One name, with the model's score and what the store knows about it.
+/// One name, with the score the gate compares and what the store knows about
+/// it.
 #[derive(Debug, Clone)]
 pub struct Sample {
     pub domain: String,
+    /// The registrable domain: what the hold-out split is keyed on.
+    pub registrable: String,
     pub score: f32,
     pub group: Group,
+    /// Where the label came from.
+    pub label: LabelSource,
     /// `Some(true)` when the name is known to be benign, `Some(false)` when
     /// known to be a threat, `None` when nobody has judged it.
     pub threat: Option<bool>,
+    /// When the verdict was classified, for the time-based evaluation.
+    pub scored_at: i64,
 }
 
 impl Sample {
@@ -148,6 +236,10 @@ pub struct Report {
     pub groups: Vec<GroupRow>,
     pub tuning: Side,
     pub holdout: Side,
+    /// Where the labels came from, with the trust each deserves.
+    pub provenance: Vec<ProvenanceRow>,
+    /// Older-versus-newer performance of the candidate.
+    pub temporal: Option<TemporalReport>,
 }
 
 /// Choose and validate a threshold over `samples`.
@@ -165,6 +257,8 @@ pub fn run(samples: &[Sample], fpr_target: f32, base_threshold: f32) -> Report {
 
     let tuning_side = side(&tuning, candidate);
     let holdout_side = side(&holdout, candidate);
+    let provenance = provenance_report(samples);
+    let temporal = temporal_report(samples, candidate);
 
     let (passed, summary) = match candidate {
         _ if !tuning_side.enough_benign => (
@@ -230,7 +324,80 @@ pub fn run(samples: &[Sample], fpr_target: f32, base_threshold: f32) -> Report {
         groups,
         tuning: tuning_side,
         holdout: holdout_side,
+        provenance,
+        temporal,
     }
+}
+
+/// Count the samples by label provenance.
+fn provenance_report(samples: &[Sample]) -> Vec<ProvenanceRow> {
+    let mut rows = Vec::new();
+    for label in [
+        LabelSource::OperatorCorrection,
+        LabelSource::FeedListing,
+        LabelSource::Popular,
+        LabelSource::Established,
+        LabelSource::Unseen,
+    ] {
+        let matching: Vec<&Sample> = samples.iter().filter(|s| s.label == label).collect();
+        if matching.is_empty() {
+            continue;
+        }
+        rows.push(ProvenanceRow {
+            label: label.as_str().to_string(),
+            trust: label.trust().to_string(),
+            samples: matching.len(),
+            threats: matching.iter().filter(|s| s.threat == Some(true)).count(),
+            benign: matching.iter().filter(|s| s.threat == Some(false)).count(),
+            note: label.note().to_string(),
+        });
+    }
+    rows
+}
+
+/// Measure the candidate on verdicts from before and after the time cutoff.
+/// The cutoff is the 70th percentile of classification times among labelled
+/// samples, so the newer group is the most recent 30% and holds the domains
+/// and threats the network met last.
+fn temporal_report(samples: &[Sample], candidate: Option<f32>) -> Option<TemporalReport> {
+    let mut times: Vec<i64> = samples
+        .iter()
+        .filter(|s| s.threat.is_some() && s.scored_at > 0)
+        .map(|s| s.scored_at)
+        .collect();
+    if times.len() < MIN_BENIGN {
+        return None;
+    }
+    times.sort_unstable();
+    let cutoff = times[times.len() * 7 / 10];
+    let older: Vec<&Sample> = samples
+        .iter()
+        .filter(|s| s.scored_at > 0 && s.scored_at <= cutoff)
+        .collect();
+    let newer: Vec<&Sample> = samples.iter().filter(|s| s.scored_at > cutoff).collect();
+    if older.is_empty() || newer.is_empty() {
+        return None;
+    }
+    let older = side(&older, candidate);
+    let newer = side(&newer, candidate);
+    let summary = format!(
+        "on verdicts up to the cutoff: {} benign, {} threat(s), {:.2}% false positives, {:.0}% recall; \
+         after it: {} benign, {} threat(s), {:.2}% false positives, {:.0}% recall",
+        older.benign,
+        older.threats,
+        older.fpr.unwrap_or(0.0) * 100.0,
+        older.recall.unwrap_or(0.0) * 100.0,
+        newer.benign,
+        newer.threats,
+        newer.fpr.unwrap_or(0.0) * 100.0,
+        newer.recall.unwrap_or(0.0) * 100.0
+    );
+    Some(TemporalReport {
+        cutoff,
+        older,
+        newer,
+        summary,
+    })
 }
 
 /// The lowest threshold whose tuning-half false-positive rate meets the
@@ -321,12 +488,15 @@ fn median(sorted: &[f32]) -> Option<f32> {
     }
 }
 
-/// The stable split: one name in [`HOLD_OUT_EVERY`], decided by the name
-/// itself so a rerun holds out the same names.
+/// The stable split: one registrable domain in [`HOLD_OUT_EVERY`], decided by
+/// the name itself so a rerun holds out the same names. Keying on the
+/// registrable domain (not the hostname) keeps every subdomain of a family on
+/// one side, which is what stops related hostnames leaking across the split.
 pub fn held_out(domain: &str) -> bool {
     // FNV-1a, so the split does not depend on the hasher std happens to use.
+    let key = crate::assessment::registrable(domain);
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in domain.trim().trim_end_matches('.').as_bytes() {
+    for byte in key.as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
@@ -342,6 +512,27 @@ pub fn collect(
     settings: &AiSettings,
     limit: u32,
 ) -> Result<Vec<Sample>> {
+    collect_rows(store, intel, settings, store.gate_samples(limit)?)
+}
+
+/// [`collect`] on the score calibration is fitted against: the assessment
+/// score before any map was applied. Fitting on the gate score while a map is
+/// already in force would learn from that map's own output.
+pub fn collect_for_calibration(
+    store: &AiStore,
+    intel: &IntelIndex,
+    settings: &AiSettings,
+    limit: u32,
+) -> Result<Vec<Sample>> {
+    collect_rows(store, intel, settings, store.assessment_samples(limit)?)
+}
+
+fn collect_rows(
+    store: &AiStore,
+    intel: &IntelIndex,
+    settings: &AiSettings,
+    rows: Vec<(String, f32, i64)>,
+) -> Result<Vec<Sample>> {
     let established: HashSet<String> = store
         .established_domains(u32::MAX)?
         .into_iter()
@@ -355,31 +546,39 @@ pub fn collect(
             .entry(row.domain.to_ascii_lowercase())
             .or_insert((row.action, row.category));
     }
-    let rows = store.gate_scores(limit)?;
     Ok(rows
         .into_iter()
-        .map(|(domain, score)| {
+        .map(|(domain, score, scored_at)| {
             let key = domain.to_ascii_lowercase();
-            let (group, threat) = if let Some((action, category)) = corrections.get(&key) {
+            let (group, label, threat) = if let Some((action, category)) = corrections.get(&key) {
                 let threat = if action == "category" {
                     settings.is_auto_block_category(category)
                 } else {
                     // `allow` and `not_threat` both mean "not a threat".
                     false
                 };
-                (Group::Correction, Some(threat))
+                (
+                    Group::Correction,
+                    LabelSource::OperatorCorrection,
+                    Some(threat),
+                )
             } else if intel.attribution(&key).is_some() {
-                (Group::Confirmed, Some(true))
+                (Group::Confirmed, LabelSource::FeedListing, Some(true))
+            } else if intel.is_popular(&key) {
+                (Group::Established, LabelSource::Popular, Some(false))
             } else if established.contains(&key) {
-                (Group::Established, Some(false))
+                (Group::Established, LabelSource::Established, Some(false))
             } else {
-                (Group::Unseen, None)
+                (Group::Unseen, LabelSource::Unseen, None)
             };
             Sample {
-                domain: key,
+                domain: key.clone(),
+                registrable: crate::assessment::registrable(&key),
                 score,
                 group,
+                label,
                 threat,
+                scored_at,
             }
         })
         .collect())
@@ -412,11 +611,20 @@ mod tests {
     use super::*;
 
     fn sample(domain: &str, score: f32, group: Group, threat: Option<bool>) -> Sample {
+        let label = match group {
+            Group::Correction => LabelSource::OperatorCorrection,
+            Group::Confirmed => LabelSource::FeedListing,
+            Group::Established => LabelSource::Established,
+            Group::Unseen => LabelSource::Unseen,
+        };
         Sample {
             domain: domain.to_string(),
+            registrable: crate::assessment::registrable(domain),
             score,
             group,
+            label,
             threat,
+            scored_at: 1_700_000_000,
         }
     }
 
@@ -551,6 +759,85 @@ mod tests {
         assert_eq!(first, second);
         let held = first.iter().filter(|h| **h).count();
         assert!((70..=130).contains(&held), "{held} of 500 held out");
+    }
+
+    /// Related hostnames are one family: the split is keyed on the
+    /// registrable domain, so a subdomain cannot tune the threshold that its
+    /// sibling is tested on.
+    #[test]
+    fn related_hostnames_stay_on_one_side_of_the_split() {
+        for name in [
+            "login.bad.example",
+            "pay.bad.example",
+            "deep.pay.bad.example",
+        ] {
+            assert_eq!(held_out(name), held_out("bad.example"), "{name}");
+        }
+        // A different registrable domain is a different family.
+        let same = held_out("a.example");
+        let shared = (0..200)
+            .map(|i| format!("x{i}.example"))
+            .filter(|d| held_out(d) != same)
+            .count();
+        assert!(shared > 0, "the split is not a constant");
+        assert_eq!(held_out("A.EXAMPLE"), held_out("a.example"));
+    }
+
+    #[test]
+    fn provenance_is_reported_with_the_trust_each_label_deserves() {
+        let samples = vec![
+            sample("fixed.example", 0.3, Group::Correction, Some(false)),
+            sample("feed.example", 0.9, Group::Confirmed, Some(true)),
+            sample("used.example", 0.2, Group::Established, Some(false)),
+        ];
+        let report = run(&samples, 0.01, 0.99);
+        let rows: Vec<(&str, &str, usize)> = report
+            .provenance
+            .iter()
+            .map(|row| (row.label.as_str(), row.trust.as_str(), row.samples))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("operator_correction", "strong", 1),
+                ("feed_listing", "moderate", 1),
+                ("established", "weak", 1),
+            ]
+        );
+        assert!(report.provenance[1]
+            .note
+            .contains("not ground truth on its own"));
+    }
+
+    #[test]
+    fn the_time_based_evaluation_compares_older_and_newer_verdicts() {
+        let mut samples = Vec::new();
+        let now = 1_700_000_000;
+        for i in 0..60 {
+            let mut sample = sample(
+                &format!("old{i}.example"),
+                0.2,
+                Group::Established,
+                Some(false),
+            );
+            sample.scored_at = now - 30 * 86_400 + i;
+            samples.push(sample);
+        }
+        for i in 0..20 {
+            let mut sample = sample(
+                &format!("new{i}.example"),
+                0.95,
+                Group::Confirmed,
+                Some(true),
+            );
+            sample.scored_at = now - i;
+            samples.push(sample);
+        }
+        let report = run(&samples, 0.01, 0.99);
+        let temporal = report.temporal.expect("a temporal report");
+        assert!(temporal.cutoff > 0);
+        assert!(temporal.newer.threats > 0, "the newer threats are there");
+        assert!(temporal.summary.contains("after it"));
     }
 
     #[test]

@@ -700,6 +700,22 @@ auto_block_categories = ["malware", "phishing", "scam"]
 # llm_model = "qwen2.5:1.5b"
 # llm_candidates_per_scan = 6
 # llm_timeout_secs = 120
+#
+# Structured signals, fusion, calibration and graduated authority
+# (docs/AI_SCORING_AUDIT.md). Every input behind a threat verdict is recorded
+# as a structured observation, with the fused score beside it. "monitor"
+# records both without changing what the gate compares; "decide" uses the
+# fused score as the assessment. Calibration applies only after a fitted map
+# is promoted, and its calibrated score is what the gate, the threshold trial
+# and the console all read.
+# fusion = "monitor"
+# Graduated enforcement authority, per evidence source. Off leaves the global
+# mode alone to decide what may block. When on, a source at "monitor" or
+# "propose" is listed but never blocks, and a source whose measured
+# false-positive share passes demote_fp_rate is demoted to "monitor"
+# automatically. The 500-new-blocks-per-refresh rail is a ceiling: a
+# configured limit can only tighten it.
+# authority = { enabled = false, feed_stage = "enforce", model_stage = "propose", operator_stage = "enforce", max_new_blocks_per_refresh = 500, demote_fp_rate = 0.05, demote_min_samples = 20 }
 block_threshold = 0.99
 confidence_floor = 0.2
 category_confidence_floor = 0.2

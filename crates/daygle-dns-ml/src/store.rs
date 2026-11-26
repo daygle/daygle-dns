@@ -31,12 +31,15 @@ use std::sync::{Arc, Mutex};
 use daygle_dns_core::config::PageRule;
 use daygle_dns_core::error::{DaygleError, Result};
 use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 
 use crate::backend::Channel;
 
+mod assessment;
 mod evidence;
 mod threshold;
 use crate::page::TextVerdict;
+pub use assessment::{AuthorityRow, CalibrationRecord, CandidateVersion, NewCandidate};
 pub use evidence::{
     client_tag, FeedState, Sighting, AGE_RETRY_SECS, ESTABLISHED_CLIENTS, ESTABLISHED_DAYS,
     PAGE_TEXT_CHARS,
@@ -121,6 +124,36 @@ pub struct VerdictRow {
     pub classification: Option<String>,
 }
 
+/// Which mechanism put a domain in the block snapshot. The graduated
+/// authority layer ([`crate::authority`]) applies a stage per source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockSource {
+    /// A threat feed lists it: the strongest AI-side source.
+    Feed,
+    /// The model (with independent evidence) detected it without a listing.
+    Model,
+}
+
+impl BlockSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Feed => "feed",
+            Self::Model => "model",
+        }
+    }
+}
+
+/// One fresh verdict that qualifies for the block snapshot, with the source
+/// that qualified it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlockCandidate {
+    pub domain: String,
+    pub category: String,
+    pub expires_at: i64,
+    pub source: BlockSource,
+}
+
 /// One classification to store (see [`AiStore::save_verdicts`]).
 #[derive(Debug, Clone)]
 pub struct NewVerdict {
@@ -200,6 +233,10 @@ const VERDICTS_TABLE: &str = "CREATE TABLE IF NOT EXISTS ai_verdicts (
     page_fetched_at INTEGER NOT NULL DEFAULT 0,
     llm_checked_at INTEGER NOT NULL DEFAULT 0,
     threat_score  REAL NOT NULL DEFAULT 0,
+    calibrated_score REAL NOT NULL DEFAULT 0,
+    calibration_version TEXT NOT NULL DEFAULT '',
+    fusion_score REAL NOT NULL DEFAULT 0,
+    assessment_score REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (domain, channel)
 )";
 
@@ -323,6 +360,16 @@ fn delete_orphaned_page_history(conn: &Connection) -> rusqlite::Result<()> {
             [],
         )?;
     }
+    // Signal observations describe the verdict they were taken for. Rows whose
+    // verdict is gone would otherwise accumulate once per domain ever
+    // classified.
+    conn.execute(
+        "DELETE FROM ai_signal_observations WHERE NOT EXISTS (
+             SELECT 1 FROM ai_verdicts v
+             WHERE v.domain = ai_signal_observations.domain
+               AND v.channel = ai_signal_observations.channel)",
+        [],
+    )?;
     Ok(())
 }
 
@@ -350,9 +397,10 @@ impl AiStore {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.execute_batch(&format!(
             "{VERDICTS_TABLE};\n{OVERRIDES_TABLE};\n{CATEGORY_OVERRIDES_TABLE};\n\
-             {PAGE_ADJUSTMENTS_TABLE};\n{PAGE_READINGS_TABLE};\n{}\n{}",
+             {PAGE_ADJUSTMENTS_TABLE};\n{PAGE_READINGS_TABLE};\n{}\n{}\n{}",
             evidence::TABLES,
-            threshold::TABLES
+            threshold::TABLES,
+            assessment::TABLES
         ))?;
         evidence::upgrade(&conn)?;
         threshold::upgrade(&conn)?;
@@ -440,6 +488,10 @@ impl AiStore {
             ))?;
             tx.commit()?;
         }
+        // The assessment columns are added after the channel migration: that
+        // migration rebuilds `ai_verdicts` from an older schema, so adding
+        // them first would drop them with the old table.
+        assessment::upgrade(&conn)?;
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_ai_verdicts_status
                 ON ai_verdicts (status);
@@ -773,19 +825,27 @@ impl AiStore {
     /// parent override exempts and, when the threat channel shares the
     /// classifier, to the auto-block labels. Content-channel rows are
     /// categorizations: they never reach the snapshot.
-    pub fn fresh_blocked(
-        &self,
-        now_epoch: i64,
-        threshold: f32,
-    ) -> Result<Vec<(String, String, i64)>> {
+    pub fn fresh_blocked(&self, now_epoch: i64, threshold: f32) -> Result<Vec<BlockCandidate>> {
         let conn = self.lock()?;
         // A domain the operator relabelled is decided by that label (see
         // [`Self::operator_threats`]), never by the model's verdict.
+        //
+        // The score compared here is the calibrated one when a calibration
+        // map was in force for the verdict, and the confidence otherwise. The
+        // calibration version says which, so a map that legitimately maps a
+        // name to zero is not mistaken for "no map". [`Self::gate_samples`]
+        // reads the same expression, so a threshold trial measures the
+        // decision the gate actually makes. A verdict whose evidence carries a
+        // feed listing is `feed`-sourced, which the graduated authority layer
+        // treats separately from a model-only one.
         let mut stmt = conn.prepare(
-            "SELECT domain, category, expires_at FROM ai_verdicts
+            "SELECT domain, category, expires_at,
+                    CASE WHEN instr(evidence, ', listed by ') > 0 THEN 'feed' ELSE 'model' END
+             FROM ai_verdicts
              WHERE channel = 'threat' AND status = 'classified'
                AND severity != 'disputed'
-               AND confidence >= ?1 AND expires_at > ?2
+               AND CASE WHEN calibration_version <> '' THEN calibrated_score ELSE confidence END >= ?1
+               AND expires_at > ?2
                AND NOT EXISTS (
                    SELECT 1 FROM ai_overrides o
                    WHERE o.domain = ai_verdicts.domain
@@ -798,11 +858,15 @@ impl AiStore {
         )?;
         let collected = stmt
             .query_map(params![threshold, now_epoch], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
-                ))
+                Ok(BlockCandidate {
+                    domain: r.get(0)?,
+                    category: r.get(1)?,
+                    expires_at: r.get(2)?,
+                    source: match r.get::<_, String>(3)?.as_str() {
+                        "feed" => BlockSource::Feed,
+                        _ => BlockSource::Model,
+                    },
+                })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(collected)
@@ -1409,10 +1473,12 @@ impl AiStore {
         }))
     }
 
-    /// Stored threats that may block, with the confidence that qualified
-    /// them: fresh, undisputed, at or above `threshold`, and vetoed by no
-    /// exact override. Strongest first. [`crate::AiEngine::export_threats`]
-    /// narrows this to the block snapshot's rules before it is served.
+    /// Stored threats that may block, with the score that qualified them
+    /// (the calibrated score when a map was in force, else the confidence):
+    /// fresh, undisputed, at or above `threshold`, and vetoed by no exact
+    /// override. Strongest first. [`crate::AiEngine::export_threats`]
+    /// narrows this to the block snapshot's rules before it is served, so the
+    /// exported list is the enforcement list.
     pub fn export_threats(
         &self,
         now_epoch: i64,
@@ -1420,16 +1486,21 @@ impl AiStore {
     ) -> Result<Vec<(String, String, f32, i64)>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT domain, category, confidence, expires_at FROM ai_verdicts
+            "SELECT domain, category,
+                    CASE WHEN calibration_version <> '' THEN calibrated_score ELSE confidence END,
+                    expires_at
+             FROM ai_verdicts
              WHERE channel = 'threat' AND status = 'classified'
                AND severity != 'disputed'
-               AND confidence >= ?1 AND expires_at > ?2
+               AND CASE WHEN calibration_version <> '' THEN calibrated_score ELSE confidence END >= ?1
+               AND expires_at > ?2
                AND NOT EXISTS (
                    SELECT 1 FROM ai_overrides o
                    WHERE o.domain = ai_verdicts.domain
                      AND o.action IN ('allow', 'not_threat')
                )
-             ORDER BY confidence DESC, domain",
+             ORDER BY CASE WHEN calibration_version <> '' THEN calibrated_score ELSE confidence END DESC,
+                      domain",
         )?;
         let collected = stmt
             .query_map(params![threshold, now_epoch], |r| {
@@ -1487,6 +1558,21 @@ impl AiStore {
     /// Paginated verdict list, most recently classified first (pending rows
     /// last), with an optional status filter and a domain substring search.
     /// Returns the page plus the total row count under the same filter.
+    /// One verdict row, with the operator relabel and exemption applied.
+    pub fn verdict(&self, domain: &str, channel: &str) -> Result<Option<VerdictRow>> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(
+                &format!(
+                    "SELECT {VERDICT_COLUMNS} FROM ai_verdicts v
+                     WHERE v.domain = ?1 AND v.channel = ?2"
+                ),
+                params![domain, channel],
+                verdict_row,
+            )
+            .optional()?)
+    }
+
     pub fn list_verdicts(
         &self,
         status: Option<&str>,

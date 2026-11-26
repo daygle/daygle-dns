@@ -245,20 +245,70 @@ impl AiStore {
         Ok(Some((base, model)))
     }
 
-    /// The scores a threshold trial is fitted on: `(domain, confidence)`,
-    /// highest first. `confidence` is the number `fresh_blocked` compares with
-    /// `ai.block_threshold`; reading `threat_score` here measured the model's
-    /// raw opinion while enforcement ignored what the evidence stages added.
+    /// The scores a threshold trial is fitted on: `(domain, score)`,
+    /// highest first. `score` is exactly the number `fresh_blocked` compares
+    /// with `ai.block_threshold` (see [`Self::GATE_SCORE`]); reading
+    /// `threat_score` here measured the model's raw opinion while enforcement
+    /// ignored what the evidence stages added.
     pub fn gate_scores(&self, limit: u32) -> Result<Vec<(String, f32)>> {
+        Ok(self
+            .gate_samples(limit)?
+            .into_iter()
+            .map(|(domain, score, _)| (domain, score))
+            .collect())
+    }
+
+    /// [`Self::gate_scores`] with the verdict's classification time, for the
+    /// time-based evaluation and the label-provenance report.
+    pub fn gate_samples(&self, limit: u32) -> Result<Vec<(String, f32, i64)>> {
         let conn = self.lock()?;
+        // The same expression `fresh_blocked` compares: the calibrated score
+        // when a map was in force for the verdict, else the confidence. The
+        // version, not the score's value, says which: a map may legitimately
+        // calibrate a name to zero.
         let mut stmt = conn.prepare(
-            "SELECT domain, confidence FROM ai_verdicts
-             WHERE channel = 'threat' AND status = 'classified' AND confidence > 0
-             ORDER BY confidence DESC, domain LIMIT ?1",
+            "SELECT domain,
+                    CASE WHEN calibration_version <> '' THEN calibrated_score ELSE confidence END,
+                    classified_at
+             FROM ai_verdicts
+             WHERE channel = 'threat' AND status = 'classified'
+               AND CASE WHEN calibration_version <> '' THEN calibrated_score ELSE confidence END > 0
+             ORDER BY CASE WHEN calibration_version <> '' THEN calibrated_score ELSE confidence END DESC,
+                      domain LIMIT ?1",
         )?;
         let collected = stmt
             .query_map(params![limit.clamp(1, 200_000)], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, f32>(1)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, f32>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(collected)
+    }
+
+    /// [`Self::gate_samples`] on the score before calibration: the assessment
+    /// score the active map was applied to. Calibration is fitted on this, so a
+    /// second map never learns from the first map's output.
+    pub fn assessment_samples(&self, limit: u32) -> Result<Vec<(String, f32, i64)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT domain,
+                    CASE WHEN assessment_score > 0 THEN assessment_score ELSE confidence END,
+                    classified_at
+             FROM ai_verdicts
+             WHERE channel = 'threat' AND status = 'classified'
+               AND CASE WHEN assessment_score > 0 THEN assessment_score ELSE confidence END > 0
+             ORDER BY 2 DESC, domain LIMIT ?1",
+        )?;
+        let collected = stmt
+            .query_map(params![limit.clamp(1, 200_000)], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, f32>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(collected)
@@ -394,6 +444,95 @@ mod tests {
             store.gate_scores(10).unwrap(),
             vec![("age-raised.example".to_string(), 0.97)]
         );
+    }
+
+    /// A map may legitimately calibrate a name to exactly zero. That is a
+    /// calibrated score, not a missing one: the gate must read the zero
+    /// rather than fall back to the confidence it no longer stands for.
+    #[test]
+    fn a_calibrated_zero_is_not_a_missing_calibration() {
+        let (_dir, store) = store();
+        store.observe("calibrated-away.example").unwrap();
+        store
+            .save_verdicts(&[crate::store::NewVerdict {
+                domain: "calibrated-away.example".to_string(),
+                channel: crate::store::Channel::Threat,
+                category: "phishing".to_string(),
+                severity: "threat".to_string(),
+                status: "classified".to_string(),
+                confidence: 0.99,
+                backend: "fasttext".to_string(),
+                evidence: "model, phishing at 0.99".to_string(),
+                threat_score: 0.99,
+                expires_after_secs: 3_600,
+            }])
+            .unwrap();
+        store
+            .save_assessment(
+                "calibrated-away.example",
+                "threat",
+                Some(0.0),
+                "cal-zero",
+                None,
+                0.99,
+            )
+            .unwrap();
+
+        let now = chrono::Utc::now().timestamp();
+        let blocked = store.fresh_blocked(now, 0.5).unwrap();
+        assert!(
+            blocked
+                .iter()
+                .all(|row| row.domain != "calibrated-away.example"),
+            "a calibrated zero must not block"
+        );
+        assert!(store
+            .export_threats(now, 0.5)
+            .unwrap()
+            .iter()
+            .all(|(domain, ..)| domain != "calibrated-away.example"));
+        assert!(store
+            .gate_samples(10)
+            .unwrap()
+            .iter()
+            .all(|(domain, ..)| domain != "calibrated-away.example"));
+    }
+
+    /// Calibration is fitted on the assessment score, not on what the map in
+    /// force already made of it: a second map must not learn from the first.
+    #[test]
+    fn calibration_reads_the_score_before_the_map() {
+        let (_dir, store) = store();
+        store.observe("mapped.example").unwrap();
+        store
+            .save_verdicts(&[crate::store::NewVerdict {
+                domain: "mapped.example".to_string(),
+                channel: crate::store::Channel::Threat,
+                category: "phishing".to_string(),
+                severity: "threat".to_string(),
+                status: "classified".to_string(),
+                confidence: 0.9,
+                backend: "fasttext".to_string(),
+                evidence: "model, phishing at 0.9".to_string(),
+                threat_score: 0.9,
+                expires_after_secs: 3_600,
+            }])
+            .unwrap();
+        store
+            .save_assessment("mapped.example", "threat", Some(0.2), "cal-a", None, 0.9)
+            .unwrap();
+
+        assert_eq!(
+            store.gate_scores(10).unwrap(),
+            vec![("mapped.example".to_string(), 0.2)]
+        );
+        let assessment: Vec<(String, f32)> = store
+            .assessment_samples(10)
+            .unwrap()
+            .into_iter()
+            .map(|(domain, score, _)| (domain, score))
+            .collect();
+        assert_eq!(assessment, vec![("mapped.example".to_string(), 0.9)]);
     }
 
     #[test]

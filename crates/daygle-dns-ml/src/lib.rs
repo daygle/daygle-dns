@@ -39,10 +39,15 @@
 //!    snapshot until a fresh classification exists.
 
 pub mod age;
+pub mod assessment;
+pub mod authority;
 pub mod backend;
+pub mod calibration;
+pub mod candidate;
 pub mod channel;
 pub mod evidence;
 pub mod fasttext_backend;
+pub mod fusion;
 pub mod heuristic;
 pub mod intel;
 pub mod learn;
@@ -149,6 +154,27 @@ pub struct AiEngine {
     domain_age: Arc<age::DomainAge>,
     /// The language-model server's management side (models, downloads).
     llm: Arc<llm::LlmManager>,
+    install_model: ModelInstaller,
+}
+
+/// Loads a model path into both live channels: what a candidate promotion and a
+/// candidate rollback use to put the version's artifact in force.
+type ModelInstaller = Arc<dyn Fn(&Path) -> Result<()> + Send + Sync>;
+
+/// One verdict's structured evidence, for the console and the API.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SignalReport {
+    pub domain: String,
+    pub observations: Vec<assessment::SignalObservation>,
+    pub observed_at: i64,
+    pub confidence: f32,
+    pub threat_score: f32,
+    pub severity: String,
+    /// The fused view of the observations.
+    pub fusion: fusion::Fusion,
+    /// The calibrated score, when a calibration map is in force.
+    pub calibrated: Option<f32>,
+    pub calibration_version: String,
 }
 
 impl AiEngine {
@@ -260,7 +286,7 @@ impl AiEngine {
 
         // Every model that goes live - a promotion, a manual retrain or a
         // rollback - goes through these.
-        shared.retrainer.set_installer({
+        let install_model: ModelInstaller = {
             let settings = settings_swap.clone();
             let logs = logs.clone();
             let content_swap = content_swap.clone();
@@ -271,7 +297,7 @@ impl AiEngine {
             let reference = learned_reference.clone();
             let network = network.clone();
             let store = store.clone();
-            Box::new(move |path: &Path| {
+            Arc::new(move |path: &Path| {
                 let current = settings.load_full();
                 let file = path.to_string_lossy().into_owned();
                 // Build both before installing either, so a load failure
@@ -287,6 +313,10 @@ impl AiEngine {
                 active.store(path == learned, std::sync::atomic::Ordering::Relaxed);
                 Ok(())
             })
+        };
+        shared.retrainer.set_installer({
+            let install = install_model.clone();
+            Box::new(move |path: &Path| install(path))
         });
         // Rebuild the threat channel from the live threat model and the
         // current settings: a new verifier reference, or the verifier
@@ -353,6 +383,17 @@ impl AiEngine {
         );
         scanner.set_maintenance(maintenance.clone());
         scanner.set_page_model(page_model.clone());
+        scanner.set_intel(intel.clone());
+        // A promoted candidate is already in force at startup: its calibration
+        // map and signal weights are what the scanner applies from the first
+        // cycle. With no active candidate (every existing install) these stay
+        // the identity map and the default weights.
+        if let Ok(Some(map)) = store.active_calibration() {
+            scanner.set_calibration(Some(map));
+        }
+        if let Ok(Some(active)) = store.active_candidate() {
+            scanner.set_signal_weights(active.signal_weights.clone());
+        }
         let domain_age =
             age::DomainAge::new(store.clone(), daygle_dns_policy::rdap::IANA_BOOTSTRAP);
         scanner.set_domain_age(domain_age.clone());
@@ -378,6 +419,7 @@ impl AiEngine {
             page_model,
             domain_age,
             llm: llm::LlmManager::new(),
+            install_model,
         }))
     }
 
@@ -776,6 +818,383 @@ impl AiEngine {
     pub fn backend_categories(&self) -> Vec<String> {
         self.scanner.categories()
     }
+}
+
+impl AiEngine {
+    /// The structured observations behind one threat verdict, with the fused
+    /// view and the score the gate compares. Stored observations are returned
+    /// as they were recorded; a verdict from before observations existed has
+    /// them rebuilt from the sources available now, which the report marks
+    /// with its `observed_at`.
+    pub fn signal_report(&self, domain: &str) -> Result<Option<SignalReport>> {
+        let Some(row) = self.store.verdict(domain, "threat")? else {
+            return Ok(None);
+        };
+        let (observations, observed_at) = match self.store.observations(domain, "threat")? {
+            Some((at, observations)) => (observations, at),
+            None => {
+                let index = self.intel.index();
+                let now = chrono::Utc::now().timestamp();
+                (
+                    assessment::observe(
+                        &assessment::Context {
+                            store: &self.store,
+                            intel: &index,
+                        },
+                        &assessment::AssessmentInput {
+                            domain,
+                            threat_score: row.threat_score,
+                            confidence: row.confidence,
+                            severity: &row.severity,
+                            evidence: &row.evidence,
+                            page: None,
+                            now,
+                        },
+                    ),
+                    now,
+                )
+            }
+        };
+        // The version, not the value, says whether a map was in force: a map
+        // may legitimately calibrate a name to zero.
+        let (calibrated, calibration_version) = self
+            .store
+            .verdict_scores(domain, "threat")?
+            .map(|(score, version, _)| {
+                if version.is_empty() {
+                    (None, version)
+                } else {
+                    (Some(score), version)
+                }
+            })
+            .unwrap_or((None, String::new()));
+        Ok(Some(SignalReport {
+            domain: domain.to_string(),
+            fusion: fusion::fuse(&observations, &self.scanner.signal_weights()),
+            observations,
+            observed_at,
+            confidence: row.confidence,
+            threat_score: row.threat_score,
+            severity: row.severity,
+            calibrated,
+            calibration_version,
+        }))
+    }
+
+    /// The calibration map in force, the recorded candidates and the note
+    /// that an uncalibrated confidence is not a real-world probability.
+    pub fn calibration_status(&self) -> Result<serde_json::Value> {
+        let active = self.store.active_calibration()?;
+        let records = self.store.calibrations(50)?;
+        Ok(serde_json::json!({
+            "live_model": threshold::model_version(&self.live_model_path()),
+            "active": active.as_ref().map(calibration_json),
+            "calibration_active": active.is_some(),
+            "candidates": records
+                .iter()
+                .map(|record| serde_json::json!({
+                    "version": record.map.version,
+                    "method": calibration_method(record.map.method),
+                    "active": record.active,
+                    "created_at": record.created_at,
+                    "fitted_on": record.map.fitted_on,
+                    "source_model": record.map.source_model,
+                    "metrics": record.metrics,
+                }))
+                .collect::<Vec<_>>(),
+            "note": "until a calibration map is active, the score is an assessment score, not a calibrated probability",
+        }))
+    }
+
+    /// Fit a calibration map on the tuning split and evaluate it on the
+    /// held-out split. It is recorded only when it is no worse than the map in
+    /// force, and never activated: applying is a separate operator step.
+    pub fn fit_calibration(&self) -> Result<serde_json::Value> {
+        let settings = self.settings.load_full();
+        let index = self.intel.index();
+        let samples =
+            threshold::collect_for_calibration(&self.store, &index, &settings, THRESHOLD_SAMPLES)?;
+        let (mut tuning, mut holdout) = (Vec::new(), Vec::new());
+        for sample in &samples {
+            let Some(threat) = sample.threat else {
+                continue;
+            };
+            let labelled = calibration::Labelled {
+                score: sample.score,
+                threat,
+            };
+            if threshold::held_out(&sample.domain) {
+                holdout.push(labelled);
+            } else {
+                tuning.push(labelled);
+            }
+        }
+        let source_model = threshold::model_version(&self.live_model_path());
+        let Some(mut map) =
+            calibration::fit(&tuning, &source_model, chrono::Utc::now().timestamp())
+        else {
+            return Ok(serde_json::json!({
+                "fitted": false,
+                "accepted": false,
+                "reason": format!(
+                    "not enough labelled evidence to fit a calibration: {} tuning and {} held-out sample(s)",
+                    tuning.len(),
+                    holdout.len()
+                ),
+                "tuning_samples": tuning.len(),
+                "holdout_samples": holdout.len(),
+            }));
+        };
+        let metrics = calibration::evaluate(&holdout, &map);
+        let incumbent = self.store.active_calibration()?.and_then(|m| m.metrics);
+        let acceptance = calibration::accept(&metrics, incumbent.as_ref());
+        map.metrics = Some(metrics.clone());
+        let recorded = if acceptance.accepted {
+            self.store.save_calibration(&map, Some(&metrics))?
+        } else {
+            false
+        };
+        Ok(serde_json::json!({
+            "fitted": true,
+            "accepted": acceptance.accepted,
+            "recorded": recorded,
+            "reason": acceptance.reason,
+            "version": map.version,
+            "map": calibration_json(&map),
+            "tuning_samples": tuning.len(),
+            "holdout_samples": holdout.len(),
+        }))
+    }
+
+    /// Put a recorded calibration map in force. A map that scores worse than
+    /// the one in force on its held-out report is refused.
+    pub fn apply_calibration(&self, version: &str) -> Result<serde_json::Value> {
+        let records = self.store.calibrations(200)?;
+        let record = records
+            .into_iter()
+            .find(|record| record.map.version == version)
+            .ok_or_else(|| DaygleError::NotFound(format!("no calibration map {version}")))?;
+        // A map is fitted to one model's score distribution. A retrain after
+        // the fit replaces that distribution, so the held-out report no longer
+        // describes the scores the map would be applied to.
+        let live = threshold::model_version(&self.live_model_path());
+        if record.map.source_model != live {
+            return Err(DaygleError::Config(format!(
+                "that calibration map was fitted for {}, but the live model is {live}: fit it again",
+                record.map.source_model
+            )));
+        }
+        let Some(metrics) = record
+            .metrics
+            .clone()
+            .or_else(|| record.map.metrics.clone())
+        else {
+            return Err(DaygleError::Config(
+                "that calibration map has no held-out report, so it cannot be compared with the one in force"
+                    .to_string(),
+            ));
+        };
+        let incumbent = self.store.active_calibration()?.and_then(|m| m.metrics);
+        let acceptance = calibration::accept(&metrics, incumbent.as_ref());
+        if !acceptance.accepted {
+            return Err(DaygleError::Config(acceptance.reason));
+        }
+        self.store.activate_calibration(Some(version))?;
+        self.scanner.set_calibration(Some(record.map.clone()));
+        self.refresh_snapshot_now();
+        Ok(serde_json::json!({
+            "active": calibration_json(&record.map),
+            "reason": acceptance.reason,
+            "metrics": metrics,
+        }))
+    }
+
+    /// Go back to the uncalibrated score: the confidence the gate compared
+    /// before any map existed.
+    pub fn disable_calibration(&self) -> Result<serde_json::Value> {
+        self.store.activate_calibration(None)?;
+        self.scanner.set_calibration(None);
+        self.refresh_snapshot_now();
+        Ok(serde_json::json!({
+            "active": null,
+            "message": "calibration is off; the assessment score is compared directly, as before",
+        }))
+    }
+
+    /// Record the complete scoring system as it stands now as a candidate
+    /// version. Nothing is promoted.
+    pub fn snapshot_candidate(&self) -> Result<store::CandidateVersion> {
+        let settings = self.settings.load_full();
+        let calibration = self.store.active_calibration()?;
+        let validation = self
+            .store
+            .threshold_trials(1)?
+            .into_iter()
+            .next()
+            .map(|trial| trial.report)
+            .unwrap_or(serde_json::Value::Null);
+        let metrics = calibration.as_ref().and_then(|m| m.metrics.clone());
+        candidate::build(
+            &self.store,
+            &candidate::CandidateSpec {
+                model_path: self.live_model_path(),
+                block_threshold: settings.block_threshold,
+                calibration,
+                signal_weights: self.scanner.signal_weights(),
+                // The AI overlay shape, so a promotion can restore these
+                // fields through the same settings path the console uses.
+                scoring_config: serde_json::json!({
+                    "block_threshold": settings.block_threshold,
+                    "fusion": settings.fusion,
+                    "threshold_fpr_target": settings.threshold_fpr_target,
+                    "confidence_floor": settings.confidence_floor,
+                    "authority": settings.authority,
+                    "auto_block_categories": settings.auto_block_categories,
+                    "auto_block_removals": settings.auto_block_removals,
+                    "threat_labels": settings.threat_labels(),
+                }),
+                validation_report: validation,
+                metrics,
+            },
+        )
+    }
+
+    /// Every recorded candidate version, newest first.
+    pub fn candidates_status(&self) -> Result<serde_json::Value> {
+        let candidates = self.store.candidates(50)?;
+        Ok(serde_json::json!({
+            "active": candidates.iter().find(|c| c.is_active()).map(candidate_json),
+            "candidates": candidates.iter().map(candidate_json).collect::<Vec<_>>(),
+        }))
+    }
+
+    /// Activate a candidate as one version: its artifact is written back and
+    /// loaded, and its calibration and signal weights are published. The
+    /// caller publishes the candidate's threshold through the config path (the
+    /// engine does not own the configuration).
+    pub fn promote_candidate(&self, id: i64) -> Result<store::CandidateVersion> {
+        let Some(candidate) = self.store.candidate(id)? else {
+            return Err(DaygleError::NotFound(format!("no candidate version {id}")));
+        };
+        candidate::restore_artifact(&self.store, &candidate)?;
+        let promoted = self.store.promote_candidate(id)?;
+        if let Err(e) = (self.install_model)(Path::new(&promoted.model_path)) {
+            // Put the candidate state back: an artifact that did not load is
+            // not a version in force.
+            let _ = self.store.rollback_active_candidate();
+            let _ = candidate::restore_artifact(&self.store, &candidate);
+            return Err(e);
+        }
+        self.scanner
+            .set_signal_weights(promoted.signal_weights.clone());
+        let calibration = self.store.active_calibration()?;
+        self.scanner.set_calibration(calibration);
+        self.refresh_snapshot_now();
+        self.trigger_rescan();
+        Ok(promoted)
+    }
+
+    /// Restore the complete previous version: artifact bytes, threshold (the
+    /// caller publishes it), calibration and signal weights together.
+    pub fn rollback_candidate(&self) -> Result<Option<store::CandidateVersion>> {
+        let Some(restored) = self.store.rollback_active_candidate()? else {
+            return Ok(None);
+        };
+        candidate::restore_artifact(&self.store, &restored)?;
+        (self.install_model)(Path::new(&restored.model_path))?;
+        self.scanner
+            .set_signal_weights(restored.signal_weights.clone());
+        let calibration = self.store.active_calibration()?;
+        self.scanner.set_calibration(calibration);
+        self.refresh_snapshot_now();
+        self.trigger_rescan();
+        Ok(Some(restored))
+    }
+
+    /// Each source's graduated authority, its measured performance and the
+    /// stage in force.
+    pub fn authority_status(&self) -> Result<serde_json::Value> {
+        let settings = self.settings.load_full();
+        let decisions = authority::evaluate(&self.store, &settings.authority)?;
+        Ok(serde_json::json!({
+            "enabled": settings.authority.enabled,
+            "settings": {
+                "feed_stage": settings.authority.feed_stage.as_str(),
+                "model_stage": settings.authority.model_stage.as_str(),
+                "operator_stage": settings.authority.operator_stage.as_str(),
+                "max_new_blocks_per_refresh": settings.authority.max_new_blocks_per_refresh,
+                "safety_limit": crate::scanner::MAX_NEW_BLOCKS_PER_REFRESH,
+                "demote_fp_rate": settings.authority.demote_fp_rate,
+                "demote_min_samples": settings.authority.demote_min_samples,
+            },
+            "sources": decisions
+                .iter()
+                .map(|decision| serde_json::json!({
+                    "source": decision.source.as_str(),
+                    "configured": decision.configured.as_str(),
+                    "effective": decision.effective.as_str(),
+                    "false_positives": decision.false_positives,
+                    "true_positives": decision.true_positives,
+                    "demoted": decision.demoted,
+                    "reason": decision.reason,
+                }))
+                .collect::<Vec<_>>(),
+            "recorded": self
+                .store
+                .authority()?
+                .iter()
+                .map(|row| serde_json::json!({
+                    "source": row.source,
+                    "stage": row.stage,
+                    "false_positives": row.false_positives,
+                    "true_positives": row.true_positives,
+                    "demoted_at": row.demoted_at,
+                }))
+                .collect::<Vec<_>>(),
+            "note": "operator labels and overrides are never filtered or demoted by this",
+        }))
+    }
+}
+
+fn calibration_method(method: calibration::Method) -> &'static str {
+    match method {
+        calibration::Method::Identity => "identity",
+        calibration::Method::Isotonic => "isotonic",
+    }
+}
+
+fn calibration_json(map: &calibration::CalibrationMap) -> serde_json::Value {
+    serde_json::json!({
+        "version": map.version,
+        "method": calibration_method(map.method),
+        "points": map.points,
+        "source_model": map.source_model,
+        "fitted_on": map.fitted_on,
+        "fitted_at": map.fitted_at,
+        "metrics": map.metrics,
+    })
+}
+
+pub fn candidate_json(candidate: &store::CandidateVersion) -> serde_json::Value {
+    serde_json::json!({
+        "id": candidate.id,
+        "version": candidate.version,
+        "status": candidate.status,
+        "model_path": candidate.model_path,
+        "model_sha256": candidate.model_sha256,
+        "model_size": candidate.model_size,
+        "block_threshold": candidate.block_threshold,
+        "calibration_version": candidate.calibration_version,
+        "calibration": candidate.calibration.as_ref().map(calibration_json),
+        "signal_weights": candidate.signal_weights,
+        "scoring_config": candidate.scoring_config,
+        "validation_report": candidate.validation_report,
+        "metrics": candidate.metrics,
+        "superseded_id": candidate.superseded_id,
+        "created_at": candidate.created_at,
+        "promoted_at": candidate.promoted_at,
+        "rolled_back_at": candidate.rolled_back_at,
+    })
 }
 
 /// Whether going from `old` to `new` changes what is loaded at startup: a

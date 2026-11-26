@@ -50,6 +50,28 @@ const PATHS: &[(&str, &[Operation])] = &[
     ("/ai/threats", &[("get", "Ai threats")]),
     ("/ai/threats/export", &[("get", "Ai threats export")]),
     ("/ai/explain", &[("get", "Ai explain")]),
+    ("/ai/signals", &[("get", "Ai signals")]),
+    ("/ai/calibration", &[("get", "Ai calibration")]),
+    ("/ai/calibration/fit", &[("post", "Ai calibration fit")]),
+    ("/ai/calibration/apply", &[("post", "Ai calibration apply")]),
+    (
+        "/ai/calibration/disable",
+        &[("post", "Ai calibration disable")],
+    ),
+    ("/ai/candidates", &[("get", "Ai candidates")]),
+    (
+        "/ai/candidates/snapshot",
+        &[("post", "Ai candidate snapshot")],
+    ),
+    (
+        "/ai/candidates/promote",
+        &[("post", "Ai candidate promote")],
+    ),
+    (
+        "/ai/candidates/rollback",
+        &[("post", "Ai candidate rollback")],
+    ),
+    ("/ai/authority", &[("get", "Ai authority")]),
     ("/ai/corrections", &[("get", "Ai corrections")]),
     ("/ai/retrain", &[("post", "Ai retrain")]),
     ("/ai/rollback", &[("post", "Ai rollback")]),
@@ -3847,6 +3869,92 @@ fn ai_operation(path: &str, method: &str) -> Option<Value> {
                     "description": "No previous model is kept.",
                     "content": { "application/json": { "schema": error } }
                 })
+            }
+        })),
+        ("get", "/ai/signals") => Some(json!({
+            "parameters": [json!({"name": "domain", "in": "query", "required": true, "schema": {"type": "string"}})],
+            "responses": {
+                "200": json!({
+                    "description": "The structured signal observations behind one domain's threat verdict: each source with its direction, value, explanation, timestamp and hostname/registrable-domain scope, plus the fused view and the calibrated score."
+                }),
+                "400": error,
+                "404": ai_unavailable
+            }
+        })),
+        ("get", "/ai/calibration") => Some(json!({
+            "responses": {
+                "200": json!({
+                    "description": "The calibration map in force (or null), the recorded maps with their held-out Brier/ECE reports, and the live model identity."
+                }),
+                "404": ai_unavailable
+            }
+        })),
+        ("post", "/ai/calibration/fit") => Some(json!({
+            "responses": {
+                "200": json!({
+                    "description": "Fits an isotonic calibration on the tuning split and evaluates it on the held-out split. A map worse than the one in force is not recorded; a recorded map is never activated by fitting."
+                }),
+                "404": ai_unavailable
+            }
+        })),
+        ("post", "/ai/calibration/apply") => Some(json!({
+            "requestBody": json!({
+                "required": true,
+                "content": { "application/json": { "schema": json!({
+                    "type": "object",
+                    "required": ["version"],
+                    "properties": { "version": json!({"type": "string"}) }
+                }) } }
+            }),
+            "responses": {
+                "200": json!({"description": "The map is in force for new verdicts; its calibrated score is what the gate compares."}),
+                "404": ai_unavailable,
+                "409": json!({"description": "The map scores worse on its held-out report than the one in force.", "content": {"application/json": {"schema": error}}})
+            }
+        })),
+        ("post", "/ai/calibration/disable") => Some(json!({
+            "responses": {
+                "200": json!({"description": "Calibration is off; the assessment score is compared directly."}),
+                "404": ai_unavailable
+            }
+        })),
+        ("get", "/ai/candidates") => Some(json!({
+            "responses": {
+                "200": json!({"description": "Every candidate version (model hash, threshold, calibration, weights, scoring config, validation report) and the active one."}),
+                "404": ai_unavailable
+            }
+        })),
+        ("post", "/ai/candidates/snapshot") => Some(json!({
+            "responses": {
+                "200": json!({"description": "The current scoring system is recorded as a candidate version. Nothing is promoted."}),
+                "404": ai_unavailable
+            }
+        })),
+        ("post", "/ai/candidates/promote") => Some(json!({
+            "requestBody": json!({
+                "required": true,
+                "content": { "application/json": { "schema": json!({
+                    "type": "object",
+                    "required": ["id"],
+                    "properties": { "id": json!({"type": "integer"}) }
+                }) } }
+            }),
+            "responses": {
+                "200": json!({"description": "The candidate is active as one version: artifact restored and loaded, threshold published, calibration and weights in force."}),
+                "404": ai_unavailable
+            }
+        })),
+        ("post", "/ai/candidates/rollback") => Some(json!({
+            "responses": {
+                "200": json!({"description": "The complete previous version is restored: artifact bytes, threshold, calibration and weights."}),
+                "404": ai_unavailable,
+                "409": json!({"description": "There is no previous version.", "content": {"application/json": {"schema": error}}})
+            }
+        })),
+        ("get", "/ai/authority") => Some(json!({
+            "responses": {
+                "200": json!({"description": "Each evidence source's graduated authority stage, measured false-positive record and any demotion."}),
+                "404": ai_unavailable
             }
         })),
         ("get", "/ai/threshold") => Some(json!({

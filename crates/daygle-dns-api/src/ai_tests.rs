@@ -1211,3 +1211,149 @@ async fn language_model_settings_are_saved_and_bad_ones_refused() {
     assert_eq!(code, StatusCode::BAD_REQUEST, "{body}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn signals_report_every_structured_observation_behind_a_verdict() {
+    let dir = scratch_dir("signals");
+    let ai = engine(&dir);
+    ai.store.observe("bad-signal.example").unwrap();
+    ai.store
+        .save_verdicts(&[daygle_dns_ml::store::NewVerdict {
+            domain: "bad-signal.example".to_string(),
+            channel: Channel::Threat,
+            category: "phishing".to_string(),
+            severity: "threat".to_string(),
+            status: "classified".to_string(),
+            confidence: 0.97,
+            backend: "fasttext".to_string(),
+            evidence: "model, phishing at 0.97".to_string(),
+            threat_score: 0.97,
+            expires_after_secs: 3_600,
+        }])
+        .unwrap();
+    let state = AppState::for_tests(Some(ai));
+
+    let report = json(state.clone(), "/api/ai/signals?domain=bad-signal.example").await;
+    let sources: Vec<&str> = report["observations"]
+        .as_array()
+        .expect("observations")
+        .iter()
+        .map(|row| row["source"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        sources,
+        vec![
+            "model",
+            "verifier",
+            "feed",
+            "popularity",
+            "network_history",
+            "domain_age",
+            "hostname",
+            "page",
+            "llm"
+        ]
+    );
+    assert_eq!(report["observations"][0]["direction"], "threat");
+    assert_eq!(report["observations"][0]["scope"]["kind"], "hostname");
+    assert_eq!(
+        report["observations"][2]["scope"]["kind"],
+        "registered_domain"
+    );
+    assert_eq!(report["observations"][0]["family"], "name_model");
+    assert!(report["observations"][0]["observed_at"].as_i64().unwrap() > 0);
+    // Fusion is reported; with no calibration map the calibrated score is null
+    // and the gate keeps comparing the confidence.
+    assert!(report["fusion"]["score"].is_f64());
+    assert!(report["calibrated"].is_null());
+
+    let missing = call(
+        state,
+        "GET",
+        "/api/ai/signals?domain=never-seen.example",
+        None,
+    )
+    .await;
+    assert_eq!(missing.0, StatusCode::NOT_FOUND, "{}", missing.2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn calibration_is_identity_until_a_map_is_fitted_and_promoted() {
+    let dir = scratch_dir("calibration");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai));
+
+    let status = json(state.clone(), "/api/ai/calibration").await;
+    assert_eq!(status["calibration_active"], false);
+    assert!(status["active"].is_null());
+    assert!(status["note"]
+        .as_str()
+        .unwrap()
+        .contains("not a calibrated probability"));
+
+    // No labelled verdicts yet: fitting explains why nothing was fitted.
+    let fitted = call(state.clone(), "POST", "/api/ai/calibration/fit", None).await;
+    assert!(fitted.0.is_success(), "{}", fitted.2);
+    let body: serde_json::Value = serde_json::from_str(&fitted.2).unwrap();
+    assert_eq!(body["fitted"], false);
+    assert_eq!(body["accepted"], false);
+    assert!(body["reason"].as_str().unwrap().contains("not enough"));
+
+    // Applying a version that does not exist is a 404.
+    let applied = call(
+        state,
+        "POST",
+        "/api/ai/calibration/apply",
+        Some(serde_json::json!({"version": "cal-missing"})),
+    )
+    .await;
+    assert_eq!(applied.0, StatusCode::NOT_FOUND, "{}", applied.2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_candidate_is_snapshotted_promoted_and_restored_as_one_version() {
+    let dir = scratch_dir("candidates");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai));
+
+    let status = json(state.clone(), "/api/ai/status").await;
+    assert_eq!(status["fusion"], "monitor");
+    assert_eq!(status["calibrated"], false);
+    assert_eq!(status["authority"]["enabled"], false);
+
+    let created = call(state.clone(), "POST", "/api/ai/candidates/snapshot", None).await;
+    assert!(created.0.is_success(), "{}", created.2);
+    let created: serde_json::Value = serde_json::from_str(&created.2).unwrap();
+    let id = created["candidate"]["id"].as_i64().expect("a candidate id");
+    let version = created["candidate"]["version"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(created["candidate"]["status"], "candidate");
+    assert!(created["candidate"]["block_threshold"].as_f64().is_some());
+    assert!(created["candidate"]["signal_weights"]["model"]
+        .as_f64()
+        .is_some());
+
+    let listed = json(state.clone(), "/api/ai/candidates").await;
+    assert!(listed["active"].is_null());
+    assert_eq!(listed["candidates"][0]["version"], version);
+
+    let promoted = call(
+        state.clone(),
+        "POST",
+        "/api/ai/candidates/promote",
+        Some(serde_json::json!({"id": id})),
+    )
+    .await;
+    assert!(promoted.0.is_success(), "{}", promoted.2);
+    let listed = json(state.clone(), "/api/ai/candidates").await;
+    assert_eq!(listed["active"]["version"], version.as_str());
+
+    // The first version replaced nothing, so there is nothing to restore.
+    let rolled = call(state.clone(), "POST", "/api/ai/candidates/rollback", None).await;
+    assert_eq!(rolled.0, StatusCode::CONFLICT, "{}", rolled.2);
+    let _ = std::fs::remove_dir_all(&dir);
+}

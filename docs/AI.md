@@ -263,6 +263,53 @@ that trial replaced; that moves the threshold alone, so a model promoted
 since stays live, and the response names the model the trial was applied
 under so the two can be reverted together by hand if that is what is wanted.
 
+## Signals, calibration and versioned scoring
+
+Each threat verdict now carries **structured observations** as well as its
+sentence of evidence: one row per input - the model, the MiniLM verifier, the
+threat feed, the popular-sites list, this network's usage, the registration
+date, the name's shape, the page and the language model - with its direction,
+value (where it has one), explanation, timestamp and the hostname or
+registrable domain it applies to. `GET /api/ai/signals?domain=` returns them
+with the fused view (`/api/ai/explain` includes both too). They are recorded
+and explained; they decide nothing by themselves.
+
+**Signal fusion** (`ai.fusion`) is how those inputs are combined: the model
+sets the level, the verifier is the same reading of the name and is never
+counted twice, independent evidence moves the score by a bounded amount, and
+feed corroboration and popular/established disputes stay separate hard
+mechanisms exactly as before. `monitor` (the default) records the fused score
+beside the verdict without changing what blocks; `decide` makes it the
+assessment; `off` records observations only.
+
+**Calibration** maps the assessment score to a calibrated probability. A map
+is fitted with isotonic regression on one part of the labelled evidence and
+evaluated on a held-out part split by registrable domain, reporting Brier
+score, expected calibration error and a reliability table. A candidate map
+that scores worse than the one in force is refused. Nothing is applied until
+you apply it (`POST /api/ai/calibration/apply`), and until then the score is
+an assessment score, **not** a real-world probability. The calibrated score is
+the one the gate compares, the one a threshold trial fits, and the one the
+console and the exported threat list read.
+
+**Versioned candidates** (`/api/ai/candidates`) hold the whole scoring system
+as one version - the model artifact bytes and hash, the threshold, the
+calibration map, the signal weights, the scoring configuration and the
+validation report. Promoting one activates all of it; one rollback restores
+the complete previous version, artifact included, not just a model name.
+
+**Graduated authority** (`ai.authority`, off by default) decides which
+evidence may block: feed-confirmed findings can be enforced while model-only
+findings are only proposed, or the reverse. Findings at `monitor`/`propose`
+are recorded and listed but never reach the block snapshot, and a source whose
+measured false-positive share passes `demote_fp_rate` is demoted to `monitor`
+automatically. Operator labels and overrides are never filtered or demoted by
+it. The per-refresh limit on new blocks can be tightened here, never raised
+above its 500-domain ceiling.
+
+The audit and the exact migration, endpoint, test and limitation of each
+stage are in [AI_SCORING_AUDIT.md](AI_SCORING_AUDIT.md).
+
 ## Outside evidence
 
 The classifiers only see a domain's spelling. Two things the server knows

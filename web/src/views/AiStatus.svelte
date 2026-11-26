@@ -450,6 +450,44 @@
           <tr><td class="muted">Scans</td><td>Every {duration(status.scan_interval_secs)} · {status.workers} Worker{status.workers === 1 ? '' : 's'}</td></tr>
           <tr><td class="muted">Block Threshold</td><td>{percent(status.block_threshold)} Confidence</td></tr>
           <tr>
+            <td class="muted">Signal Fusion</td>
+            <td>
+              {titleCase(status.fusion || 'monitor')}
+              <span class="muted small">
+                {status.fusion === 'decide'
+                  ? '- the fused score is the assessment the gate compares'
+                  : status.fusion === 'off'
+                    ? '- observations recorded, nothing fused'
+                    : '- fused score recorded beside the verdict, not deciding'}
+              </span>
+            </td>
+          </tr>
+          <tr>
+            <td class="muted">Calibration</td>
+            <td>
+              {#if status.calibration_version}
+                <span class="pill ok">Active</span> {status.calibration_version}
+              {:else}
+                Identity
+                <span class="muted small">- the score is an assessment, not a calibrated probability</span>
+              {/if}
+            </td>
+          </tr>
+          <tr>
+            <td class="muted">Enforcement Authority</td>
+            <td>
+              {#if status.authority && status.authority.enabled}
+                Per source
+                <span class="muted small">
+                  (feed: {titleCase(status.authority.feed_stage)}, model: {titleCase(status.authority.model_stage)})
+                </span>
+              {:else}
+                Off
+                <span class="muted small">- the mode above decides what may block</span>
+              {/if}
+            </td>
+          </tr>
+          <tr>
             <td class="muted">Labels Treated as Threats</td>
             <td>
               {#each status.threat_labels || status.auto_block_categories || [] as c (c)}

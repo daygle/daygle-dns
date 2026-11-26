@@ -1391,6 +1391,117 @@ impl PageRule {
     }
 }
 
+/// How the structured signal observations are combined into a score.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FusionMode {
+    /// Record the observations only; the stored confidence is the score.
+    Off,
+    /// Compute and record the fused score beside the verdict, but keep the
+    /// existing confidence as the one the gate uses. The default while fusion
+    /// is evaluated.
+    #[default]
+    Monitor,
+    /// Use the fused score as the assessment the calibration layer maps and
+    /// the gate compares. An explicit operator choice.
+    Decide,
+}
+
+impl FusionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Monitor => "monitor",
+            Self::Decide => "decide",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" => Self::Off,
+            "monitor" | "record" => Self::Monitor,
+            "decide" | "enforce" => Self::Decide,
+            _ => return None,
+        })
+    }
+}
+
+/// How much enforcement authority findings from one source have.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthorityStage {
+    /// Recorded and shown; never reaches the block snapshot.
+    #[default]
+    Monitor,
+    /// Listed as a proposal for the operator; still does not block.
+    Propose,
+    /// May block, subject to every existing rail (threshold, verifier vetoes,
+    /// overrides, expiry, per-refresh limit and the global mode).
+    Enforce,
+}
+
+impl AuthorityStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Monitor => "monitor",
+            Self::Propose => "propose",
+            Self::Enforce => "enforce",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value.trim().to_ascii_lowercase().as_str() {
+            "monitor" | "record" => Self::Monitor,
+            "propose" | "suggest" => Self::Propose,
+            "enforce" | "block" => Self::Enforce,
+            _ => return None,
+        })
+    }
+}
+
+/// Graduated enforcement authority, per evidence source.
+///
+/// Off by default: with `enabled = false` the global `ai.mode` alone decides
+/// what may block, exactly as before. When enabled, each source's stage is
+/// applied on top of the existing rails - and a source whose measured
+/// false-positive share passes `demote_fp_rate` is demoted to `monitor`
+/// automatically. The operator's own labels and overrides are never filtered
+/// or demoted by this.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuthoritySettings {
+    pub enabled: bool,
+    /// Stage for findings a threat feed corroborated.
+    pub feed_stage: AuthorityStage,
+    /// Stage for findings only the model and its evidence produced.
+    pub model_stage: AuthorityStage,
+    /// The operator's own threat labels: their decision, so `enforce`.
+    pub operator_stage: AuthorityStage,
+    /// The per-refresh new-block cap while authority is enabled. The built-in
+    /// safety limit still applies as an upper bound.
+    pub max_new_blocks_per_refresh: u32,
+    /// False-positive share at which a source is demoted (0.0-1.0).
+    pub demote_fp_rate: f32,
+    /// Measured findings needed before a demotion is considered.
+    pub demote_min_samples: u32,
+}
+
+impl Default for AuthoritySettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            // A feed-confirmed finding starts with more authority than a
+            // model-only one, but only once the operator enables authority.
+            feed_stage: AuthorityStage::Enforce,
+            model_stage: AuthorityStage::Propose,
+            operator_stage: AuthorityStage::Enforce,
+            max_new_blocks_per_refresh: 500,
+            demote_fp_rate: 0.05,
+            demote_min_samples: 20,
+        }
+    }
+}
+
 /// AI scanner subsystem settings: a small CPU-only classifier runs in the
 /// background over domains observed in the query log and records verdicts
 /// (category, confidence, TTL). In `enforce` mode, fresh high-confidence
@@ -1441,6 +1552,15 @@ pub struct AiSettings {
     /// established domains and the operator's corrections during a trial.
     #[serde(default = "default_threshold_fpr_target")]
     pub threshold_fpr_target: f32,
+    /// How the structured signal observations are combined. `monitor`
+    /// records the fused score without changing what the gate compares;
+    /// `decide` uses it. See [`FusionMode`].
+    #[serde(default)]
+    pub fusion: FusionMode,
+    /// Which evidence sources may enforce what, and when that authority is
+    /// taken back. Off by default. See [`AuthoritySettings`].
+    #[serde(default)]
+    pub authority: AuthoritySettings,
     /// Threat-channel verdicts below this confidence are skipped entirely.
     /// A categorization floor would be the wrong setting here: this one is
     /// tuned for the precision auto-blocking needs.
@@ -1566,6 +1686,8 @@ impl Default for AiSettings {
             auto_block_removals: Vec::new(),
             block_threshold: 0.99,
             threshold_fpr_target: default_threshold_fpr_target(),
+            fusion: FusionMode::Monitor,
+            authority: AuthoritySettings::default(),
             confidence_floor: 0.2,
             category_confidence_floor: 0.2,
             category_ttl_secs: 90 * 86400,
@@ -2705,6 +2827,10 @@ pub struct AiUpdate {
     pub block_threshold: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threshold_fpr_target: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fusion: Option<FusionMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<AuthoritySettings>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence_floor: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2780,6 +2906,8 @@ impl AiUpdate {
             auto_block_removals: Some(settings.auto_block_removals.clone()),
             block_threshold: Some(settings.block_threshold),
             threshold_fpr_target: Some(settings.threshold_fpr_target),
+            fusion: Some(settings.fusion),
+            authority: Some(settings.authority.clone()),
             confidence_floor: Some(settings.confidence_floor),
             category_ttl_secs: Some(settings.category_ttl_secs),
             threat_ttl_secs: Some(settings.threat_ttl_secs),
@@ -2865,6 +2993,12 @@ impl AiUpdate {
         }
         if let Some(v) = self.threshold_fpr_target {
             ai.threshold_fpr_target = v.clamp(0.0, 0.5);
+        }
+        if let Some(v) = self.fusion {
+            ai.fusion = v;
+        }
+        if let Some(v) = &self.authority {
+            ai.authority = v.clone();
         }
         if let Some(v) = self.confidence_floor {
             ai.confidence_floor = v;
@@ -4467,6 +4601,26 @@ impl DaygleConfig {
         if !(0.0..ai.block_threshold).contains(&ai.confidence_floor) {
             return Err(DaygleError::Config(
                 "ai.confidence_floor must be < ai.block_threshold".to_string(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&ai.threshold_fpr_target) {
+            return Err(DaygleError::Config(
+                "ai.threshold_fpr_target must be in 0.0..=1.0".to_string(),
+            ));
+        }
+        if ai.authority.max_new_blocks_per_refresh < 1 {
+            return Err(DaygleError::Config(
+                "ai.authority.max_new_blocks_per_refresh must be >= 1".to_string(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&ai.authority.demote_fp_rate) {
+            return Err(DaygleError::Config(
+                "ai.authority.demote_fp_rate must be in 0.0..=1.0".to_string(),
+            ));
+        }
+        if ai.authority.demote_min_samples < 1 {
+            return Err(DaygleError::Config(
+                "ai.authority.demote_min_samples must be >= 1".to_string(),
             ));
         }
         if !(0.0..=1.0).contains(&ai.category_confidence_floor) {
