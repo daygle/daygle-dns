@@ -153,10 +153,10 @@ pub fn evaluate(store: &AiStore, settings: &AuthoritySettings) -> Result<Vec<Aut
 
 /// The decision for one block, or `None` when authority is off (the caller
 /// then keeps the pre-authority behaviour).
-pub fn decision_for<'a>(
-    decisions: &'a [AuthorityDecision],
+pub fn decision_for(
+    decisions: &[AuthorityDecision],
     source: Source,
-) -> Option<&'a AuthorityDecision> {
+) -> Option<&AuthorityDecision> {
     decisions.iter().find(|d| d.source == source)
 }
 

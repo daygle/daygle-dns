@@ -154,10 +154,12 @@ pub struct AiEngine {
     domain_age: Arc<age::DomainAge>,
     /// The language-model server's management side (models, downloads).
     llm: Arc<llm::LlmManager>,
-    /// Loads a model path into both live channels: what a candidate promotion
-    /// and a candidate rollback use to put the version's artifact in force.
-    install_model: Arc<dyn Fn(&Path) -> Result<()> + Send + Sync>,
+    install_model: ModelInstaller,
 }
+
+/// Loads a model path into both live channels: what a candidate promotion and a
+/// candidate rollback use to put the version's artifact in force.
+type ModelInstaller = Arc<dyn Fn(&Path) -> Result<()> + Send + Sync>;
 
 /// One verdict's structured evidence, for the console and the API.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -284,7 +286,7 @@ impl AiEngine {
 
         // Every model that goes live - a promotion, a manual retrain or a
         // rollback - goes through these.
-        let install_model: Arc<dyn Fn(&Path) -> Result<()> + Send + Sync> = {
+        let install_model: ModelInstaller = {
             let settings = settings_swap.clone();
             let logs = logs.clone();
             let content_swap = content_swap.clone();

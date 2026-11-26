@@ -438,11 +438,15 @@ mod tests {
     #[test]
     fn weights_must_be_bounded_fractions() {
         assert!(SignalWeights::default().is_sane());
-        let mut weights = SignalWeights::default();
-        weights.model = 2.0;
+        let weights = SignalWeights {
+            model: 2.0,
+            ..Default::default()
+        };
         assert!(!weights.is_sane());
-        let mut weights = SignalWeights::default();
-        weights.page = -0.1;
+        let weights = SignalWeights {
+            page: -0.1,
+            ..Default::default()
+        };
         assert!(!weights.is_sane());
     }
 }

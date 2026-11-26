@@ -289,9 +289,7 @@ pub fn fit(samples: &[Labelled], source_model: &str, now: i64) -> Option<Calibra
             blocks[index].positives += right.positives;
             blocks[index].count += right.count;
             // A merge can violate against the block before it: step back.
-            if index > 0 {
-                index -= 1;
-            }
+            index = index.saturating_sub(1);
         } else {
             index += 1;
         }
