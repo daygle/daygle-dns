@@ -36,8 +36,10 @@ pub struct ThresholdTrial {
     /// The live model's identity when the trial ran: `builtin`, or the model
     /// path with its stamp.
     pub model: String,
-    /// The threshold in force when the trial ran, and what a rollback of this
-    /// trial restores.
+    /// The threshold in force when the trial was last applied, and what a
+    /// rollback of this trial restores. A trial run against one threshold can
+    /// be applied later, after the threshold moved, so this is the one it
+    /// replaced rather than the one it was measured at.
     pub base_threshold: f32,
     /// The threshold the trial chose by false-positive rate.
     pub candidate: f32,
@@ -165,9 +167,12 @@ impl AiStore {
             .optional()?)
     }
 
-    /// Mark a trial applied. A threshold can only be in force once, so any
-    /// other trial still marked applied is rolled back onto its own base.
-    pub fn mark_threshold_applied(&self, id: i64) -> Result<bool> {
+    /// Mark a trial applied in place of `base`, the threshold it replaces.
+    /// Only one threshold can be in force, so any other trial still marked
+    /// applied is rolled back onto its own base. A trial that was rolled back
+    /// can be applied again: the console offers that, and refusing it would
+    /// leave a candidate that passed unreachable.
+    pub fn mark_threshold_applied(&self, id: i64, base: f32) -> Result<bool> {
         let conn = self.lock()?;
         let now = super::now_epoch();
         conn.execute(
@@ -177,9 +182,11 @@ impl AiStore {
             params![now, id],
         )?;
         let changed = conn.execute(
-            "UPDATE ai_threshold_trials SET applied_at = ?1, rolled_back_at = 0
-             WHERE id = ?2 AND applied_at = 0",
-            params![now, id],
+            "UPDATE ai_threshold_trials
+             SET applied_at = ?1, base_threshold = ?3, rolled_back_at = 0,
+                 restored_threshold = 0
+             WHERE id = ?2 AND (applied_at = 0 OR rolled_back_at > 0)",
+            params![now, id, base],
         )?;
         Ok(changed > 0)
     }
@@ -224,5 +231,75 @@ impl AiStore {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(collected)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store() -> (tempfile::TempDir, AiStore) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = AiStore::open(&dir.path().join("ai.db")).unwrap();
+        (dir, store)
+    }
+
+    fn trial(store: &AiStore, base: f32, candidate: f32) -> ThresholdTrial {
+        store
+            .save_threshold_trial(&NewThresholdTrial {
+                model: "builtin".to_string(),
+                base_threshold: base,
+                candidate,
+                fpr_target: 0.01,
+                passed: true,
+                report: "{}".to_string(),
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn a_rolled_back_trial_can_be_applied_again() {
+        let (_dir, store) = store();
+        let first = trial(&store, 0.99, 0.96);
+
+        assert!(store.mark_threshold_applied(first.id, 0.99).unwrap());
+        assert!(store.threshold_trial(first.id).unwrap().unwrap().in_force());
+        // Applying the one already in force is not a second application.
+        assert!(!store.mark_threshold_applied(first.id, 0.99).unwrap());
+
+        // Undo puts back the threshold the application replaced.
+        assert_eq!(
+            store.mark_threshold_rolled_back(first.id).unwrap(),
+            Some(0.99)
+        );
+        assert!(!store.threshold_trial(first.id).unwrap().unwrap().in_force());
+
+        // And it can go back in force, now replacing the 0.97 an operator set
+        // in between, so undoing it again returns there and not to 0.99.
+        assert!(store.mark_threshold_applied(first.id, 0.97).unwrap());
+        let in_force = store.threshold_trial(first.id).unwrap().unwrap();
+        assert!(in_force.in_force());
+        assert!((in_force.base_threshold - 0.97).abs() < 1e-6);
+        assert!((in_force.restored_threshold - 0.0).abs() < 1e-6);
+        assert_eq!(
+            store.mark_threshold_rolled_back(first.id).unwrap(),
+            Some(0.97)
+        );
+    }
+
+    #[test]
+    fn applying_one_trial_rolls_back_the_other() {
+        let (_dir, store) = store();
+        let first = trial(&store, 0.99, 0.96);
+        let second = trial(&store, 0.99, 0.93);
+
+        assert!(store.mark_threshold_applied(first.id, 0.99).unwrap());
+        assert!(store.mark_threshold_applied(second.id, 0.96).unwrap());
+
+        assert!(store.applied_threshold_trial().unwrap().unwrap().id == second.id);
+        let undone = store.threshold_trial(first.id).unwrap().unwrap();
+        assert!(!undone.in_force());
+        assert!((undone.restored_threshold - 0.99).abs() < 1e-6);
+        assert!(store.mark_threshold_rolled_back(first.id).unwrap().is_none());
     }
 }

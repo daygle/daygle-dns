@@ -946,7 +946,11 @@
   .check input { width: auto; }
   .nowrap { white-space: nowrap; }
   .tag { margin-left: 6px; }
-  .signals-cell { max-width: 240px; }
+  /* Wide enough for two or three chips a line: left to the table's own
+     layout the column collapsed and every chip took a row of its own. */
+  .signals-cell { min-width: 210px; max-width: 260px; }
   .signals-cell .tag { margin: 1px 3px 1px 0; }
+  dl.signals { display: grid; grid-template-columns: max-content 1fr; gap: 3px 10px; align-items: baseline; margin: 6px 0 8px; }
+  dl.signals dt, dl.signals dd { margin: 0; }
   .evidence { max-width: 200px; font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

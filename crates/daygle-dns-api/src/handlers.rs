@@ -2630,10 +2630,14 @@ pub async fn ai_threshold_apply(
             ),
         );
     }
+    // The threshold this application replaces is the one in force now (the
+    // trial's own recorded base may be older, if another trial moved it), and
+    // it is what undoing this trial must put back.
+    let base = ai.settings.load_full().block_threshold;
     let marked = run_blocking({
         let ai = ai.clone();
         let id = trial.id;
-        move || ai.store.mark_threshold_applied(id)
+        move || ai.store.mark_threshold_applied(id, base)
     })
     .await;
     match marked {
