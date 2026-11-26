@@ -774,10 +774,22 @@ impl<H: DnsHandle> DnssecDnsHandle<H> {
                 }
                 Err(e) if e.is_no_records_found() || e.is_nx_domain() => {}
                 Err(net) => {
-                    return Err(ProofError::new(
-                        Proof::Bogus,
-                        ProofErrorKind::Net { query, net },
-                    ));
+                    // The probe went to the servers of the zone below the cut, if there is
+                    // one, and their reply could not be had (a server that answers FORMERR to
+                    // every query carrying EDNS sends nothing that decodes). Whether a zone
+                    // is signed is decided at its parent, which publishes the DS record or
+                    // the signed proof that there is none, so ask it here as if this were a
+                    // cut. The DS answer is validated exactly as it is after a successful
+                    // probe, which an attacker can forge for any name, so nothing becomes
+                    // provable that was not already: a secure DS, or a proof that proves
+                    // nothing, keeps the answer from being called insecure.
+                    debug!(%ancestor, %net, "zone cut probe failed, asking the parent for its DS");
+                    match self.fetch_ds_records(ancestor.clone(), options).await {
+                        Ok(_) => return Ok(()),
+                        Err(e) if e.proof == Proof::Insecure => return Err(e),
+                        // Not a provable delegation (or not one at all): look further up.
+                        Err(_) => {}
+                    }
                 }
             }
 

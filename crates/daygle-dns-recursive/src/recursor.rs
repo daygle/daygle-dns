@@ -1204,6 +1204,13 @@ where
 /// for, from the top down, and the mark comes off when the validator proves
 /// one of them insecure. A name under a signed zone finds none and stays
 /// bogus, forged SOA answers included: those are bogus themselves.
+///
+/// The parent's DS record is no shortcut here, though [`has_no_ds`] uses it
+/// for denials: any name that is not a zone apex is answered "no DS" by the
+/// zone holding it (`www.isc.org` inside the signed `isc.org`), so a forged
+/// answer inside any signed zone would read as unsigned and be served. Only
+/// the NSEC or NSEC3 proving a delegation and no DS tells the two apart, and
+/// reading those is the validator's job, not this loop's.
 async fn clear_false_bogus<F, Fut>(resolve: &F, answers: &mut [Record])
 where
     F: Fn(Query) -> Fut,
@@ -1268,7 +1275,9 @@ where
 /// `zone` is the owner of the SOA that denied the name, so it is a zone apex
 /// (only one has an SOA), and only a NODATA answer counts: the name exists
 /// and has no DS. NXDOMAIN says nothing about a zone that does not exist at
-/// the parent, and a failure proves nothing at all.
+/// the parent, and a failure proves nothing at all. Both conditions matter:
+/// a DS question for any other name is answered "no DS" by the zone that
+/// holds it, signed or not (see [`clear_false_bogus`]).
 async fn has_no_ds<F, Fut>(resolve: &F, zone: &Name) -> bool
 where
     F: Fn(Query) -> Fut,
@@ -1430,6 +1439,9 @@ pub type SharedRecursor = Arc<arc_swap::ArcSwap<RecursorSlot>>;
 
 #[cfg(test)]
 mod hierarchy_tests;
+
+#[cfg(test)]
+mod validator_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1894,6 +1906,10 @@ mod tests {
             }
             (RecordType::DS, "test." | "signed.test." | "forged.signed.test.") => ds(&owner),
             (RecordType::DS, "plain.test." | "l.plain.test." | "broken.test.") => no_ds(&owner),
+            // A real signed zone answers the DS question for a name inside it
+            // with its own SOA, exactly like a parent answering for an
+            // unsigned delegation.
+            (RecordType::DS, "www.signed.test.") => no_ds(&owner),
             _ => Resolved::Negative(failure("no records", Some(ResponseCode::NoError)), None),
         }
     }
@@ -2070,6 +2086,19 @@ mod tests {
         ];
         clear_false_bogus(&apexes, &mut answers).await;
         assert!(answers.iter().all(|r| r.proof == Proof::Bogus));
+    }
+
+    /// A DS question for a name inside a signed zone is answered "no DS" by
+    /// that zone too, and only the delegation proof tells the two apart: a DS
+    /// NODATA at a name is not a sign of an unsigned zone. Taking it for one
+    /// would clear the mark on exactly the forged answer an attacker wants
+    /// served, so the mark stays. [`has_no_ds`] is only asked about the owner
+    /// of a denial's SOA for this reason.
+    #[tokio::test]
+    async fn a_ds_nodata_inside_a_signed_zone_does_not_clear_a_bogus_mark() {
+        let mut answers = vec![bogus_a("www.signed.test.")];
+        clear_false_bogus(&apexes, &mut answers).await;
+        assert_eq!(answers[0].proof, Proof::Bogus);
     }
 
     #[tokio::test]
