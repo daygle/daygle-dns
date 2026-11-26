@@ -64,7 +64,31 @@ All are worth offering upstream.
    `crates/daygle-dns-recursive/src/recursor/validator_tests.rs`, against a
    signed fake root.
 
-5. **No deprecation warnings on newer toolchains** (`hickory-resolver`
+5. **A glueless name server's addresses are cached** (`hickory-resolver`
+   `recursor/handle.rs`, `append_ips_from_lookup`). The A and AAAA lookups
+   for a zone's glueless name servers went straight to the name server
+   pool and their answers were not kept, though the delegation code reads
+   the cache for exactly those addresses. A provider's name servers serve
+   many zones, so each zone along a CNAME chain looked them up again:
+   `email-static.useinsider.com` crosses two Huawei Cloud CDN zones served
+   by `ns3`/`ns33.cdnhwc10.cn` and looked both up twice. The answers, only
+   the records asked for and their signatures, now go into the response
+   cache (and a "no records" answer too). Covered by
+   `a_shared_glueless_name_server_is_looked_up_once`.
+
+6. **A negative-cache floor applies to a plain NODATA only** (`hickory-resolver`
+   `cache.rs`). Daygle gives NS questions a five-minute floor on "no records"
+   answers (`ttl_config` in `crates/daygle-dns-recursive/src/recursor.rs`),
+   since zones such as Huawei Cloud's CDN ones keep them for 10 s and the walk
+   and the validator ask them over and over. The cache applied a floor to
+   every no-records error alike, which would also have kept an NXDOMAIN (some
+   servers wrongly send one for an empty non-terminal) and a referral (only
+   valid in the zone that sent it) for five minutes and stalled the next walk
+   through them. Those now keep their own TTL. Covered by
+   `an_ns_nodata_with_a_short_soa_minimum_is_not_asked_again` and the
+   `recursive_lame_servers` tests.
+
+7. **No deprecation warnings on newer toolchains** (`hickory-resolver`
    `name_server.rs`, `recursor/handle.rs`). Newer Rust renamed
    `fetch_update` to `try_update`; the two calls keep the old name, which
    still builds on the minimum supported Rust (1.95), under

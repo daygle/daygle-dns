@@ -1002,20 +1002,22 @@ impl<P: ConnectionProvider> RecursorDnsHandle<P> {
                 let query = Query::query(query_name.clone(), rec_type);
                 limits.try_charge_query(&query)?;
                 futures.push(Box::pin(
-                    pool.lookup(query, self.request_options)
+                    pool.lookup(query.clone(), self.request_options)
                         .into_future()
-                        .map(|(first, _rest)| first),
+                        .map(move |(first, _rest)| (query, first)),
                 ));
             }
         }
 
         let mut ttl = u32::MAX;
 
-        while let Some(next) = futures.next().await {
+        while let Some((query, next)) = futures.next().await {
             match next {
                 Some(Ok(response)) => {
                     debug!("append_ips_from_lookup: A or AAAA response: {response:?}");
-                    config.extend(response.into_message()
+                    let message = response.into_message();
+                    self.cache_name_server_addresses(&query, &message, request_time);
+                    config.extend(message
                         .answers
                         .into_iter()
                         .filter_map(|answer| {
@@ -1033,6 +1035,12 @@ impl<P: ConnectionProvider> RecursorDnsHandle<P> {
                         }).map(|ip| name_server_config(ip, &self.pool_context.opportunistic_encryption)));
                 }
                 Some(Err(e)) => {
+                    if let NetError::Dns(DnsError::NoRecordsFound(_)) = &e {
+                        // No address of this family: remembered as well, so the next zone
+                        // served by this name server does not ask again.
+                        self.response_cache
+                            .insert(query, Err(e.clone()), request_time);
+                    }
                     warn!("append_ips_from_lookup: resolution failed failed: {e}");
                 }
                 None => {
@@ -1043,6 +1051,39 @@ impl<P: ConnectionProvider> RecursorDnsHandle<P> {
 
         Ok((ttl, depth))
     }
+
+    /// Keep the addresses a glueless name server's lookup found, so the next zone served by the
+    /// same name server (a hosting provider's name servers serve many) finds them in the cache,
+    /// where the delegation code above already looks, instead of asking for them again. Only the
+    /// records the question asked for, and their signatures (the validator reads this cache too),
+    /// are kept: those are what the pool goes on to trust.
+    fn cache_name_server_addresses(&self, query: &Query, message: &Message, now: Instant) {
+        let mut addresses = Message::query();
+        addresses.add_query(query.clone());
+        addresses.add_answers(
+            message
+                .answers
+                .iter()
+                .filter(|r| r.name == *query.name() && covers(r, query.query_type()))
+                .cloned(),
+        );
+        if !addresses.answers.is_empty() {
+            self.response_cache
+                .insert(query.clone(), Ok(addresses), now);
+        }
+    }
+}
+
+/// Whether `record` is of `record_type`, or a signature over records of it.
+fn covers(record: &Record, record_type: RecordType) -> bool {
+    if record.record_type() == record_type {
+        return true;
+    }
+    #[cfg(feature = "__dnssec")]
+    if let RData::DNSSEC(DNSSECRData::RRSIG(sig)) = &record.data {
+        return sig.input().type_covered == record_type;
+    }
+    false
 }
 
 pub(crate) struct RequestLimits {

@@ -462,3 +462,107 @@ async fn a_long_name_is_walked_in_at_most_ten_probes() {
         "the walk ends at the full name\n{trace:#?}"
     );
 }
+
+/// Two zones served by the same glueless name server, chained by a CNAME:
+/// the server's address is looked up for the first zone and found in the
+/// cache for the second. `email-static.useinsider.com` passes through two
+/// Huawei Cloud CDN zones that share `ns3`/`ns33.cdnhwc10.cn`, and looked
+/// both addresses up twice, a second each, in a lookup that took 15 s.
+#[tokio::test]
+async fn a_shared_glueless_name_server_is_looked_up_once() {
+    const DNS: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 4);
+    const CDN: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 5);
+    let port = spawn_hierarchy(vec![
+        root(),
+        tld(vec![
+            ("dns.test.", vec![("ns.dns.test.", Some(DNS))]),
+            ("one.test.", vec![("cdn.dns.test.", None)]),
+            ("two.test.", vec![("cdn.dns.test.", None)]),
+        ]),
+        authority(DNS, "dns.test.", vec![a("cdn.dns.test.", CDN)], Vec::new()),
+        (
+            CDN,
+            Arc::new(|query: &Query| match owner(query).as_str() {
+                "www.one.test." => answer(vec![cname("www.one.test.", "www.two.test.")]),
+                "www.two.test." if query.query_type() == RecordType::A => {
+                    answer(vec![a("www.two.test.", Ipv4Addr::new(198, 51, 100, 9))])
+                }
+                _ => answer(Vec::new()),
+            }),
+        ),
+    ])
+    .await;
+
+    let (result, trace) = resolve(&settings(port, false), "www.one.test.").await;
+    assert_eq!(
+        answer_ips(&result),
+        ["198.51.100.9"],
+        "{result:?}\n{trace:#?}"
+    );
+    assert_eq!(
+        asked(&trace, "cdn.dns.test.", "A").len(),
+        1,
+        "the shared name server's address was looked up once\n{trace:#?}"
+    );
+}
+
+/// An NS question answered "no records" by a zone whose SOA allows only a
+/// second of negative caching is still remembered for the next lookup:
+/// every name on the way down that is not a zone cut gets that answer, and
+/// Huawei Cloud's CDN zones (SOA minimum 10 s) had the same questions asked
+/// again within one lookup of `email-static.useinsider.com`.
+#[tokio::test]
+async fn an_ns_nodata_with_a_short_soa_minimum_is_not_asked_again() {
+    use hickory_proto::rr::rdata::SOA;
+
+    const CDN: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 4);
+    let port = spawn_hierarchy(vec![
+        root(),
+        tld(vec![("cdn.test.", vec![("ns.cdn.test.", Some(CDN))])]),
+        (
+            CDN,
+            Arc::new(|query: &Query| {
+                let owner = owner(query);
+                if query.query_type() == RecordType::A && owner.ends_with(".edge.cdn.test.") {
+                    return answer(vec![a(&owner, Ipv4Addr::new(198, 51, 100, 11))]);
+                }
+                // No data, with an SOA whose minimum is one second.
+                let mut message = Message::query();
+                message.metadata.authoritative = true;
+                message.add_authority(Record::from_rdata(
+                    name("cdn.test."),
+                    1,
+                    RData::SOA(SOA::new(
+                        name("ns.cdn.test."),
+                        name("hostmaster.cdn.test."),
+                        1,
+                        3600,
+                        600,
+                        86400,
+                        1,
+                    )),
+                ));
+                Reply::Message(message)
+            }),
+        ),
+    ])
+    .await;
+
+    let settings = settings(port, false);
+    let recursor = build(&settings, None, Arc::new(Metrics::default())).expect("a recursor");
+    let slot = RecursorSlot::new(recursor, None, &settings);
+    let (first, trace) =
+        trace_queries(lookup(&slot, name("a.edge.cdn.test."), RecordType::A)).await;
+    assert!(first.is_ok(), "{first:?}\n{trace:#?}");
+    assert_eq!(asked(&trace, "edge.cdn.test.", "NS").len(), 1, "{trace:#?}");
+
+    // Past the zone's own one second.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let (second, trace) =
+        trace_queries(lookup(&slot, name("b.edge.cdn.test."), RecordType::A)).await;
+    assert!(second.is_ok(), "{second:?}\n{trace:#?}");
+    assert!(
+        asked(&trace, "edge.cdn.test.", "NS").is_empty(),
+        "the NODATA for edge.cdn.test. NS came from the cache\n{trace:#?}"
+    );
+}
