@@ -1026,6 +1026,12 @@ where
 /// one can be signed. The load balancer serving `wip.accv.es` sends its
 /// "no AAAA records" without an SOA, which the validator cannot prove, so
 /// `www.accv.es AAAA` was SERVFAIL though `accv.es` is unsigned.
+///
+/// Both checks above ask the zone's own servers (the validator finds the
+/// zone cut and asks them for their NS records, and [`in_unsigned_zone`]
+/// asks them for the zone's SOA), so a zone whose servers answer nothing
+/// this resolver can read is never proved insecure that way. Its parent is
+/// asked instead: see [`has_no_ds`].
 async fn insecure_denial<F, Fut>(resolve: &F, name: &Name, denial: Option<Denial>) -> Option<Denial>
 where
     F: Fn(Query) -> Fut,
@@ -1037,7 +1043,15 @@ where
         Some(soa) => soa.name.clone(),
         None => name.clone(),
     };
-    in_unsigned_zone(resolve, &zone).await.then_some(denial)
+    if in_unsigned_zone(resolve, &zone).await {
+        return Some(denial);
+    }
+    // The zone's servers may be unreadable, but its parent has the last word
+    // on whether it is signed: a zone with no DS record is unsigned.
+    if denial.soa.is_some() && has_no_ds(resolve, &zone).await {
+        return Some(denial);
+    }
+    None
 }
 
 async fn resolve_one(
@@ -1236,6 +1250,46 @@ where
         }
     }
     false
+}
+
+/// Whether the zone's parent answers that the zone has no DS record, which
+/// proves the zone unsigned (RFC 4035 section 5.2) without asking the zone's
+/// own servers anything.
+///
+/// The validator finds the zone cut by asking the zone's servers for their NS
+/// records, and [`in_unsigned_zone`] asks them for the zone's SOA. A zone
+/// whose servers answer with something this resolver cannot read defeats
+/// both: `ptsecurity.com`'s servers answer FORMERR to every query carrying
+/// EDNS, so no reply from them decodes, and `rules.ptsecurity.com AAAA` (a
+/// name in an unsigned zone with no AAAA records) was SERVFAIL in 90 ms
+/// although the `com` NSEC3 proves the zone has no DS. The DS record lives at
+/// the parent, which answers it.
+///
+/// `zone` is the owner of the SOA that denied the name, so it is a zone apex
+/// (only one has an SOA), and only a NODATA answer counts: the name exists
+/// and has no DS. NXDOMAIN says nothing about a zone that does not exist at
+/// the parent, and a failure proves nothing at all.
+async fn has_no_ds<F, Fut>(resolve: &F, zone: &Name) -> bool
+where
+    F: Fn(Query) -> Fut,
+    Fut: Future<Output = Resolved>,
+{
+    let Resolved::Negative(error, soa) = resolve(Query::query(zone.clone(), RecordType::DS)).await
+    else {
+        return false;
+    };
+    if !matches!(
+        &error,
+        DaygleError::Resolution { response_code, .. }
+            if *response_code == Some(ResponseCode::NoError.into())
+    ) {
+        return false;
+    }
+    // The SOA must name an enclosing zone, not the zone itself: a server that
+    // answers the DS question for its own zone sends the validator round in a
+    // circle (see [`clear_false_bogus`]) and proves nothing.
+    soa.as_ref()
+        .is_some_and(|soa| soa.name != *zone && soa.name.zone_of(zone))
 }
 
 /// A [`Lookup`] of `answers`, with the other sections of `message`.
@@ -1794,15 +1848,52 @@ mod tests {
         answer(vec![record])
     }
 
+    /// A DS record, as the parent of a signed zone publishes it.
+    fn ds(zone: &str) -> Resolved {
+        answer(vec![Record::from_rdata(
+            name(zone),
+            300,
+            RData::DNSSEC(hickory_proto::dnssec::rdata::DNSSECRData::DS(
+                hickory_proto::dnssec::rdata::DS::new(
+                    1234,
+                    hickory_proto::dnssec::Algorithm::ECDSAP256SHA256,
+                    hickory_proto::dnssec::DigestType::SHA256,
+                    vec![0xab; 32],
+                ),
+            )),
+        )])
+    }
+
+    /// The parent's answer that a zone has no DS record: a NODATA carrying
+    /// the parent's SOA.
+    fn no_ds(zone: &str) -> Resolved {
+        let parent = name(zone).base_name().to_ascii();
+        let Resolved::Answer(message) = soa(&parent, Proof::Secure) else {
+            unreachable!()
+        };
+        Resolved::Negative(
+            failure("no records", Some(ResponseCode::NoError)),
+            Some(message.answers[0].clone()),
+        )
+    }
+
     /// `test.` and `signed.test.` are signed; `plain.test.` is not, and its
     /// delegated `l.plain.test.` cannot be proven either way. An SOA forged
-    /// under the signed zone comes back bogus.
+    /// under the signed zone comes back bogus. `broken.test.` is unsigned as
+    /// well, but its own servers answer with something this resolver cannot
+    /// read (as `ptsecurity.com`'s do), so only its parent can say so: the
+    /// parent has a DS for the signed zones, none for the unsigned ones.
     async fn apexes(query: Query) -> Resolved {
-        assert_eq!(query.query_type(), RecordType::SOA);
-        match query.name().to_ascii().as_str() {
-            "test." | "signed.test." => soa(&query.name().to_ascii(), Proof::Secure),
-            "plain.test." => soa("plain.test.", Proof::Insecure),
-            "l.plain.test." | "forged.signed.test." => soa(&query.name().to_ascii(), Proof::Bogus),
+        let owner = query.name().to_ascii();
+        match (query.query_type(), owner.as_str()) {
+            (RecordType::SOA, "test." | "signed.test.") => soa(&owner, Proof::Secure),
+            (RecordType::SOA, "plain.test.") => soa("plain.test.", Proof::Insecure),
+            (RecordType::SOA, "l.plain.test." | "forged.signed.test.") => soa(&owner, Proof::Bogus),
+            (RecordType::SOA, "broken.test.") => {
+                Resolved::Failed(failure("unreadable reply", None))
+            }
+            (RecordType::DS, "test." | "signed.test." | "forged.signed.test.") => ds(&owner),
+            (RecordType::DS, "plain.test." | "l.plain.test." | "broken.test.") => no_ds(&owner),
             _ => Resolved::Negative(failure("no records", Some(ResponseCode::NoError)), None),
         }
     }
@@ -1865,6 +1956,52 @@ mod tests {
     #[tokio::test]
     async fn an_unsigned_soa_for_another_name_does_not_excuse_a_denial() {
         let result = settle("www.signed.test.", RecordType::HTTPS, "plain.test.").await;
+        assert_eq!(code(result), ("bogus".to_string(), None));
+    }
+
+    /// A zone whose own servers answer with something the resolver cannot
+    /// read cannot be proved unsigned by asking them, which is what both the
+    /// validator's zone-cut probe and [`in_unsigned_zone`] do. Its parent
+    /// still can: a zone the parent has no DS for is unsigned (RFC 4035
+    /// section 5.2).
+    ///
+    /// `rules.ptsecurity.com AAAA` was SERVFAIL in 90 ms for this, while
+    /// validating resolvers answer NODATA: `ptsecurity.com` is unsigned (the
+    /// `.com` NSEC3 proves no DS), but both of its servers answer FORMERR to
+    /// every query carrying EDNS, so the recursor's reply to the zone-cut and
+    /// SOA questions cannot be decoded.
+    #[tokio::test]
+    async fn a_denial_from_a_zone_whose_servers_cannot_be_probed_is_no_data() {
+        // `apexes` is the fake whose zones have parents: `settle`'s mere
+        // `zones` answers every DS question without an SOA, which proves
+        // nothing (see `has_no_ds`).
+        let result = settle_unproven(
+            &apexes,
+            name("rules.broken.test."),
+            RecordType::AAAA,
+            failure("bogus", None),
+            Some(denial("broken.test.")),
+        )
+        .await;
+        assert_eq!(
+            code(result),
+            ("no records".to_string(), Some(ResponseCode::NoError.into()))
+        );
+    }
+
+    /// The same unreadable zone, but with a DS record at its parent: it is
+    /// signed, so its denial stays unproven. The parent's answer is what
+    /// decides, not the zone's servers being reachable.
+    #[tokio::test]
+    async fn a_denial_from_a_signed_zone_whose_servers_cannot_be_probed_stays_unproven() {
+        let result = settle_unproven(
+            &apexes,
+            name("rules.forged.signed.test."),
+            RecordType::AAAA,
+            failure("bogus", None),
+            Some(denial("forged.signed.test.")),
+        )
+        .await;
         assert_eq!(code(result), ("bogus".to_string(), None));
     }
 
