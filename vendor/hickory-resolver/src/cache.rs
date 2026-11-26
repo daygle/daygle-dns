@@ -76,16 +76,18 @@ impl ResponseCache {
                     .ttl_config
                     .negative_response_ttl_bounds(query.query_type())
                     .into_inner();
-                // A floor is for a plain NODATA only: the name exists, has no records of this
-                // type, and the zone's SOA says so. An NXDOMAIN keeps the zone's own TTL (some
-                // servers wrongly answer it for an empty non-terminal on the way down to a zone
-                // cut, and the recursor then probes the full name instead, which a lengthened
-                // NXDOMAIN above it would deny), and so does a referral, which comes back as no
-                // records with the delegation attached and is only valid in the zone it came from.
+                // For NS questions, the ones the recursor walks down to a zone cut with, a floor
+                // is for a plain NODATA only: the name exists, has no NS records, and the zone's
+                // SOA says so. An NXDOMAIN keeps the zone's own TTL (some servers wrongly answer
+                // it for an empty non-terminal on the way down, and the recursor then probes the
+                // full name instead, which a lengthened NXDOMAIN above it would deny), and so does
+                // a referral, which comes back as no records with the delegation attached and is
+                // only valid in the zone it came from. Other questions keep the configured floor
+                // as it is.
                 let nodata = no_records.response_code == ResponseCode::NoError
                     && no_records.soa.is_some()
                     && no_records.ns.is_none();
-                if !nodata {
+                if query.query_type() == RecordType::NS && !nodata {
                     negative_min_ttl = Duration::ZERO;
                 }
                 let ttl = if let Some(ttl) = no_records.negative_ttl {

@@ -76,7 +76,7 @@ All are worth offering upstream.
    cache (and a "no records" answer too). Covered by
    `a_shared_glueless_name_server_is_looked_up_once`.
 
-6. **A negative-cache floor applies to a plain NODATA only** (`hickory-resolver`
+6. **A negative-cache floor on NS questions applies to a plain NODATA only** (`hickory-resolver`
    `cache.rs`). Daygle gives NS questions a five-minute floor on "no records"
    answers (`ttl_config` in `crates/daygle-dns-recursive/src/recursor.rs`),
    since zones such as Huawei Cloud's CDN ones keep them for 10 s and the walk
@@ -84,7 +84,8 @@ All are worth offering upstream.
    every no-records error alike, which would also have kept an NXDOMAIN (some
    servers wrongly send one for an empty non-terminal) and a referral (only
    valid in the zone that sent it) for five minutes and stalled the next walk
-   through them. Those now keep their own TTL. Covered by
+   through them. For NS questions those now keep their own TTL; other
+   questions keep any configured floor as before. Covered by
    `an_ns_nodata_with_a_short_soa_minimum_is_not_asked_again` and the
    `recursive_lame_servers` tests.
 
