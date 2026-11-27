@@ -178,6 +178,31 @@ impl Fusion {
 /// Fuse a verdict's observations. Observations are expected once per source,
 /// as [`crate::assessment::observe`] produces them.
 pub fn fuse(observations: &[SignalObservation], weights: &SignalWeights) -> Fusion {
+    fuse_with_page_base(observations, weights, None)
+}
+
+/// Evaluate an independent finding with a page-qualified base, where weaker
+/// name evidence cannot cause the same page to be counted again as a boost.
+pub(crate) fn fuse_page_discovery(
+    observations: &[SignalObservation],
+    weights: &SignalWeights,
+    page: SignalObservation,
+) -> Fusion {
+    let mut independent: Vec<_> = observations
+        .iter()
+        .filter(|o| !matches!(o.source, SignalSource::Page | SignalSource::Llm))
+        .cloned()
+        .collect();
+    let page_value = page.value;
+    independent.push(page);
+    fuse_with_page_base(&independent, weights, page_value)
+}
+
+fn fuse_with_page_base(
+    observations: &[SignalObservation],
+    weights: &SignalWeights,
+    page_base: Option<f32>,
+) -> Fusion {
     let model = observations
         .iter()
         .find(|o| o.source == SignalSource::Model);
@@ -192,6 +217,19 @@ pub fn fuse(observations: &[SignalObservation], weights: &SignalWeights) -> Fusi
 
     let mut contributions = Vec::new();
     let mut score = base;
+    if let Some(page_value) = page_base {
+        let page_value = page_value.clamp(0.0, 1.0);
+        score = score.max(page_value);
+        if let Some(page) = observations.iter().find(|o| o.source == SignalSource::Page) {
+            contributions.push(Contribution {
+                source: SignalSource::Page,
+                family: EvidenceFamily::Independent,
+                delta: score - base,
+                correlated: false,
+                explanation: page.explanation.clone(),
+            });
+        }
+    }
 
     // Family one: the name reading. The verifier adjusts the base by its own
     // small weight; it never becomes a second base.
@@ -220,7 +258,9 @@ pub fn fuse(observations: &[SignalObservation], weights: &SignalWeights) -> Fusi
     let mut independent_raw = 0.0f32;
     let mut hard = Vec::new();
     for observation in observations {
-        if observation.source.family() != EvidenceFamily::Independent {
+        if observation.source.family() != EvidenceFamily::Independent
+            || (page_base.is_some() && observation.source == SignalSource::Page)
+        {
             continue;
         }
         let sign = observation.direction.sign();

@@ -37,6 +37,8 @@ use crate::store::{AiStore, NewVerdict};
 pub struct ActiveBlock {
     pub category: String,
     pub expires_at: i64,
+    /// Page findings apply only to the inspected hostname.
+    pub exact_host: bool,
 }
 
 /// Longest the language-model stage may run in one scan cycle.
@@ -443,6 +445,10 @@ impl Scanner {
                 "AI read {read} page(s) of domains it was unsure how to categorize; {set} categorized from their page"
             )),
             Err(e) => self.log_warn(format!("AI category page stage failed: {e}")),
+        }
+
+        if let Err(e) = self.page_discovery_stage(&cfg, deadline) {
+            self.log_warn(format!("AI page discovery failed: {e}"));
         }
 
         // 7. The language model, when one is configured: it reads pages the
@@ -860,6 +866,55 @@ impl Scanner {
         Ok((readings.len(), set))
     }
 
+    fn page_discovery_stage(&self, cfg: &AiSettings, deadline: std::time::Instant) -> Result<()> {
+        if !cfg.fetch_pages || !cfg.monitor_page_discovery || std::time::Instant::now() >= deadline
+        {
+            return Ok(());
+        }
+        let limit = crate::page::workers().min(cfg.page_candidates_per_scan as usize);
+        let now = Utc::now().timestamp();
+        let exemptions = self.store.allow_overrides()?;
+        let candidates = self.store.page_discovery_candidates(
+            now,
+            cfg.confidence_floor,
+            cfg.max_domains_per_scan as usize,
+        )?;
+        let live = crate::page::PageFetcher::new(
+            std::time::Duration::from_secs(cfg.page_fetch_timeout_secs.clamp(1, 30)),
+            cfg.page_fetch_max_bytes.clamp(16 * 1024, 2 * 1024 * 1024) as usize,
+        );
+        let reader: &dyn crate::page::PageReader = self
+            .page_reader
+            .get()
+            .map_or(&live as &dyn crate::page::PageReader, |reader| {
+                reader.as_ref()
+            });
+        let readings = std::thread::scope(|scope| {
+            let handles: Vec<_> = candidates
+                .into_iter()
+                .filter(|domain| !exempt(domain, &exemptions))
+                .take(limit)
+                .take_while(|_| std::time::Instant::now() < deadline)
+                .map(|domain| {
+                    scope.spawn(move || {
+                        let reading =
+                            reader.inspect_for_discovery(&domain, cfg.page_confidence_floor);
+                        (domain, reading)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .filter_map(|handle| handle.join().ok())
+                .collect::<Vec<_>>()
+        });
+        for (domain, reading) in readings {
+            self.store
+                .save_page_discovery(&domain, &reading, Utc::now().timestamp())?;
+        }
+        Ok(())
+    }
+
     /// Fetch and read the page behind each new threat candidate, recording
     /// what it says. `ai.page_rule` decides whether the reading may move the
     /// verdict's confidence; with the default `evidence` it never does.
@@ -1118,6 +1173,7 @@ impl Scanner {
                     ActiveBlock {
                         category: candidate.category,
                         expires_at: candidate.expires_at,
+                        exact_host: false,
                     },
                 );
             }
@@ -1132,6 +1188,74 @@ impl Scanner {
                     ActiveBlock {
                         category,
                         expires_at: i64::MAX,
+                        exact_host: false,
+                    },
+                );
+            }
+        }
+        // Page findings go through the same snapshot, cap and exemptions as
+        // model findings. Graduated authority treats them as automated findings.
+        let automated_may_block = !cfg.authority.enabled
+            || crate::authority::decision_for(&decisions, crate::authority::Source::Model)
+                .is_some_and(|decision| decision.may_block());
+        if let Some(intel) = self.intel.get().filter(|_| {
+            cfg.mode == AiMode::Enforce
+                && cfg.fetch_pages
+                && cfg.monitor_page_discovery
+                && cfg.enforce_page_discovery
+                && cfg.page_rule != daygle_dns_core::config::PageRule::Evidence
+                && cfg.is_auto_block_category("phishing")
+                && automated_may_block
+                && self.settings.load().enforce_page_discovery
+        }) {
+            let intel = intel.index();
+            let calibration = self.calibration.load_full();
+            let weights = self.weights.load_full();
+            for (domain, expires_at) in
+                self.store.page_discovery_blocks(now, cfg.block_threshold)?
+            {
+                if eligible.contains_key(&domain)
+                    || exempt(&domain, overrides)
+                    || intel.is_popular(&domain)
+                    || self
+                        .store
+                        .sighting(&domain)?
+                        .is_some_and(|s| s.established())
+                {
+                    continue;
+                }
+                let Some(page) = self
+                    .store
+                    .page_discovery(&domain, now)?
+                    .and_then(|report| report.observation())
+                else {
+                    continue;
+                };
+                let confidence = page.value.unwrap_or_default();
+                let observations = self
+                    .store
+                    .observations(&domain, "threat")?
+                    .map_or_else(Vec::new, |(_, observations)| observations);
+                let fused = fusion::fuse_page_discovery(&observations, &weights, page);
+                let gate = assessment::score_of_record(
+                    cfg.fusion,
+                    confidence,
+                    Some(&fused),
+                    calibration.as_ref().as_ref(),
+                );
+                if gate.gate().min(confidence)
+                    < cfg
+                        .block_threshold
+                        .max(crate::page::DISCOVERY_ENFORCEMENT_FLOOR)
+                {
+                    continue;
+                }
+                eligible.insert(
+                    domain,
+                    ActiveBlock {
+                        category: "phishing".to_string(),
+                        expires_at,
+                        exact_host: true,
                     },
                 );
             }
@@ -1177,7 +1301,7 @@ impl Scanner {
             );
         }
         for (domain, block) in blocks {
-            if relabels.contains_key(domain) {
+            if block.exact_host || relabels.contains_key(domain) {
                 continue;
             }
             snapshot.insert(

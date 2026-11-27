@@ -1591,6 +1591,19 @@ fn not_a_threat_corrections_are_learned_only_when_enabled() {
 struct FixedReader;
 
 impl daygle_dns_ml::page::PageReader for FixedReader {
+    fn inspect_for_discovery(
+        &self,
+        domain: &str,
+        _floor: f32,
+    ) -> daygle_dns_ml::page::DiscoveryReading {
+        daygle_dns_ml::page::DiscoveryReading {
+            final_host: Some(domain.to_owned()),
+            category: Some("phishing".to_owned()),
+            confidence: Some(0.95),
+            evidence: "verify your account, confirm your password".to_owned(),
+        }
+    }
+
     fn inspect(&self, domain: &str) -> daygle_dns_ml::page::Inspection {
         daygle_dns_ml::page::Inspection {
             note: format!("test page for {domain} reads shopping (80%)"),
@@ -1603,6 +1616,196 @@ impl daygle_dns_ml::page::PageReader for FixedReader {
             page: None,
         }
     }
+}
+
+#[tokio::test]
+async fn discovery_requires_opt_in_and_enforces_only_the_inspected_hostname() {
+    use daygle_dns_policy::{PolicyContext, PolicyPlugin};
+    let dir = TempDir::new().unwrap();
+    let zones = zone_store(&dir);
+    let ai = engine(
+        &dir,
+        AiSettings {
+            fetch_pages: true,
+            ..settings(AiMode::Enforce)
+        },
+    );
+    assert!(ai.scanner.set_page_reader(Box::new(FixedReader)));
+    let domain = "ordinary.example";
+    ai.store.observe(domain).unwrap();
+    ai.store
+        .save_verdict(
+            Channel::Threat,
+            domain,
+            "",
+            "",
+            "skipped",
+            0.0,
+            "test",
+            "no signal",
+            3600,
+        )
+        .unwrap();
+    ai.scanner.run_cycle(0, zones.as_ref()).unwrap();
+    assert!(ai
+        .signal_report(domain)
+        .unwrap()
+        .unwrap()
+        .page_discovery
+        .is_none());
+
+    let mut configured = (*ai.settings.load_full()).clone();
+    configured.monitor_page_discovery = true;
+    ai.apply_settings(&configured);
+    ai.scanner.run_cycle(0, zones.as_ref()).unwrap();
+
+    let report = ai.signal_report(domain).unwrap().unwrap();
+    let finding = report.page_discovery.unwrap();
+    assert_eq!(finding.reading.category.as_deref(), Some("phishing"));
+    let preview = report.page_discovery_fusion.unwrap();
+    assert!(preview.score > report.fusion.score);
+    assert_eq!(
+        preview
+            .contributions
+            .iter()
+            .filter(|c| c.source == daygle_dns_ml::assessment::SignalSource::Page)
+            .count(),
+        1
+    );
+    assert_eq!(report.gate_score, 0.0);
+    assert!(!ai.snapshot().load().contains_key(domain));
+    assert_eq!(
+        ai.authority_status().unwrap()["page_discovery_review"]["unreviewed"],
+        1
+    );
+
+    configured.enforce_page_discovery = true;
+    ai.apply_settings(&configured);
+    ai.refresh_snapshot_now();
+    assert!(
+        !ai.snapshot().load().contains_key(domain),
+        "default threshold wins"
+    );
+    configured.block_threshold = 0.95;
+    configured.fusion = daygle_dns_core::config::FusionMode::Decide;
+    ai.apply_settings(&configured);
+    ai.refresh_snapshot_now();
+    let plugin = ai.block_plugin();
+    let query = |name: &str| PolicyContext {
+        client: "192.0.2.1".parse().unwrap(),
+        query_name: name.to_owned(),
+        record_type: "A".to_owned(),
+        listener: None,
+    };
+    assert!(plugin.evaluate(&query(domain)).await.is_some());
+    assert!(plugin
+        .evaluate(&query("sub.ordinary.example"))
+        .await
+        .is_none());
+    assert!(ai
+        .export_threats()
+        .unwrap()
+        .iter()
+        .all(|(host, ..)| host != domain));
+
+    configured.authority.enabled = true;
+    configured.authority.model_stage = daygle_dns_core::config::AuthorityStage::Monitor;
+    ai.apply_settings(&configured);
+    ai.refresh_snapshot_now();
+    assert!(plugin.evaluate(&query(domain)).await.is_none());
+    configured.authority.enabled = false;
+    ai.apply_settings(&configured);
+    ai.set_not_threat_override(domain, "fixture correction")
+        .unwrap();
+    assert!(plugin.evaluate(&query(domain)).await.is_none());
+    assert_eq!(
+        ai.authority_status().unwrap()["page_discovery_review"]["corrected"],
+        1
+    );
+}
+
+#[tokio::test]
+async fn discovery_fetch_can_stall_without_delaying_dns_policy() {
+    use daygle_dns_ml::page::{DiscoveryReading, Inspection, PageReader};
+    use daygle_dns_policy::{PolicyContext, PolicyPlugin};
+    use tokio::sync::oneshot;
+
+    struct StalledReader {
+        entered: std::sync::Mutex<Option<oneshot::Sender<()>>>,
+        release: std::sync::Mutex<Option<oneshot::Receiver<()>>>,
+    }
+    impl PageReader for StalledReader {
+        fn inspect(&self, _: &str) -> Inspection {
+            Inspection::default()
+        }
+
+        fn inspect_for_discovery(&self, domain: &str, floor: f32) -> DiscoveryReading {
+            self.entered
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap()
+                .send(())
+                .unwrap();
+            let _ = self.release.lock().unwrap().take().unwrap().blocking_recv();
+            FixedReader.inspect_for_discovery(domain, floor)
+        }
+    }
+
+    let dir = TempDir::new().unwrap();
+    let zones = zone_store(&dir);
+    let ai = engine(
+        &dir,
+        AiSettings {
+            fetch_pages: true,
+            monitor_page_discovery: true,
+            ..settings(AiMode::Enforce)
+        },
+    );
+    let domain = "background.example";
+    ai.store.observe(domain).unwrap();
+    ai.store
+        .save_verdict(
+            Channel::Threat,
+            domain,
+            "",
+            "",
+            "skipped",
+            0.0,
+            "test",
+            "no signal",
+            3600,
+        )
+        .unwrap();
+    let (entered, inspecting) = oneshot::channel();
+    let (finish, release) = oneshot::channel();
+    assert!(ai.scanner.set_page_reader(Box::new(StalledReader {
+        entered: std::sync::Mutex::new(Some(entered)),
+        release: std::sync::Mutex::new(Some(release)),
+    })));
+    let scanner = ai.scanner.clone();
+    let scan = tokio::task::spawn_blocking(move || scanner.run_cycle(0, zones.as_ref()).unwrap());
+    let timeout = std::time::Duration::from_secs(5);
+    tokio::time::timeout(timeout, inspecting)
+        .await
+        .unwrap()
+        .unwrap();
+    let query = PolicyContext {
+        client: "192.0.2.1".parse().unwrap(),
+        query_name: domain.to_owned(),
+        record_type: "A".to_owned(),
+        listener: None,
+    };
+    let plugin = ai.block_plugin();
+    let verdict = tokio::time::timeout(timeout, async {
+        for _ in 0..128 {
+            assert!(plugin.evaluate(&query).await.is_none());
+        }
+    })
+    .await;
+    finish.send(()).unwrap();
+    verdict.unwrap();
+    scan.await.unwrap();
 }
 
 /// Through a scan cycle: a name alone blocks, then a `decide` reading of an

@@ -139,6 +139,8 @@ async fn status_reports_the_page_content_defaults_over_http() {
     let ai = engine(&dir);
     let status = json(AppState::for_tests(Some(ai)), "/api/ai/status").await;
     assert_eq!(status["fetch_pages"], true);
+    assert_eq!(status["monitor_page_discovery"], false);
+    assert_eq!(status["enforce_page_discovery"], false);
     assert_eq!(status["page_fetch_timeout_secs"], 5);
     assert_eq!(status["page_fetch_max_bytes"], 524_288);
     assert_eq!(status["page_candidates_per_scan"], 16);
@@ -165,6 +167,8 @@ async fn page_content_settings_are_applied_and_clamped() {
         Some(serde_json::json!({
             "ai": {
                 "fetch_pages": true,
+                "monitor_page_discovery": true,
+                "enforce_page_discovery": true,
                 "page_fetch_timeout_secs": 240,
                 "page_fetch_max_bytes": 12,
                 "page_candidates_per_scan": 5_000,
@@ -177,6 +181,8 @@ async fn page_content_settings_are_applied_and_clamped() {
     assert_eq!(status, StatusCode::OK, "{body}");
     let applied = ai.settings.load_full();
     assert!(applied.fetch_pages);
+    assert!(applied.monitor_page_discovery);
+    assert!(applied.enforce_page_discovery);
     assert_eq!(
         applied.page_fetch_timeout_secs, 30,
         "clamped to its maximum"
@@ -198,6 +204,8 @@ async fn page_content_settings_are_applied_and_clamped() {
     // And the status endpoint reports what the engine now runs with.
     let reported = json(state, "/api/ai/status").await;
     assert_eq!(reported["fetch_pages"], true);
+    assert_eq!(reported["monitor_page_discovery"], true);
+    assert_eq!(reported["enforce_page_discovery"], true);
     assert_eq!(reported["page_fetch_timeout_secs"], 30);
     assert_eq!(reported["page_fetch_max_bytes"], 16_384);
     assert_eq!(reported["page_candidates_per_scan"], 64);
