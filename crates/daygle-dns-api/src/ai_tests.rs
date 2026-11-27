@@ -1427,6 +1427,29 @@ fn fail_rescore_for(dir: &std::path::Path, mode: &str) {
     .unwrap();
 }
 
+/// The fusion mode a restart would read from the stored runtime settings.
+fn overlay_fusion(state: &AppState) -> Option<String> {
+    state
+        .catalog
+        .store()
+        .get_named_setting::<daygle_dns_core::config::RuntimeSettings>("runtime")
+        .unwrap()
+        .and_then(|settings| settings.ai)
+        .and_then(|ai| ai.fusion)
+        .map(|fusion| fusion.as_str().to_string())
+}
+
+/// The fusion mode a stored verdict records its assessment under.
+fn stored_assessment_mode(dir: &std::path::Path, domain: &str) -> Option<String> {
+    let conn = rusqlite::Connection::open(dir.join("ai.db")).unwrap();
+    conn.query_row(
+        "SELECT assessment_mode FROM ai_verdicts WHERE domain = ?1 AND channel = 'threat'",
+        [domain],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+}
+
 /// One confident threat verdict, so a re-score has a row to write.
 fn seed_threat(ai: &AiEngine, domain: &str) {
     ai.store.observe(domain).unwrap();
@@ -1825,5 +1848,55 @@ async fn fusion_and_authority_are_settings_the_console_can_change() {
     let applied = ai.settings.load_full();
     assert_eq!(applied.fusion, daygle_dns_core::config::FusionMode::Monitor);
     assert!(!applied.authority.enabled);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_failed_fusion_rescore_during_a_console_save_refuses_and_stores_nothing() {
+    let dir = scratch_dir("fusion-save-failure");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai.clone()));
+    seed_threat(&ai, "fusion-save.example");
+    let before = stored_assessment_mode(&dir, "fusion-save.example");
+    assert_ne!(before.as_deref(), Some("decide"), "{before:?}");
+    fail_rescore_for(&dir, "decide");
+
+    let (code, _, body) = call(
+        state.clone(),
+        "PUT",
+        "/api/config",
+        Some(serde_json::json!({ "ai": { "fusion": "decide" } })),
+    )
+    .await;
+    assert!(!code.is_success(), "{body}");
+    assert!(body.contains("injected re-score failure"), "{body}");
+
+    // Nothing was stored: the live configuration, the engine's settings, the
+    // overlay a restart would apply and the stored verdict all still name the
+    // mode that was in force, so no row was re-scored under a mode the saved
+    // configuration never held.
+    assert_eq!(state.config.load_full().ai.fusion.as_str(), "monitor");
+    assert_eq!(ai.settings.load_full().fusion.as_str(), "monitor");
+    assert_eq!(
+        overlay_fusion(&state).as_deref(),
+        Some("monitor"),
+        "the persisted runtime settings kept the mode that was in force"
+    );
+    assert_eq!(
+        stored_assessment_mode(&dir, "fusion-save.example"),
+        before,
+        "the stored verdict was not re-scored"
+    );
+
+    // A save that does not change the mode is still accepted with the failing
+    // trigger in place, so the refusal is about the re-score and not the save.
+    let (code, _, body) = call(
+        state,
+        "PUT",
+        "/api/config",
+        Some(serde_json::json!({ "ai": { "workers": 3 } })),
+    )
+    .await;
+    assert!(code.is_success(), "{body}");
     let _ = std::fs::remove_dir_all(&dir);
 }

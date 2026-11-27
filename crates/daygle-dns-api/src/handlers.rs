@@ -8931,6 +8931,7 @@ pub async fn update_settings(
     // whole AI form with every save, and reacting to an unchanged one forced
     // a snapshot rebuild and a full scan cycle on every unrelated edit.
     let ai_changed = config.ai != old_config.ai;
+    let fusion_changed = config.ai.fusion != old_config.ai.fusion;
 
     // A selected console-managed certificate must exist in the store.
     for (label, name) in [
@@ -9032,21 +9033,6 @@ pub async fn update_settings(
         None
     };
 
-    // A fusion mode names the score the gate compares, and every stored
-    // assessment records the mode it was scored under. Re-score them before
-    // the configuration naming the new mode is written: a mode that cannot be
-    // applied is refused here, with nothing persisted, rather than reported
-    // saved while the gate reads scores the previous mode produced.
-    if config.ai.fusion != old_config.ai.fusion {
-        if let Some(ai) = &state.ai {
-            let engine = ai.clone();
-            let settings = config.ai.clone();
-            if let Err(e) = run_blocking(move || engine.rescore_for_settings(&settings)).await {
-                return map_err(e);
-            }
-        }
-    }
-
     // Persist the DB-owned runtime settings to the database, then publish
     // live. (The config file is no longer rewritten: it holds bootstrap
     // values only, and the DB overlay wins over it on every boot.)
@@ -9067,6 +9053,40 @@ pub async fn update_settings(
             || old_config.doh != config.doh
             || old_config.doq != config.doq);
     state.config.store(Arc::new(config.clone()));
+    // A fusion mode names the score the gate compares, and every stored
+    // assessment records the mode it was scored under. The configuration is
+    // persisted and published first, so a row is only ever re-scored under a
+    // mode the saved settings name. A re-score that fails wrote nothing (it
+    // runs in one transaction), so putting the previous configuration back is
+    // enough: the save stores no change and the rows keep describing the mode
+    // still in force.
+    if fusion_changed {
+        if let Some(ai) = &state.ai {
+            let engine = ai.clone();
+            let settings = config.ai.clone();
+            if let Err(e) = run_blocking(move || engine.rescore_for_settings(&settings)).await {
+                let mut failures = Vec::new();
+                if let Err(undo) = state.catalog.store().put_runtime_settings(
+                    &daygle_dns_core::config::RuntimeSettings::capture(&old_config),
+                ) {
+                    failures.push(format!(
+                        "could not put the previous runtime settings back: {undo}"
+                    ));
+                }
+                state.config.store(Arc::new(old_config.clone()));
+                if failures.is_empty() {
+                    return map_err(e);
+                }
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!(
+                        "{e}; putting the previous configuration back did not fully succeed: {}",
+                        failures.join("; ")
+                    ),
+                );
+            }
+        }
+    }
     // Filtering-group schedules are read in the display time zone.
     daygle_dns_core::schedule::set_time_zone(&config.display.time_zone);
     // Server-side knobs read from their own state rather than the config
@@ -9183,7 +9203,7 @@ pub async fn update_settings(
     // The trial in force was measured against the scoring this save replaces,
     // so it must not be able to put its own base threshold back over it. A
     // failure is named rather than failing a save that is already published.
-    if ai_changed && config.ai.fusion != old_config.ai.fusion {
+    if ai_changed && fusion_changed {
         if let Some(ai) = &state.ai {
             let engine = ai.clone();
             if let Err(e) = run_blocking(move || engine.store.retire_threshold_trials()).await {
