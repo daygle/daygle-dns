@@ -103,7 +103,7 @@
       page = data.page || page;
       // Past the end (verdicts were dropped or exempted since the page was
       // opened): show the last page instead of an empty one.
-      if (!rows.length && total > 0 && page > 1) {
+      if (!rows.length && total > 0 && page > pages()) {
         page = pages();
         return load();
       }
@@ -259,7 +259,7 @@
     <div class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap">
       <h3 style="margin: 0">Classifications ({fmt(total)})</h3>
       <div class="row" style="gap: 8px; flex-wrap: wrap">
-        <input type="search" placeholder="Search Domains" aria-label="Search domains" bind:value={search} style="min-width: 200px" />
+        <input type="search" placeholder="Search Domains" aria-label="Search domains" bind:value={search} style="min-width: min(100%, 200px)" />
         <select bind:value={categoryFilter} aria-label="Filter by category" style="min-width: 150px">
           <option value="">All Categories</option>
           {#each categories as category (category)}

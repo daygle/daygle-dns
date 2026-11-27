@@ -1,6 +1,6 @@
 <script>
   import { api, formatApiError, getStoredUser } from '../api.js';
-  import { onDestroy } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { formatDateTime } from '../datetime.svelte.js';
   import { formatBytes, isRunning, percent, titleCase } from '../aiLabels.js';
 
@@ -10,12 +10,14 @@
   let error = $state(null);
   let notice = $state(null);
   let busy = $state(false);
+  let managing = $state(false);
   let testing = $state(false);
   let testResult = $state(null);
   let form = $state(null);
   let downloadName = $state('');
   let pollTimer = null;
   let destroyed = false;
+  let loadVersion = 0;
 
   const isAdmin = getStoredUser()?.role !== 'viewer';
 
@@ -25,7 +27,7 @@
   // The shared update state also reports server updates: only show it here
   // when it is about Ollama.
   const ollamaOp = $derived(
-    operation && /ollama/i.test(operation.message || '') ? operation : null,
+    operation?.kind === 'ollama' ? operation : null,
   );
   const serviceRunning = $derived(!!ollamaOp && isRunning(ollamaOp.phase));
   const otherUpdateRunning = $derived(
@@ -51,12 +53,16 @@
   }
 
   async function load(keepForm = false) {
+    clearTimeout(pollTimer);
+    const version = ++loadVersion;
     try {
       const data = await api.aiLlm();
+      if (destroyed || version !== loadVersion) return;
       llm = data;
       if (!keepForm || !form) fill(data);
       error = null;
     } catch (e) {
+      if (destroyed || version !== loadVersion) return;
       error = formatApiError(e);
     }
     schedule();
@@ -65,7 +71,7 @@
   function schedule() {
     clearTimeout(pollTimer);
     if (destroyed) return;
-    if (pulling || serviceRunning || testRunning) {
+    if (pulling || serviceRunning || otherUpdateRunning || testRunning) {
       pollTimer = setTimeout(() => load(true), 2000);
     }
   }
@@ -89,7 +95,8 @@
     return null;
   }
 
-  async function save(extra = {}) {
+  async function save() {
+    if (busy) return;
     notice = null;
     error = problem();
     if (error) return;
@@ -102,7 +109,6 @@
           llm_model: form.model.trim(),
           llm_candidates_per_scan: Number(form.perScan),
           llm_timeout_secs: Number(form.timeout),
-          ...extra,
         },
       });
       notice = 'Language model settings saved.';
@@ -130,10 +136,12 @@
   const shownTest = $derived(testResult || (llm?.test && !llm.test.running ? llm.test : null));
 
   async function pull(model) {
+    if (managing || pulling || urlPending) return;
     const name = (model || '').trim();
     if (!name) return;
     notice = null;
     error = null;
+    managing = true;
     try {
       await api.aiLlmPull(name);
       notice = `Downloading ${name}...`;
@@ -141,25 +149,43 @@
       await load(true);
     } catch (e) {
       error = formatApiError(e);
+    } finally {
+      managing = false;
     }
   }
 
   async function remove(model) {
+    if (managing || pulling || urlPending) return;
     if (!confirm(`Delete the model ${model} from the Ollama server?`)) return;
     notice = null;
     error = null;
+    managing = true;
     try {
       await api.aiLlmDelete(model);
       notice = `Deleted ${model}.`;
       await load(true);
     } catch (e) {
       error = formatApiError(e);
+    } finally {
+      managing = false;
     }
   }
 
   async function useModel(model) {
-    form.model = model;
-    await save({ llm_model: model });
+    if (busy || urlPending) return;
+    busy = true;
+    notice = null;
+    error = null;
+    try {
+      await api.updateSettings({ ai: { llm_model: model } });
+      form.model = model;
+      notice = 'Language model selected.';
+      await load(true);
+    } catch (e) {
+      error = formatApiError(e);
+    } finally {
+      busy = false;
+    }
   }
 
   const SERVICE_CONFIRM = {
@@ -170,14 +196,18 @@
   };
 
   async function service(action) {
+    if (managing || serviceRunning || otherUpdateRunning || urlPending) return;
     if (!confirm(SERVICE_CONFIRM[action])) return;
     notice = null;
     error = null;
+    managing = true;
     try {
       await api.aiLlmService(action);
       await load(true);
     } catch (e) {
       error = formatApiError(e);
+    } finally {
+      managing = false;
     }
   }
 
@@ -186,15 +216,15 @@
     clearTimeout(pollTimer);
   });
 
-  $effect(() => {
+  onMount(() => {
     load();
   });
 </script>
 
 {#if error && !llm}
-  <div class="card"><p style="color: var(--danger); margin: 0">{error}</p></div>
+  <div class="card"><p role="alert" style="color: var(--danger); margin: 0">{error}</p><button class="secondary" onclick={() => load()}>Retry</button></div>
 {:else if !llm || !form}
-  <div class="card"><p class="muted" style="margin: 0">Loading...</p></div>
+  <div class="card"><p class="muted" role="status" style="margin: 0">Loading...</p></div>
 {:else}
   {#if notice}<div class="card notice" role="status">{notice}</div>{/if}
   {#if error}<div class="card" role="alert" style="color: var(--danger)">{error}</div>{/if}
@@ -235,19 +265,19 @@
     {/if}
     <div class="form-grid">
       <label class="check">
-        <input type="checkbox" bind:checked={form.enabled} disabled={!isAdmin} />
+        <input type="checkbox" bind:checked={form.enabled} disabled={!isAdmin || busy} />
         <span>Use the Language Model</span>
       </label>
-      <label><span>Ollama Address</span><input bind:value={form.url} disabled={!isAdmin} placeholder="http://127.0.0.1:11434" /></label>
+      <label><span>Ollama Address</span><input bind:value={form.url} disabled={!isAdmin || busy} placeholder="http://127.0.0.1:11434" /></label>
       <label>
         <span>Model</span>
-        <input bind:value={form.model} list="llm-installed" disabled={!isAdmin} placeholder="qwen2.5:1.5b" />
+        <input bind:value={form.model} list="llm-installed" disabled={!isAdmin || busy} placeholder="qwen2.5:1.5b" />
         <datalist id="llm-installed">
           {#each llm.models || [] as m (m.name)}<option value={m.name}></option>{/each}
         </datalist>
       </label>
-      <label><span>Pages Per Scan</span><input type="number" min="1" max="32" bind:value={form.perScan} disabled={!isAdmin} /></label>
-      <label><span>Answer Time Limit (Seconds)</span><input type="number" min="5" max="600" bind:value={form.timeout} disabled={!isAdmin} /></label>
+      <label><span>Pages Per Scan</span><input type="number" min="1" max="32" bind:value={form.perScan} disabled={!isAdmin || busy} /></label>
+      <label><span>Answer Time Limit (Seconds)</span><input type="number" min="5" max="600" bind:value={form.timeout} disabled={!isAdmin || busy} /></label>
     </div>
     {#if llm.test_timeout_secs && llm.test_timeout_secs > llm.timeout_secs}
       <p class="muted small" style="margin: 8px 0 0">
@@ -292,7 +322,7 @@
       {#if urlPending}
         <p class="muted small" style="margin: 0 0 10px">
           These models belong to the saved address (<code>{llm.url}</code>).
-          Save the address above first to manage the server you typed instead.
+          Save the address above or restore the saved address to manage models.
         </p>
       {/if}
       {#if llm.models?.length}
@@ -317,10 +347,10 @@
                 {#if isAdmin}
                   <td class="actions">
                     {#if m.name !== llm.model}
-                      <button class="secondary small-btn" onclick={() => useModel(m.name)} disabled={busy}>Use</button>
+                      <button class="secondary small-btn" onclick={() => useModel(m.name)} disabled={busy || urlPending} aria-label={`Use ${m.name}`}>Use</button>
                     {/if}
-                    <button class="secondary small-btn" onclick={() => pull(m.name)} disabled={pulling} title="Download what changed since this model was fetched">Update</button>
-                    <button class="secondary small-btn" onclick={() => remove(m.name)} disabled={pulling}>Delete</button>
+                    <button class="secondary small-btn" onclick={() => pull(m.name)} disabled={managing || pulling || urlPending} aria-label={`Update ${m.name}`} title="Download what changed since this model was fetched">Update</button>
+                    <button class="secondary small-btn" onclick={() => remove(m.name)} disabled={managing || pulling || urlPending} aria-label={`Delete ${m.name}`}>Delete</button>
                   </td>
                 {/if}
               </tr>
@@ -357,14 +387,14 @@
 
       {#if isAdmin}
         <div class="row" style="margin-top: 12px; gap: 10px; flex-wrap: wrap; align-items: flex-end">
-          <label style="flex: 1; min-width: 220px">
+          <label style="flex: 1; min-width: min(100%, 220px)">
             <span class="small">Download a Model</span>
             <input bind:value={downloadName} list="llm-suggested" placeholder="qwen2.5:1.5b" />
             <datalist id="llm-suggested">
               {#each llm.suggested_models || [] as s (s.name)}<option value={s.name}>{s.note}</option>{/each}
             </datalist>
           </label>
-          <button onclick={() => pull(downloadName)} disabled={pulling || !downloadName.trim()}>Download</button>
+          <button onclick={() => pull(downloadName)} disabled={managing || pulling || urlPending || !downloadName.trim()}>Download</button>
         </div>
         <details class="how" style="margin-top: 8px">
           <summary class="muted">Which model?</summary>
@@ -415,13 +445,14 @@
     {:else if isAdmin}
       <div class="row" style="margin-top: 12px; gap: 10px; flex-wrap: wrap">
         {#if !llm.service.installed && !llm.reachable}
-          <button onclick={() => service('install')} disabled={serviceRunning || otherUpdateRunning}>Install Ollama</button>
+          <button onclick={() => service('install')} disabled={managing || urlPending || serviceRunning || otherUpdateRunning}>Install Ollama</button>
         {:else}
-          <button onclick={() => service('update')} disabled={serviceRunning || otherUpdateRunning}>
+          <button onclick={() => service('update')} disabled={managing || urlPending || serviceRunning || otherUpdateRunning}>
             {llm.update_available ? `Update to ${llm.latest_version}` : 'Reinstall / Update'}
           </button>
-          <button class="secondary" onclick={() => service('remove')} disabled={serviceRunning || otherUpdateRunning}>Remove Ollama</button>
+          <button class="secondary" onclick={() => service('remove')} disabled={managing || urlPending || serviceRunning || otherUpdateRunning}>Remove Ollama</button>
         {/if}
+        {#if urlPending}<span class="muted small">Save or restore the Ollama address before managing the service.</span>{/if}
         {#if otherUpdateRunning}<span class="muted small">A server update is running; wait for it to finish.</span>{/if}
       </div>
       <p class="muted small" style="margin: 8px 0 0">
@@ -436,7 +467,7 @@
 <style>
   .form-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr));
     gap: 12px;
     align-items: end;
   }
@@ -448,7 +479,7 @@
   .how summary { cursor: pointer; font-size: 0.85rem; }
   .how-list { margin: 6px 0 0; padding-left: 18px; font-size: 0.85rem; line-height: 1.45; }
   .how-list li { margin: 3px 0; }
-  .actions { white-space: nowrap; text-align: right; }
+  .actions { text-align: right; }
   .small-btn { padding: 2px 8px; margin-left: 4px; }
   .pill.ok { color: var(--ok, inherit); }
   .pill.bad { color: var(--danger); }

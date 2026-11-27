@@ -528,16 +528,26 @@ impl LlmManager {
         }
         let mut buffer: Vec<u8> = Vec::new();
         let mut succeeded = false;
+        const MAX_PROGRESS_LINE: usize = 64 * 1024;
         loop {
             let chunk = tokio::time::timeout(Duration::from_secs(300), response.chunk())
                 .await
                 .map_err(|_| "the download stalled".to_string())?
                 .map_err(|e| format!("download interrupted: {e}"))?;
-            let Some(chunk) = chunk else { break };
-            buffer.extend_from_slice(&chunk);
-            while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
-                let line: Vec<u8> = buffer.drain(..=end).collect();
-                let Ok(value) = serde_json::from_slice::<Value>(&line) else {
+            let eof = chunk.is_none();
+            if let Some(chunk) = chunk {
+                buffer.extend_from_slice(&chunk);
+            } else if !buffer.is_empty() {
+                buffer.push(b'\n');
+            }
+            let mut consumed = 0;
+            while let Some(end) = buffer[consumed..].iter().position(|b| *b == b'\n') {
+                if end > MAX_PROGRESS_LINE {
+                    return Err("Ollama returned an oversized progress line".to_string());
+                }
+                let line = &buffer[consumed..consumed + end];
+                consumed += end + 1;
+                let Ok(value) = serde_json::from_slice::<Value>(line) else {
                     continue;
                 };
                 if let Some(error) = value.get("error").and_then(Value::as_str) {
@@ -561,6 +571,13 @@ impl LlmManager {
                         }
                     }
                 }
+            }
+            buffer.drain(..consumed);
+            if buffer.len() > MAX_PROGRESS_LINE {
+                return Err("Ollama returned an oversized progress line".to_string());
+            }
+            if eof {
+                break;
             }
         }
         if succeeded {

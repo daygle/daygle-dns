@@ -39,6 +39,7 @@ UPDATES_DIR="__DAYGLE_DNS_UPDATES_DIR__"
 MODELS_DIR="__DAYGLE_DNS_MODELS_DIR__"
 SERVICE_USER="__DAYGLE_DNS_USER__"
 AUTOMATIC=false
+STATE_KIND=unknown
 STAGING="$UPDATES_DIR/staging"
 REQ="$UPDATES_DIR/request"
 DIR="${DAYGLE_DNS_UPDATE_DIR:-/tmp/daygle-dns-update}"
@@ -140,14 +141,14 @@ json_escape() {
 # Write state atomically (temp file + rename) so status polls never observe a
 # half-written file.
 state() { # phase message
-  printf '{"phase":"%s","pid":%s,"started_at":"%s","message":"%s","exit_code":0,"automatic":%s}\n' \
-    "$1" "$$" "$(date -u +%FT%TZ)" "$(json_escape "$2")" "$AUTOMATIC" > "$PRIV/state.json" \
+  printf '{"kind":"%s","phase":"%s","pid":%s,"started_at":"%s","message":"%s","exit_code":0,"automatic":%s}\n' \
+    "$STATE_KIND" "$1" "$$" "$(date -u +%FT%TZ)" "$(json_escape "$2")" "$AUTOMATIC" > "$PRIV/state.json" \
     && publish "$PRIV/state.json" state.json
 }
 
 fail() { # message
-  printf '{"phase":"error","pid":%s,"started_at":"%s","message":"%s","exit_code":1,"automatic":%s}\n' \
-    "$$" "$(date -u +%FT%TZ)" "$(json_escape "$1")" "$AUTOMATIC" > "$PRIV/state.json" \
+  printf '{"kind":"%s","phase":"error","pid":%s,"started_at":"%s","message":"%s","exit_code":1,"automatic":%s}\n' \
+    "$STATE_KIND" "$$" "$(date -u +%FT%TZ)" "$(json_escape "$1")" "$AUTOMATIC" > "$PRIV/state.json" \
     && publish "$PRIV/state.json" state.json
 }
 
@@ -333,7 +334,7 @@ if [ "$KIND" = install ] && grep -q '"automatic"[[:space:]]*:[[:space:]]*true' "
 fi
 BAD=""
 case "$KIND" in
-  install|models|ollama) ;;
+  install|models|ollama) STATE_KIND="$KIND" ;;
   *) BAD="unsupported update kind '$KIND' in the update manifest" ;;
 esac
 

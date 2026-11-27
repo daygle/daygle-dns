@@ -3085,7 +3085,7 @@ fn ai_schemas() -> Value {
                         },
                         "installed": { "type": "boolean" },
                         "operation": {
-                            "type": "object",
+                            "$ref": "#/components/schemas/UpdateState",
                             "description": "The shared update state; Ollama work reports here."
                         }
                     }
@@ -5518,9 +5518,10 @@ fn maintenance_schemas() -> Value {
             "description": "The updater's progress snapshot, written to a temp-dir state file \
                 so a poll after the restart still reports the run's outcome.",
             "required": [
-                "phase", "pid", "started_at", "message", "exit_code", "automatic"
+                "kind", "phase", "pid", "started_at", "message", "exit_code", "automatic"
             ],
             "properties": {
+                "kind": { "type": "string", "enum": ["install", "models", "ollama", "unknown"] },
                 "phase": {
                     "type": "string",
                     "description": "`\"\"` (idle), `preparing`, `downloading`, `cloning`, \

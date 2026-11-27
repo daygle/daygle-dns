@@ -51,9 +51,23 @@ pub fn workspace_dir() -> PathBuf {
     std::env::temp_dir().join("daygle-dns-update")
 }
 
+/// The updater operation, independent of its user-facing progress text.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateKind {
+    Install,
+    Models,
+    Ollama,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
 /// Progress snapshot written by the updater helper.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct UpdateState {
+    #[serde(default)]
+    pub kind: UpdateKind,
     /// One of `""` (idle), `preparing`, `downloading`, `cloning`,
     /// `building`, `installing`, `applying`, `restarting`, `rolling_back`,
     /// `done` or `error`.
@@ -186,6 +200,7 @@ fn normalize_stale(
         started_at: st.started_at,
         message: "the updater helper is no longer running (the server may have restarted mid-run); it is safe to start a new update".to_string(),
         exit_code: 1,
+        kind: st.kind,
         automatic: st.automatic,
     }
 }
@@ -1332,6 +1347,7 @@ fn auto_install_tick(store: &daygle_dns_authoritative::store::ZoneStore, hour: u
                     "could not start automatic installation of Daygle DNS {latest}: {error}"
                 ),
                 exit_code: 1,
+                kind: UpdateKind::Install,
                 automatic: true,
             };
             if let Err(write_error) =
@@ -1753,7 +1769,13 @@ fn launch_run(
     let _ = std::fs::remove_file(dir.join(APPLY_LOG));
     // Prime the state so the console shows activity the moment the request
     // returns; the helper overwrites it with its own pid/message immediately.
+    let kind = if mode == Some("models") {
+        UpdateKind::Models
+    } else {
+        UpdateKind::Install
+    };
     let primed = UpdateState {
+        kind,
         phase: "preparing".to_string(),
         pid: 0,
         started_at: now_rfc3339(),
@@ -1773,6 +1795,7 @@ fn launch_run(
                 phase: "error".to_string(),
                 pid: 0,
                 started_at: now_rfc3339(),
+                kind,
                 message: format!("failed to launch the updater helper: {e}"),
                 exit_code: 1,
                 automatic,
@@ -1829,6 +1852,7 @@ pub fn start_ollama(action: &str, config_dir: Option<&Path>) -> Result<(), Start
             phase: "preparing".to_string(),
             pid: 0,
             started_at: now_rfc3339(),
+            kind: UpdateKind::Ollama,
             message: format!("{what}: handing off to the update service..."),
             exit_code: 0,
             automatic: false,
@@ -1861,6 +1885,7 @@ pub fn start_ollama(action: &str, config_dir: Option<&Path>) -> Result<(), Start
                 phase: "error".to_string(),
                 pid: 0,
                 started_at: now_rfc3339(),
+                kind: UpdateKind::Ollama,
                 message: format!("{what} could not be handed to the update service: {e}"),
                 exit_code: 1,
                 automatic: false,
@@ -2148,6 +2173,7 @@ mod tests {
             phase: "building".to_string(),
             pid: 4242,
             started_at: "2026-09-07T00:00:00Z".to_string(),
+            kind: UpdateKind::Install,
             message: "compiling...".to_string(),
             exit_code: 0,
             automatic: true,
@@ -2496,6 +2522,19 @@ mod tests {
     }
 
     #[test]
+    fn operation_kind_survives_message_changes_and_accepts_legacy_state() {
+        let state = parse_state(br#"{"kind":"ollama","message":"Checking service"}"#);
+        assert_eq!(state.kind, UpdateKind::Ollama);
+        assert_eq!(serde_json::to_value(state).unwrap()["kind"], "ollama");
+        let legacy = parse_state(br#"{"phase":"applying","message":"Installing Ollama"}"#);
+        assert_eq!(legacy.kind, UpdateKind::Unknown);
+        assert!(legacy.is_running());
+        let future = parse_state(br#"{"kind":"future","phase":"done"}"#);
+        assert_eq!(future.kind, UpdateKind::Unknown);
+        assert_eq!(future.phase, "done");
+    }
+
+    #[test]
     fn states_with_colour_codes_and_broken_characters_still_parse() {
         // What update-apply.sh wrote while install.sh's coloured log line
         // was the latest output, cut in the middle of a "─".
@@ -2682,6 +2721,7 @@ mod tests {
             phase: "building".to_string(),
             pid,
             started_at: "2026-09-07T00:00:00Z".to_string(),
+            kind: UpdateKind::Install,
             message: "compiling...".to_string(),
             exit_code: 0,
             automatic: true,

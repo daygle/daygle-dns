@@ -5,6 +5,7 @@
   import { stampTime } from '../aiLabels.js';
 
   let rows = $state([]);
+  let removing = $state(false);
   let loading = $state(true);
   let error = $state(null);
   let notice = $state(null);
@@ -41,15 +42,19 @@
   }
 
   async function removeExemption(domain) {
+    if (removing) return;
     if (!confirm(`Remove the exemption for ${domain}? The AI may block it again.`)) return;
     notice = null;
     error = null;
+    removing = true;
     try {
       await api.aiOverride(domain, 'clear');
       notice = `${domain} is no longer exempt.`;
       await load();
     } catch (e) {
       error = formatApiError(e);
+    } finally {
+      removing = false;
     }
   }
 
@@ -67,7 +72,7 @@
   <div class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap">
     <h3 style="margin: 0">Exempt Domains ({filtered.length})</h3>
     <div class="row" style="gap: 8px; flex-wrap: wrap">
-      <input type="search" placeholder="Search Domains or Reasons" aria-label="Search domains or reasons" bind:value={search} style="min-width: 200px" />
+      <input type="search" placeholder="Search Domains or Reasons" aria-label="Search domains or reasons" bind:value={search} style="min-width: min(100%, 200px)" />
       <select bind:value={reasonFilter} aria-label="Filter by reason">
         <option value="">All Reasons</option>
         <option value="provided">Reason Provided</option>
@@ -109,7 +114,7 @@
               <td class="muted nowrap">{stampTime(row.created_at, formatDateTime)}</td>
               {#if isAdmin}
                 <td class="num">
-                  <IconButton icon="disallow" label={`Remove AI exemption for ${row.domain}`} onclick={() => removeExemption(row.domain)} />
+                  <IconButton icon="disallow" label={`Remove AI exemption for ${row.domain}`} disabled={removing} onclick={() => removeExemption(row.domain)} />
                 </td>
               {/if}
             </tr>

@@ -56,6 +56,23 @@
 
   let tab = $state('scanner');
   const current = $derived(tabs.find((t) => t.id === tab) || tabs[0]);
+
+  function selectTab(id) {
+    tab = id;
+    document.getElementById(`ai-tab-${id}`)?.focus();
+  }
+
+  function tabKey(event) {
+    const index = tabs.findIndex((item) => item.id === current.id);
+    const offset = { ArrowLeft: -1, ArrowRight: 1 }[event.key];
+    let next;
+    if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = tabs.length - 1;
+    else if (offset) next = (index + offset + tabs.length) % tabs.length;
+    else return;
+    event.preventDefault();
+    selectTab(tabs[next].id);
+  }
 </script>
 
 <PageHeader icon={icons.ai} title="AI" tagline={current.tagline} />
@@ -69,6 +86,8 @@
       role="tab"
       aria-selected={current.id === t.id}
       aria-controls="ai-tabpanel"
+      tabindex={current.id === t.id ? 0 : -1}
+      onkeydown={tabKey}
       onclick={() => (tab = t.id)}
     >{t.label}</button>
   {/each}
@@ -76,7 +95,7 @@
 
 <div id="ai-tabpanel" role="tabpanel" aria-labelledby={`ai-tab-${current.id}`}>
   {#if current.id === 'scanner'}
-    <AiStatus onOpenThreats={() => (tab = 'threats')} />
+    <AiStatus onOpenThreats={() => selectTab('threats')} />
   {:else if current.id === 'settings'}
     <AiSettings />
   {:else if current.id === 'threats'}
