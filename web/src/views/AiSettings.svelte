@@ -86,6 +86,7 @@
         enabled: !!ai_.authority.enabled,
         feed_stage: ai_.authority.feed_stage,
         model_stage: ai_.authority.model_stage,
+        // Preserve the saved value when the console updates the other stages.
         operator_stage: ai_.authority.operator_stage,
         max_new_blocks_per_refresh: Number(ai_.authority.max_new_blocks_per_refresh),
         demote_fp_rate: Number(aiForm.demotePct) / 100,
@@ -290,12 +291,6 @@
       <label>
         <span>Model-Only Findings</span>
         <select bind:value={ai_.authority.model_stage}>
-          {#each STAGES as [value, label] (value)}<option value={value}>{label}</option>{/each}
-        </select>
-      </label>
-      <label>
-        <span>Your Own Threat Labels</span>
-        <select bind:value={ai_.authority.operator_stage}>
           {#each STAGES as [value, label] (value)}<option value={value}>{label}</option>{/each}
         </select>
       </label>
