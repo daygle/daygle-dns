@@ -386,19 +386,13 @@ impl Scanner {
         // observations, with the fused view and the calibrated score beside
         // them. This never fails the cycle: a verdict keeps its confidence
         // if the assessment cannot be stored.
-        self.assess_verdicts(&cfg, &rows, now);
+        let assessed = self.assess_verdicts(&cfg, &rows, now);
         // What the threat channel produced this scan: the watch on a newly
         // promoted model compares it with the week before (see
-        // `crate::maintain`).
-        let threat_rows = rows.iter().filter(|r| r.channel == Channel::Threat);
-        let threat_classified = threat_rows.clone().count();
-        let threat_blocking = threat_rows
-            .filter(|r| {
-                r.status == "classified"
-                    && r.severity == "threat"
-                    && r.confidence >= cfg.block_threshold
-            })
-            .count();
+        // `crate::maintain`). "Blocking" is the score of record the gate
+        // compares, not the model's confidence.
+        let threat_classified = rows.iter().filter(|r| r.channel == Channel::Threat).count();
+        let threat_blocking = Self::blocking_count(&rows, &assessed, cfg.block_threshold);
         if let Err(e) = self
             .store
             .record_threat_rate(threat_classified, threat_blocking)
@@ -463,16 +457,39 @@ impl Scanner {
         Ok(classified)
     }
 
-    /// Record every threat verdict's signal observations, the fused view and
-    /// the calibrated score. The calibrated score is the number the gate
-    /// compares from now on; with no calibration map in force it is left
-    /// unset, and the gate keeps using the confidence exactly as before.
-    fn assess_verdicts(&self, cfg: &AiSettings, rows: &[NewVerdict], now: i64) {
+    /// How many of this scan's threat verdicts the gate would compare at or
+    /// above `threshold`: the stored score of record where the verdict was
+    /// assessed, else its confidence (what a verdict with no stored assessment
+    /// is read by). The blocking-rate metric has to move with the gate, not with
+    /// the model's own confidence.
+    fn blocking_count(
+        rows: &[NewVerdict],
+        assessed: &std::collections::HashMap<String, f32>,
+        threshold: f32,
+    ) -> usize {
+        rows.iter()
+            .filter(|row| row.channel == Channel::Threat && row.status == "classified")
+            .filter(|row| row.severity == "threat")
+            .filter(|row| assessed.get(&row.domain).copied().unwrap_or(row.confidence) >= threshold)
+            .count()
+    }
+
+    /// Record every threat verdict's signal observations and its score of
+    /// record. Returns the score the gate now compares for each verdict it
+    /// assessed, so the scan's blocking rate is measured on that number rather
+    /// than on the confidence.
+    fn assess_verdicts(
+        &self,
+        cfg: &AiSettings,
+        rows: &[NewVerdict],
+        now: i64,
+    ) -> std::collections::HashMap<String, f32> {
+        let mut scores = std::collections::HashMap::new();
         for row in rows
             .iter()
             .filter(|r| r.channel == Channel::Threat && r.status == "classified")
         {
-            self.assess_row(
+            if let Some(score) = self.assess_row(
                 cfg,
                 &row.domain,
                 row.threat_score,
@@ -480,8 +497,24 @@ impl Scanner {
                 &row.severity,
                 &row.evidence,
                 now,
-            );
+            ) {
+                scores.insert(row.domain.clone(), score);
+            }
         }
+        scores
+    }
+
+    /// Re-score every stored threat verdict under `cfg`'s fusion mode, from the
+    /// observations kept beside it. The score of record is a function of the
+    /// mode, so a verdict stored under another one must be rewritten before the
+    /// new mode affects enforcement - otherwise the gate would compare (or the
+    /// trial fit on) a score the previous configuration produced. Called when
+    /// the mode changes; returns how many verdicts were rewritten.
+    pub fn rescore_assessments(&self, cfg: &AiSettings) -> Result<usize> {
+        let calibration = self.calibration.load_full();
+        let weights = self.weights.load_full();
+        self.store
+            .rescore_assessments(cfg.fusion, &weights, calibration.as_ref().as_ref())
     }
 
     /// Recompute one stored verdict's observations and calibrated score after
@@ -492,7 +525,7 @@ impl Scanner {
         let Ok(Some(row)) = self.store.verdict(domain, "threat") else {
             return;
         };
-        self.assess_row(
+        let _ = self.assess_row(
             cfg,
             domain,
             row.threat_score,
@@ -513,10 +546,8 @@ impl Scanner {
         severity: &str,
         evidence: &str,
         now: i64,
-    ) {
-        let Some(intel) = self.intel.get() else {
-            return;
-        };
+    ) -> Option<f32> {
+        let intel = self.intel.get()?;
         let index = intel.index();
         let calibration = self.calibration.load_full();
         let weights = self.weights.load_full();
@@ -553,14 +584,15 @@ impl Scanner {
             },
         );
         let fused = (cfg.fusion != FusionMode::Off).then(|| fusion::fuse(&observations, &weights));
-        let assessment_score = match (&cfg.fusion, &fused) {
-            (FusionMode::Decide, Some(fused)) => fused.effective_score(),
-            _ => confidence,
-        };
-        let (calibrated, version) = match calibration.as_ref() {
-            Some(map) => (Some(map.apply(assessment_score)), map.version.clone()),
-            None => (None, String::new()),
-        };
+        // One score of record, shared with the re-scoring pass and the gate:
+        // fusion decides it in `decide`, calibration maps it when a map is in
+        // force.
+        let score = assessment::score_of_record(
+            cfg.fusion,
+            confidence,
+            fused.as_ref(),
+            calibration.as_ref().as_ref(),
+        );
         if let Err(e) = self
             .store
             .save_observations(domain, "threat", now, &observations)
@@ -569,18 +601,15 @@ impl Scanner {
                 "AI could not store the signals behind {domain}: {e}"
             ));
         }
-        if let Err(e) = self.store.save_assessment(
-            domain,
-            "threat",
-            calibrated,
-            &version,
-            fused.as_ref().map(|f| f.score),
-            assessment_score,
-        ) {
+        if let Err(e) = self
+            .store
+            .save_assessment(domain, "threat", cfg.fusion, &score)
+        {
             self.log_warn(format!(
                 "AI could not store the assessment of {domain}: {e}"
             ));
         }
+        Some(score.gate())
     }
 
     /// Ask the configured language model (see [`crate::llm`]) to read kept
@@ -1069,7 +1098,10 @@ impl Scanner {
         };
         // The label list is what separates a threat from an ordinary
         // category, so it gates blocking too.
-        for candidate in self.store.fresh_blocked(now, cfg.block_threshold)? {
+        for candidate in self
+            .store
+            .fresh_blocked(now, cfg.block_threshold, cfg.fusion)?
+        {
             if cfg.authority.enabled {
                 let source = crate::authority::Source::of(&candidate.source);
                 let may_block = crate::authority::decision_for(&decisions, source)
@@ -1439,4 +1471,51 @@ pub fn looks_like_domain(name: &str) -> bool {
             && !label.starts_with('-')
             && !label.ends_with('-')
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn verdict(domain: &str, severity: &str, status: &str, confidence: f32) -> NewVerdict {
+        NewVerdict {
+            domain: domain.to_string(),
+            channel: Channel::Threat,
+            category: "phishing".to_string(),
+            severity: severity.to_string(),
+            status: status.to_string(),
+            confidence,
+            backend: "fasttext".to_string(),
+            evidence: "model, phishing".to_string(),
+            threat_score: confidence,
+            expires_after_secs: 3_600,
+        }
+    }
+
+    /// The blocking-rate metric counts the number the gate compares: a verdict
+    /// whose fused assessment sits below the threshold is not a block even when
+    /// its confidence clears it, and a verdict with no stored assessment is read
+    /// by its confidence, as the gate reads it.
+    #[test]
+    fn the_blocking_rate_counts_the_score_of_record() {
+        let rows = vec![
+            verdict("fused-down.example", "threat", "classified", 0.97),
+            verdict("unassessed.example", "threat", "classified", 0.97),
+            verdict("quiet.example", "info", "classified", 0.97),
+            verdict("skipped.example", "threat", "skipped", 0.97),
+        ];
+        let mut assessed = std::collections::HashMap::new();
+        assessed.insert("fused-down.example".to_string(), 0.42);
+
+        assert_eq!(
+            Scanner::blocking_count(&rows, &assessed, 0.9),
+            1,
+            "only the unassessed confidence clears the threshold"
+        );
+        assert_eq!(
+            Scanner::blocking_count(&rows, &assessed, 0.4),
+            2,
+            "the fused assessment counts at its own value"
+        );
+    }
 }

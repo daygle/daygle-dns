@@ -2259,10 +2259,17 @@ pub async fn ai_explain(
                 ),
                 Some(t) => {
                     if override_row.is_none() && parent_allow.is_none() && blocked_category.is_none() {
-                        if t.confidence < settings.block_threshold {
+                        // The gate compares the score of record, not the
+                        // confidence: with fusion deciding they differ, and a
+                        // reason about the confidence would explain a decision
+                        // the gate did not make.
+                        let gate_score = signal_report
+                            .as_ref()
+                            .map_or(t.confidence, |report| report.gate_score);
+                        if gate_score < settings.block_threshold {
                             reasons.push(format!(
-                                "Its threat confidence, {}%, is below the {}% block threshold.",
-                                explain_pct(t.confidence),
+                                "Its gate score, {}%, is below the {}% block threshold.",
+                                explain_pct(gate_score),
                                 explain_pct(settings.block_threshold)
                             ));
                         }
@@ -2319,6 +2326,7 @@ pub async fn ai_explain(
                     .unwrap_or_default(),
                 "fusion": signal_report.as_ref().map(|report| report.fusion.clone()),
                 "calibrated_score": signal_report.as_ref().and_then(|report| report.calibrated),
+                "gate_score": signal_report.as_ref().map(|report| report.gate_score),
                 "blocked": blocked_category.is_some(),
                 "decision": enforcement_decision(
                     blocked_category.is_some(),
@@ -2351,7 +2359,10 @@ pub async fn ai_explain(
                     "backend": t.backend,
                     "evidence": t.evidence,
                     "observations": t.observations,
-                    "over_threshold": t.confidence >= settings.block_threshold,
+                    "over_threshold": signal_report
+                        .as_ref()
+                        .map_or(t.confidence, |report| report.gate_score)
+                        >= settings.block_threshold,
                     "label_treated_as_threat": settings.is_auto_block_category(&t.category),
                     "classified_at": stamp(t.classified_at),
                     "expires_at": stamp(t.expires_at),

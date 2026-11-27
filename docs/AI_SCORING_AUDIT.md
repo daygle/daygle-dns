@@ -59,15 +59,52 @@ All three used one column and one comparison, so the trial fitted the score
 enforcement compared. There was **no** trial/gate mismatch on main, and no
 change was made to fix one.
 
-Stage 3 keeps that property while making the calibrated score the one score:
-`gate_scores()` now delegates to `gate_samples()`, which reads
-`CASE WHEN calibration_version <> '' THEN calibrated_score ELSE confidence END`
-- exactly the expression `fresh_blocked()` compares. With no calibration map
-active, `calibration_version` is empty and both read `confidence`, unchanged;
-the version, not the score's value, distinguishes "no map" from a map that
-legitimately calibrates a name to zero. The invariant is pinned by
-`store::threshold::tests::the_trial_reads_the_confidence_the_gate_compares` and
-`a_calibrated_zero_is_not_a_missing_calibration`.
+Stage 3 keeps that property, and stage 5 extends it: the score of record is
+`store/threshold.rs::GATE_SCORE`, one expression bound to the live `ai.fusion`
+and read by `fresh_blocked`, `gate_samples`/`gate_scores` (the trial's input),
+`export_threats`, `store::gate_score` (the explain report) and
+`/api/ai/explain`'s `over_threshold`:
+
+    CASE WHEN assessment_mode = :fusion THEN
+             CASE WHEN calibration_version <> '' THEN calibrated_score
+                  ELSE assessment_score END
+         WHEN assessment_mode = '' THEN
+             CASE WHEN calibration_version <> '' THEN calibrated_score
+                  ELSE confidence END
+         ELSE confidence END
+
+Under `off`/`monitor` the assessment score *is* the confidence, so nothing
+moves; under `decide` it is the fused score - with or without a calibration map
+in force. Calibration maps whatever the assessment score is, so its output is
+the gate score whenever a map was in force. `assessment_mode` records which
+fusion mode produced the stored numbers: a verdict scored under another mode
+falls back to its confidence (its pre-fusion score) rather than being read as if
+the new mode had produced it, and `AiEngine::apply_settings` re-scores every
+stored threat verdict from its recorded observations before rebuilding the
+snapshots when the mode changes. A verdict with no stored observations has no
+fused score and keeps its confidence until it is classified again. The version
+on the row, not the score's value, distinguishes "no map" from a map that
+legitimately calibrates a name to zero. Pinned by
+`the_trial_reads_the_confidence_the_gate_compares`,
+`a_calibrated_zero_is_not_a_missing_calibration`,
+`fusion_decide_sets_the_gate_score_without_calibration`,
+`a_score_from_another_fusion_mode_is_not_read_as_the_current_one`,
+`fusion_decide_changes_the_gate_score_without_calibration` and
+`switching_fusion_mode_rescores_stored_verdicts`.
+
+Two readers that still fell back to the confidence are on the same score now.
+The scan's blocking-rate metric (`scanner.rs::blocking_count`, the number
+`ai_threat_rate` records for the promoted-model watch) counts the score of
+record the gate would compare, not the model's confidence. Calibration fitting
+(`store::assessment_samples`) reads the assessment the live mode produced, under
+the same `assessment_mode` rule but before the map - a second map must not learn
+from the first map's output - and a zero the live mode assessed stays a sample
+rather than falling back. The upgrade tags a stored assessment that differs from
+its confidence and has observations beside it as `decide`, so an assessed zero
+is not mistaken for a missing score. Pinned by
+`the_blocking_rate_counts_the_score_of_record`,
+`calibration_fitting_reads_the_live_modes_assessment` and
+`reopening_a_store_keeps_a_decided_score_decided`.
 
 ### Scoring methods that could confuse (found in the audit)
 
@@ -259,10 +296,11 @@ move nothing, weights bounded), `assessment::tests::*` (all nine inputs
 present).
 
 **Validation:** unit-level only. The fused score is `monitor` by default and
-does not affect enforcement; turning on `decide` is an explicit operator
-choice, and there is no held-out comparison yet of fused versus unfused
-blocking performance. That comparison is what stage 6's measurements and the
-existing threshold trial are for.
+does not affect enforcement; turning on `decide` is an explicit operator choice,
+and it then decides the gate score even with no calibration map active (see the
+score-of-record expression at the top). There is no held-out comparison yet of
+fused versus unfused blocking performance; that is what stage 6's measurements
+and the existing threshold trial are for.
 
 ## Stage 6 - Graduated source-specific authority
 

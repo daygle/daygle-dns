@@ -9,8 +9,9 @@
 //! back restores `base_threshold` and leaves the model alone (see
 //! `POST /api/ai/threshold/rollback`).
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{named_params, params, Connection, OptionalExtension};
 
+use daygle_dns_core::config::FusionMode;
 use daygle_dns_core::error::Result;
 
 use super::AiStore;
@@ -31,6 +32,33 @@ CREATE TABLE IF NOT EXISTS ai_threshold_trials (
     applied_model      TEXT NOT NULL DEFAULT ''
 );
 ";
+
+/// The one score expression: the number the gate compares, the threshold trial
+/// is fitted on and the threat export reports. `calibration_version` says a map
+/// was in force for the verdict (the version, not the score's value, because a
+/// map may legitimately calibrate a name to zero); `assessment_mode` says which
+/// fusion mode produced the stored assessment. `:fusion` is the live mode - a
+/// verdict scored under another one is not read as if this mode had produced it,
+/// and falls back to the confidence (its pre-fusion score) until re-scored. Rows
+/// written before modes were recorded have an empty mode and read exactly as the
+/// gate read them before fusion decided anything.
+pub(super) const GATE_SCORE: &str = "CASE \
+     WHEN assessment_mode = :fusion THEN \
+         CASE WHEN calibration_version <> '' THEN calibrated_score ELSE assessment_score END \
+     WHEN assessment_mode = '' THEN \
+         CASE WHEN calibration_version <> '' THEN calibrated_score ELSE confidence END \
+     ELSE confidence END";
+
+/// The score calibration is fitted on: the assessment the active map was applied
+/// to. It follows the same mode rule as [`GATE_SCORE`] - `:fusion` is the live
+/// mode, and a verdict from another mode has no assessment for this one - but it
+/// stops before the map, so a second map never learns from the first map's
+/// output. A row the live mode assessed is read even when its assessment is
+/// exactly zero: the mode, not the value, says whether there is an assessment.
+pub(super) const ASSESSMENT_SCORE: &str = "CASE \
+     WHEN assessment_mode = :fusion THEN assessment_score \
+     WHEN assessment_mode = '' AND assessment_score > 0 THEN assessment_score \
+     ELSE confidence END";
 
 /// Add the columns a database from before this feature lacks.
 pub(super) fn upgrade(conn: &Connection) -> rusqlite::Result<()> {
@@ -247,12 +275,12 @@ impl AiStore {
 
     /// The scores a threshold trial is fitted on: `(domain, score)`,
     /// highest first. `score` is exactly the number `fresh_blocked` compares
-    /// with `ai.block_threshold` (see [`Self::GATE_SCORE`]); reading
-    /// `threat_score` here measured the model's raw opinion while enforcement
-    /// ignored what the evidence stages added.
-    pub fn gate_scores(&self, limit: u32) -> Result<Vec<(String, f32)>> {
+    /// with `ai.block_threshold` (see [`GATE_SCORE`]); reading `threat_score`
+    /// here measured the model's raw opinion while enforcement ignored what the
+    /// evidence stages added.
+    pub fn gate_scores(&self, limit: u32, fusion: FusionMode) -> Result<Vec<(String, f32)>> {
         Ok(self
-            .gate_samples(limit)?
+            .gate_samples(limit, fusion)?
             .into_iter()
             .map(|(domain, score, _)| (domain, score))
             .collect())
@@ -260,56 +288,102 @@ impl AiStore {
 
     /// [`Self::gate_scores`] with the verdict's classification time, for the
     /// time-based evaluation and the label-provenance report.
-    pub fn gate_samples(&self, limit: u32) -> Result<Vec<(String, f32, i64)>> {
+    pub fn gate_samples(&self, limit: u32, fusion: FusionMode) -> Result<Vec<(String, f32, i64)>> {
         let conn = self.lock()?;
-        // The same expression `fresh_blocked` compares: the calibrated score
-        // when a map was in force for the verdict, else the confidence. The
-        // version, not the score's value, says which: a map may legitimately
-        // calibrate a name to zero.
-        let mut stmt = conn.prepare(
+        // One expression, [`GATE_SCORE`], shared with `fresh_blocked`, the
+        // export and the explain report: the trial fits the decision the gate
+        // actually makes.
+        let mut stmt = conn.prepare(&format!(
             "SELECT domain,
-                    CASE WHEN calibration_version <> '' THEN calibrated_score ELSE confidence END,
+                    {score},
                     classified_at
              FROM ai_verdicts
              WHERE channel = 'threat' AND status = 'classified'
-               AND CASE WHEN calibration_version <> '' THEN calibrated_score ELSE confidence END > 0
-             ORDER BY CASE WHEN calibration_version <> '' THEN calibrated_score ELSE confidence END DESC,
-                      domain LIMIT ?1",
-        )?;
+               AND {score} > 0
+             ORDER BY {score} DESC,
+                      domain LIMIT :limit",
+            score = GATE_SCORE
+        ))?;
         let collected = stmt
-            .query_map(params![limit.clamp(1, 200_000)], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, f32>(1)?,
-                    r.get::<_, i64>(2)?,
-                ))
-            })?
+            .query_map(
+                named_params! {
+                    ":fusion": fusion.as_str(),
+                    ":limit": limit.clamp(1, 200_000),
+                },
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, f32>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                },
+            )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(collected)
     }
 
-    /// [`Self::gate_samples`] on the score before calibration: the assessment
-    /// score the active map was applied to. Calibration is fitted on this, so a
-    /// second map never learns from the first map's output.
-    pub fn assessment_samples(&self, limit: u32) -> Result<Vec<(String, f32, i64)>> {
+    /// The score the gate compares for one verdict, in the same expression the
+    /// gate, the trial and the export read.
+    pub fn gate_score(
+        &self,
+        domain: &str,
+        channel: &str,
+        fusion: FusionMode,
+    ) -> Result<Option<f32>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        Ok(conn
+            .query_row(
+                &format!(
+                    "SELECT {score} FROM ai_verdicts WHERE domain = :domain AND channel = :channel",
+                    score = GATE_SCORE
+                ),
+                named_params! {
+                    ":domain": domain,
+                    ":channel": channel,
+                    ":fusion": fusion.as_str(),
+                },
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// [`Self::gate_samples`] on the score before calibration: the assessment
+    /// score the active map was applied to, under the live fusion mode. A
+    /// verdict from another mode has no assessment for this one and reads as its
+    /// confidence (what the gate would use until it is re-scored), and a zero
+    /// the live mode assessed stays a zero rather than falling back. Calibration
+    /// is fitted on this, so a second map never learns from the first map's
+    /// output.
+    pub fn assessment_samples(
+        &self,
+        limit: u32,
+        fusion: FusionMode,
+    ) -> Result<Vec<(String, f32, i64)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(&format!(
             "SELECT domain,
-                    CASE WHEN assessment_score > 0 THEN assessment_score ELSE confidence END,
+                    {score},
                     classified_at
              FROM ai_verdicts
              WHERE channel = 'threat' AND status = 'classified'
-               AND CASE WHEN assessment_score > 0 THEN assessment_score ELSE confidence END > 0
-             ORDER BY 2 DESC, domain LIMIT ?1",
-        )?;
+             ORDER BY {score} DESC,
+                      domain LIMIT :limit",
+            score = ASSESSMENT_SCORE
+        ))?;
         let collected = stmt
-            .query_map(params![limit.clamp(1, 200_000)], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, f32>(1)?,
-                    r.get::<_, i64>(2)?,
-                ))
-            })?
+            .query_map(
+                named_params! {
+                    ":fusion": fusion.as_str(),
+                    ":limit": limit.clamp(1, 200_000),
+                },
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, f32>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                },
+            )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(collected)
     }
@@ -318,6 +392,7 @@ impl AiStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assessment::AssessmentScore;
 
     fn store() -> (tempfile::TempDir, AiStore) {
         let dir = tempfile::TempDir::new().unwrap();
@@ -441,7 +516,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            store.gate_scores(10).unwrap(),
+            store.gate_scores(10, FusionMode::Monitor).unwrap(),
             vec![("age-raised.example".to_string(), 0.97)]
         );
     }
@@ -471,15 +546,18 @@ mod tests {
             .save_assessment(
                 "calibrated-away.example",
                 "threat",
-                Some(0.0),
-                "cal-zero",
-                None,
-                0.99,
+                FusionMode::Monitor,
+                &AssessmentScore {
+                    assessment: 0.99,
+                    calibrated: Some(0.0),
+                    calibration_version: "cal-zero".to_string(),
+                    fused: None,
+                },
             )
             .unwrap();
 
         let now = chrono::Utc::now().timestamp();
-        let blocked = store.fresh_blocked(now, 0.5).unwrap();
+        let blocked = store.fresh_blocked(now, 0.5, FusionMode::Monitor).unwrap();
         assert!(
             blocked
                 .iter()
@@ -487,12 +565,12 @@ mod tests {
             "a calibrated zero must not block"
         );
         assert!(store
-            .export_threats(now, 0.5)
+            .export_threats(now, 0.5, FusionMode::Monitor)
             .unwrap()
             .iter()
             .all(|(domain, ..)| domain != "calibrated-away.example"));
         assert!(store
-            .gate_samples(10)
+            .gate_samples(10, FusionMode::Monitor)
             .unwrap()
             .iter()
             .all(|(domain, ..)| domain != "calibrated-away.example"));
@@ -519,20 +597,97 @@ mod tests {
             }])
             .unwrap();
         store
-            .save_assessment("mapped.example", "threat", Some(0.2), "cal-a", None, 0.9)
+            .save_assessment(
+                "mapped.example",
+                "threat",
+                FusionMode::Monitor,
+                &AssessmentScore {
+                    assessment: 0.9,
+                    calibrated: Some(0.2),
+                    calibration_version: "cal-a".to_string(),
+                    fused: None,
+                },
+            )
             .unwrap();
 
         assert_eq!(
-            store.gate_scores(10).unwrap(),
+            store.gate_scores(10, FusionMode::Monitor).unwrap(),
             vec![("mapped.example".to_string(), 0.2)]
         );
         let assessment: Vec<(String, f32)> = store
-            .assessment_samples(10)
+            .assessment_samples(10, FusionMode::Monitor)
             .unwrap()
             .into_iter()
             .map(|(domain, score, _)| (domain, score))
             .collect();
         assert_eq!(assessment, vec![("mapped.example".to_string(), 0.9)]);
+    }
+
+    /// Calibration is fitted on the assessment the live mode produced, not on
+    /// the confidence: under `decide` that is the fused score, and an assessed
+    /// zero is a sample rather than a missing value.
+    #[test]
+    fn calibration_fitting_reads_the_live_modes_assessment() {
+        let (_dir, store) = store();
+        for (domain, confidence, assessment) in [
+            ("fused.example", 0.9, 0.4),
+            ("fused-zero.example", 0.95, 0.0),
+        ] {
+            store.observe(domain).unwrap();
+            store
+                .save_verdicts(&[crate::store::NewVerdict {
+                    domain: domain.to_string(),
+                    channel: crate::store::Channel::Threat,
+                    category: "phishing".to_string(),
+                    severity: "threat".to_string(),
+                    status: "classified".to_string(),
+                    confidence,
+                    backend: "fasttext".to_string(),
+                    evidence: format!("model, phishing at {confidence}"),
+                    threat_score: confidence,
+                    expires_after_secs: 3_600,
+                }])
+                .unwrap();
+            store
+                .save_assessment(
+                    domain,
+                    "threat",
+                    FusionMode::Decide,
+                    &AssessmentScore {
+                        assessment,
+                        calibrated: None,
+                        calibration_version: String::new(),
+                        fused: Some(assessment),
+                    },
+                )
+                .unwrap();
+        }
+
+        let scores = |fusion| -> Vec<(String, f32)> {
+            store
+                .assessment_samples(10, fusion)
+                .unwrap()
+                .into_iter()
+                .map(|(domain, score, _)| (domain, score))
+                .collect()
+        };
+        assert_eq!(
+            scores(FusionMode::Decide),
+            vec![
+                ("fused.example".to_string(), 0.4),
+                ("fused-zero.example".to_string(), 0.0),
+            ],
+            "the fused assessment is what a map is fitted on, zero included"
+        );
+        // A verdict from another mode has no assessment for this one, so it
+        // reads as its confidence until it is re-scored.
+        assert_eq!(
+            scores(FusionMode::Monitor),
+            vec![
+                ("fused-zero.example".to_string(), 0.95),
+                ("fused.example".to_string(), 0.9),
+            ]
+        );
     }
 
     #[test]
@@ -556,5 +711,206 @@ mod tests {
             .mark_threshold_rolled_back(first.id)
             .unwrap()
             .is_none());
+    }
+
+    /// Fusion decides the gate score even with no calibration map in force: the
+    /// fused assessment, not the confidence the model reported, is what the
+    /// gate compares - and the trial and the export read the same number.
+    #[test]
+    fn fusion_decide_sets_the_gate_score_without_calibration() {
+        let (_dir, store) = store();
+        store.observe("fused-down.example").unwrap();
+        store
+            .save_verdicts(&[crate::store::NewVerdict {
+                domain: "fused-down.example".to_string(),
+                channel: crate::store::Channel::Threat,
+                category: "phishing".to_string(),
+                severity: "threat".to_string(),
+                status: "classified".to_string(),
+                confidence: 0.97,
+                backend: "fasttext".to_string(),
+                evidence: "model, phishing at 0.97".to_string(),
+                threat_score: 0.97,
+                expires_after_secs: 3_600,
+            }])
+            .unwrap();
+        store
+            .save_assessment(
+                "fused-down.example",
+                "threat",
+                FusionMode::Decide,
+                &AssessmentScore {
+                    assessment: 0.42,
+                    calibrated: None,
+                    calibration_version: String::new(),
+                    fused: Some(0.42),
+                },
+            )
+            .unwrap();
+
+        let now = chrono::Utc::now().timestamp();
+        assert_eq!(
+            store.gate_scores(10, FusionMode::Decide).unwrap(),
+            vec![("fused-down.example".to_string(), 0.42)],
+            "the trial reads the fused assessment"
+        );
+        assert!(
+            store
+                .fresh_blocked(now, 0.9, FusionMode::Decide)
+                .unwrap()
+                .is_empty(),
+            "the gate compares the fused assessment, not the confidence"
+        );
+        assert!(store
+            .export_threats(now, 0.9, FusionMode::Decide)
+            .unwrap()
+            .is_empty());
+        // The same row under a mode that still uses the confidence blocks, so
+        // the difference is the mode and not the stored value.
+        assert_eq!(
+            store
+                .fresh_blocked(now, 0.9, FusionMode::Monitor)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// A database from before the mode was recorded keeps reading a verdict by
+    /// the rule that wrote it: a stored assessment that differs from the
+    /// confidence can only have come from `decide`, so the upgrade tags it and
+    /// the gate goes on comparing that score instead of falling back.
+    #[test]
+    fn reopening_a_store_keeps_a_decided_score_decided() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("ai.db");
+        {
+            let store = AiStore::open(&path).unwrap();
+            store.observe("decided.example").unwrap();
+            store
+                .save_verdict(
+                    crate::store::Channel::Threat,
+                    "decided.example",
+                    "phishing",
+                    "threat",
+                    "classified",
+                    0.95,
+                    "fasttext",
+                    "model, phishing at 0.95",
+                    3_600,
+                )
+                .unwrap();
+            store
+                .save_assessment(
+                    "decided.example",
+                    "threat",
+                    FusionMode::Decide,
+                    &AssessmentScore {
+                        assessment: 0.30,
+                        calibrated: None,
+                        calibration_version: String::new(),
+                        fused: Some(0.30),
+                    },
+                )
+                .unwrap();
+            // A decided zero: fusion clamps to the 0-1 range, so 0 is a real
+            // score, and the observations recorded beside it are what tell it
+            // from a row the assessment layer never touched.
+            store.observe("zeroed.example").unwrap();
+            store
+                .save_verdict(
+                    crate::store::Channel::Threat,
+                    "zeroed.example",
+                    "phishing",
+                    "threat",
+                    "classified",
+                    0.95,
+                    "fasttext",
+                    "model, phishing at 0.95",
+                    3_600,
+                )
+                .unwrap();
+            store
+                .save_observations("zeroed.example", "threat", 1, &[])
+                .unwrap();
+            store
+                .save_assessment(
+                    "zeroed.example",
+                    "threat",
+                    FusionMode::Decide,
+                    &AssessmentScore {
+                        assessment: 0.0,
+                        calibrated: None,
+                        calibration_version: String::new(),
+                        fused: Some(0.0),
+                    },
+                )
+                .unwrap();
+            // The database as it stood before the mode column existed.
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute("ALTER TABLE ai_verdicts DROP COLUMN assessment_mode", [])
+                .unwrap();
+        }
+
+        let store = AiStore::open(&path).unwrap();
+        assert_eq!(
+            store.gate_scores(10, FusionMode::Decide).unwrap(),
+            vec![("decided.example".to_string(), 0.30)],
+            "the score `decide` produced is still the decided one"
+        );
+        assert_eq!(
+            store
+                .gate_score("zeroed.example", "threat", FusionMode::Decide)
+                .unwrap(),
+            Some(0.0),
+            "a decided zero is a score, not a missing assessment"
+        );
+    }
+
+    /// A score stored under one fusion mode is not read under another: the mode
+    /// is recorded with it, so `monitor` compares the confidence rather than the
+    /// fused score `decide` produced.
+    #[test]
+    fn a_score_from_another_fusion_mode_is_not_read_as_the_current_one() {
+        let (_dir, store) = store();
+        store.observe("decided.example").unwrap();
+        store
+            .save_verdicts(&[crate::store::NewVerdict {
+                domain: "decided.example".to_string(),
+                channel: crate::store::Channel::Threat,
+                category: "phishing".to_string(),
+                severity: "threat".to_string(),
+                status: "classified".to_string(),
+                confidence: 0.95,
+                backend: "fasttext".to_string(),
+                evidence: "model, phishing at 0.95".to_string(),
+                threat_score: 0.95,
+                expires_after_secs: 3_600,
+            }])
+            .unwrap();
+        store
+            .save_assessment(
+                "decided.example",
+                "threat",
+                FusionMode::Decide,
+                &AssessmentScore {
+                    assessment: 0.30,
+                    calibrated: None,
+                    calibration_version: String::new(),
+                    fused: Some(0.30),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.gate_scores(10, FusionMode::Decide).unwrap(),
+            vec![("decided.example".to_string(), 0.30)]
+        );
+        // `monitor` does not decide with fusion: until the verdict is re-scored
+        // its own confidence is the score, never the decided one.
+        assert_eq!(
+            store.gate_scores(10, FusionMode::Monitor).unwrap(),
+            vec![("decided.example".to_string(), 0.95)]
+        );
     }
 }
