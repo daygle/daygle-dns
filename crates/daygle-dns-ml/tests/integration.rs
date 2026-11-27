@@ -3354,6 +3354,15 @@ fn a_scheduled_retrain_runs_in_the_shadow_until_promoted() {
 
     end_trial_soon(&ai);
     std::thread::sleep(std::time::Duration::from_millis(1100));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let scoring_change = runtime.block_on(ai.lock_scoring_change());
+    assert!(ai.run_due_maintenance().is_none());
+    assert!(learned_trial(&ai).in_progress());
+    assert!(!learned_active(&ai));
+    drop(scoring_change);
+
     assert!(ai.run_due_maintenance().is_none());
     let trial = learned_trial(&ai);
     assert!(

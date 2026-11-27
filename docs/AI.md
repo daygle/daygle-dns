@@ -320,6 +320,9 @@ only when the passing trial is in force for the same model, scoring context
 and threshold, and meets the current false-positive target.
 On restart, the scanner restores candidate-specific signal weights only
 when the candidate's artifact digest matches the loaded classifier.
+Scheduled maintenance defers while an operator operation holds the scoring
+lifecycle lock. This includes threshold trials, calibration changes,
+candidate publication and rollback, and console AI settings changes.
 
 **Graduated authority** (`ai.authority`, off by default) decides which
 evidence may block: feed-confirmed findings can be enforced while model-only

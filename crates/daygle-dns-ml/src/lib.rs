@@ -610,6 +610,12 @@ impl AiEngine {
         self.maintenance.run()
     }
 
+    /// Reserve the scoring lifecycle across a manual operation, including
+    /// publication to the configuration store when the caller owns it.
+    pub async fn lock_scoring_change(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.maintenance.lock_scoring_change().await
+    }
+
     /// Run a threshold trial over the stored verdicts and the operator's
     /// corrections, and record it. It changes nothing: the candidate is
     /// applied only when the operator says so.

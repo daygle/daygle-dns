@@ -59,15 +59,27 @@ pub type Step = Box<dyn Fn() + Send + Sync>;
 pub struct Maintenance {
     retrainer: Arc<Retrainer>,
     after: Step,
+    scoring_change: tokio::sync::Mutex<()>,
 }
 
 impl Maintenance {
     pub fn new(retrainer: Arc<Retrainer>, after: Step) -> Self {
-        Self { retrainer, after }
+        Self {
+            retrainer,
+            after,
+            scoring_change: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    pub(crate) async fn lock_scoring_change(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.scoring_change.lock().await
     }
 
     /// Run every due step. Returns the build, if one ran.
     pub fn run(&self) -> Option<Result<TrainingStats>> {
+        // Leave due work queued while the API is publishing or restoring a
+        // scoring change. DNS queries do not acquire this lock.
+        let _scoring_change = self.scoring_change.try_lock().ok()?;
         let built = self.retrainer.maybe_retrain();
         (self.after)();
         built
