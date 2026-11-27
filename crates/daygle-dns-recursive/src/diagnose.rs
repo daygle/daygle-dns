@@ -71,6 +71,23 @@ fn proof_label(proof: Proof) -> &'static str {
     }
 }
 
+fn failure_summary(message: String, trace: &[TraceStep]) -> String {
+    // The pool can report exhausted connections after deliberately treating
+    // an upstream error reply as retryable. Only use the final trace step so
+    // an earlier error does not hide a later timeout or DNSSEC failure.
+    if message.trim_end().ends_with("no connections available") {
+        if let Some(step) = trace.last() {
+            if let Some(code @ ("SERVFAIL" | "REFUSED")) = step.rcode.as_deref() {
+                return format!(
+                    "Upstream name server {} replied {code} to the {} query for {}. The resolver exhausted its available candidates.",
+                    step.server, step.record_type, step.name
+                );
+            }
+        }
+    }
+    message
+}
+
 impl RecursiveResolver {
     /// Resolve `name`/`record_type` for the diagnostics page and report
     /// how it went. Filtering does not apply, and neither do client
@@ -142,13 +159,13 @@ impl RecursiveResolver {
                 let code = <ResponseCode as From<u16>>::from(code);
                 // NXDOMAIN and NODATA are answers, not failures.
                 let error = (!matches!(code, ResponseCode::NoError | ResponseCode::NXDomain))
-                    .then_some(message);
+                    .then(|| failure_summary(message, &trace));
                 (rcode_name(code), Vec::new(), error, negative_zone)
             }
             Err(e) => (
                 "SERVFAIL".to_string(),
                 Vec::new(),
-                Some(e.to_string()),
+                Some(failure_summary(e.to_string(), &trace)),
                 None,
             ),
         };
@@ -166,5 +183,41 @@ impl RecursiveResolver {
             dnssec_validation: inner.settings.dnssec_validate,
             trace,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diagnostic_summary_reports_final_upstream_failure_reply() {
+        let step = |code: Option<&str>| TraceStep {
+            server: "192.0.2.53".parse().unwrap(),
+            name: "test.example.".to_string(),
+            record_type: "AAAA".to_string(),
+            rcode: code.map(str::to_owned),
+            outcome: String::new(),
+            elapsed: Duration::ZERO,
+        };
+        let exhausted = "resolution failed: net error: no connections available";
+        for code in ["SERVFAIL", "REFUSED"] {
+            let summary = failure_summary(exhausted.to_string(), &[step(Some(code))]);
+            assert!(
+                summary.contains(&format!("192.0.2.53 replied {code}")),
+                "{summary}"
+            );
+        }
+        assert_eq!(
+            failure_summary(exhausted.to_string(), &[step(Some("SERVFAIL")), step(None)]),
+            exhausted
+        );
+        assert_eq!(
+            failure_summary(
+                "DNSSEC validation failed".to_string(),
+                &[step(Some("SERVFAIL"))]
+            ),
+            "DNSSEC validation failed"
+        );
     }
 }
