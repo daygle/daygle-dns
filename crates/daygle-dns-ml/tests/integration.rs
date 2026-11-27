@@ -5202,6 +5202,49 @@ fn a_restart_does_not_reapply_a_calibration_map_fitted_for_a_replaced_model() {
     );
 }
 
+#[test]
+fn restart_restores_candidate_weights_only_for_the_matching_artifact() {
+    use daygle_dns_ml::{candidate, fusion::SignalWeights};
+
+    let dir = TempDir::new().unwrap();
+    let model = dir.path().join("model.bin");
+    std::fs::copy(PROMOTION_MODEL, &model).unwrap();
+    let settings = AiSettings {
+        model_path: model.to_string_lossy().into_owned(),
+        ..settings(AiMode::Enforce)
+    };
+    let weights = SignalWeights {
+        page: 0.3,
+        ..SignalWeights::default()
+    };
+    {
+        let ai = engine(&dir, settings.clone());
+        let candidate = candidate::build(
+            &ai.store,
+            &candidate::CandidateSpec {
+                model_path: settings.model_path.clone(),
+                block_threshold: settings.block_threshold,
+                calibration: None,
+                signal_weights: weights.clone(),
+                scoring_config: serde_json::Value::Null,
+                validation_report: serde_json::Value::Null,
+                metrics: None,
+            },
+        )
+        .unwrap();
+        ai.promote_candidate(candidate.id).unwrap();
+    }
+    assert_eq!(
+        engine(&dir, settings.clone()).scanner.signal_weights(),
+        weights
+    );
+    mark_artifact(&model);
+    assert_eq!(
+        engine(&dir, settings).scanner.signal_weights(),
+        SignalWeights::default()
+    );
+}
+
 // ── A failed scoring change never leaves a half-applied one ──────────────────
 
 /// Make writes to a stored verdict fail, the way a locked or damaged database

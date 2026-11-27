@@ -2796,6 +2796,16 @@ pub async fn ai_threshold_apply(
             "that trial was not validated for the identifiable live model; run a new trial",
         );
     }
+    if trial
+        .report
+        .get("scoring")
+        .is_some_and(|scoring| *scoring != ai.threshold_scoring_context(&settings))
+    {
+        return error_response(
+            StatusCode::CONFLICT,
+            "the trial measured different scoring settings; run a new trial",
+        );
+    }
     let marked = run_blocking({
         let ai = ai.clone();
         let id = trial.id;
@@ -2990,6 +3000,7 @@ pub async fn ai_calibration_apply(
     State(state): State<AppState>,
     Json(input): Json<CalibrationInput>,
 ) -> Response {
+    let _config_write = state.config_write.lock().await;
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
@@ -3019,6 +3030,7 @@ pub async fn ai_calibration_apply(
 
 /// `POST /api/ai/calibration/disable` - go back to the uncalibrated score.
 pub async fn ai_calibration_disable(State(state): State<AppState>) -> Response {
+    let _config_write = state.config_write.lock().await;
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
@@ -3054,6 +3066,7 @@ pub async fn ai_candidates(State(state): State<AppState>) -> Response {
 /// `POST /api/ai/candidates/snapshot` - record the scoring system as it
 /// stands now as a candidate version. Nothing is promoted.
 pub async fn ai_candidates_snapshot(State(state): State<AppState>) -> Response {
+    let _config_write = state.config_write.lock().await;
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };

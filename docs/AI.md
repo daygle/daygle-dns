@@ -313,6 +313,13 @@ validation report. Promoting one activates all of it; one rollback restores
 the complete previous version, artifact included, not just a model name.
 The current operator threat labels, authority settings and false-positive
 target carry forward when a candidate is promoted or rolled back.
+New threshold trials record the fusion mode, calibration map, signal weights
+and effective threat labels they measured. Applying one requires that context
+to match the running engine. A candidate snapshot attaches a threshold report
+only when the passing trial is in force for the same model, scoring context
+and threshold, and meets the current false-positive target.
+On restart, the scanner restores candidate-specific signal weights only
+when the candidate's artifact digest matches the loaded classifier.
 
 **Graduated authority** (`ai.authority`, off by default) decides which
 evidence may block: feed-confirmed findings can be enforced while model-only

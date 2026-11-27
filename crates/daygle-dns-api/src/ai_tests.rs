@@ -1199,6 +1199,60 @@ async fn a_passing_threshold_trial_for_a_different_model_cannot_be_applied() {
 }
 
 #[tokio::test]
+async fn candidate_validation_uses_the_applied_trial_for_the_current_scoring() {
+    let dir = scratch_dir("threshold-scoring-context");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai.clone()));
+    let settings = ai.settings.load_full();
+    let model = daygle_dns_ml::threshold::model_version(&ai.live_model_path());
+    let scoring = ai.threshold_scoring_context(&settings);
+    let record = |candidate, summary| {
+        ai.store
+            .save_threshold_trial(&daygle_dns_ml::store::NewThresholdTrial {
+                model: model.clone(),
+                base_threshold: settings.block_threshold,
+                candidate,
+                fpr_target: settings.threshold_fpr_target,
+                passed: true,
+                report: serde_json::json!({ "summary": summary, "scoring": scoring }).to_string(),
+            })
+            .unwrap()
+    };
+    let applied = record(0.96, "validated and applied");
+    let unrelated = record(0.97, "newer but unapplied");
+    let (code, _, body) = call(
+        state.clone(),
+        "POST",
+        "/api/ai/threshold/apply",
+        Some(serde_json::json!({ "id": applied.id })),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    assert_eq!(
+        ai.snapshot_candidate().unwrap().validation_report["summary"],
+        "validated and applied"
+    );
+
+    let mut weights = ai.scanner.signal_weights();
+    weights.page = 0.3;
+    ai.scanner.set_signal_weights(weights);
+    assert!(ai.snapshot_candidate().unwrap().validation_report.is_null());
+    let (code, _, body) = call(
+        state.clone(),
+        "POST",
+        "/api/ai/threshold/apply",
+        Some(serde_json::json!({ "id": unrelated.id })),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        ai.store.applied_threshold_trial().unwrap().unwrap().id,
+        applied.id
+    );
+    assert_eq!(overlay_threshold(&state), Some(0.96));
+}
+
+#[tokio::test]
 async fn a_threshold_trial_cannot_be_applied_after_the_target_tightens() {
     let dir = scratch_dir("threshold-stricter-target");
     let ai = engine(&dir);

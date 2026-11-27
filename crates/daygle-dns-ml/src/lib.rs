@@ -426,15 +426,37 @@ impl AiEngine {
         if let Ok(Some(map)) = store.active_calibration() {
             scanner.set_calibration(Some(map));
         }
-        if let Ok(Some(active)) = store.active_candidate() {
-            scanner.set_signal_weights(active.signal_weights.clone());
-        }
         // A map recorded for a model that is no longer live - a retrain or a
         // restore finished while the service was down - must not be applied
         // again: fit and apply it to the model this start loaded, or it stays
         // off.
         let startup_model = shared.model.load_full();
+        let mismatched_candidate = if let Some(active) = store.active_candidate()? {
+            let expected = if active.model_sha256 == "builtin" {
+                "builtin".to_string()
+            } else {
+                format!("sha256:{}", active.model_sha256)
+            };
+            if expected == threshold::model_version(&startup_model) {
+                scanner.set_signal_weights(active.signal_weights);
+                false
+            } else {
+                logs.warn(
+                    "ai",
+                    format!(
+                        "candidate {} belongs to a different model; using default signal weights",
+                        active.version
+                    ),
+                );
+                true
+            }
+        } else {
+            false
+        };
         retire_calibration_for_changed_model(&store, &scanner, settings, &startup_model, &logs);
+        if mismatched_candidate {
+            scanner.rescore_assessments(settings)?;
+        }
         // Maintenance installs models too (a retrain, a scheduled promotion, a
         // restore), and the scanner is the only holder of the map in force, so
         // the engine hands the retrainer the step that retires a stale one.
@@ -593,6 +615,8 @@ impl AiEngine {
     /// applied only when the operator says so.
     pub fn run_threshold_trial(&self) -> Result<store::ThresholdTrial> {
         let settings = self.settings.load_full();
+        let model = threshold::model_version(&self.live_model_path());
+        let scoring = self.threshold_scoring_context(&settings);
         let index = self.intel.index();
         let samples = threshold::collect(&self.store, &index, &settings, THRESHOLD_SAMPLES)?;
         let report = threshold::run(
@@ -600,15 +624,37 @@ impl AiEngine {
             settings.threshold_fpr_target,
             settings.block_threshold,
         );
+        if model != threshold::model_version(&self.live_model_path())
+            || scoring != self.threshold_scoring_context(&self.settings.load_full())
+        {
+            return Err(DaygleError::Config(
+                "scoring changed during the threshold trial; run it again".to_string(),
+            ));
+        }
+        let mut report_json = serde_json::to_value(&report).map_err(|error| {
+            DaygleError::Internal(format!("could not serialize threshold trial: {error}"))
+        })?;
+        report_json["scoring"] = scoring;
         let record = store::NewThresholdTrial {
-            model: threshold::model_version(&self.live_model_path()),
+            model,
             base_threshold: settings.block_threshold,
             candidate: report.candidate.unwrap_or(settings.block_threshold),
             fpr_target: settings.threshold_fpr_target,
             passed: report.passed,
-            report: serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string()),
+            report: report_json.to_string(),
         };
         self.store.save_threshold_trial(&record)
+    }
+
+    /// The scoring inputs a threshold trial measures, apart from the model
+    /// artifact identity recorded in its own column.
+    pub fn threshold_scoring_context(&self, settings: &AiSettings) -> serde_json::Value {
+        serde_json::json!({
+            "fusion": settings.fusion,
+            "calibration": self.scanner.calibration_map().map(|map| map.version),
+            "weights": self.scanner.signal_weights(),
+            "threat_labels": settings.threat_labels(),
+        })
     }
 
     /// Put the previous model back in front of the scanner, live. Reversible:
@@ -1171,19 +1217,29 @@ impl AiEngine {
     /// version. Nothing is promoted.
     pub fn snapshot_candidate(&self) -> Result<store::CandidateVersion> {
         let settings = self.settings.load_full();
+        let model_path = self.live_model_path();
+        let model = threshold::model_version(&model_path);
+        let scoring = self.threshold_scoring_context(&settings);
         let calibration = self.store.active_calibration()?;
         let validation = self
             .store
-            .threshold_trials(1)?
-            .into_iter()
-            .next()
+            .applied_threshold_trial()?
+            .filter(|trial| {
+                trial.passed
+                    && trial.model == model
+                    && trial.applied_model == model
+                    && !model.starts_with("unreadable:")
+                    && trial.candidate == settings.block_threshold
+                    && trial.fpr_target <= settings.threshold_fpr_target
+                    && trial.report.get("scoring") == Some(&scoring)
+            })
             .map(|trial| trial.report)
             .unwrap_or(serde_json::Value::Null);
         let metrics = calibration.as_ref().and_then(|m| m.metrics.clone());
         candidate::build(
             &self.store,
             &candidate::CandidateSpec {
-                model_path: self.live_model_path(),
+                model_path,
                 block_threshold: settings.block_threshold,
                 calibration,
                 signal_weights: self.scanner.signal_weights(),
