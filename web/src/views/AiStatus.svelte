@@ -568,9 +568,6 @@
               {:else}
                 <span class="muted">None</span>
               {/each}
-              {#if onOpenThreats}
-                <button class="secondary" style="padding: 2px 8px; margin-left: 6px" onclick={onOpenThreats}>Change</button>
-              {/if}
             </td>
           </tr>
           <tr>
@@ -595,9 +592,6 @@
     <div class="card">
       <div class="spread" style="margin-bottom: 4px; gap: 8px; flex-wrap: wrap">
         <h3 style="margin: 0">{enforcing && !switchedOff ? 'Auto-Blocked Domains' : 'Would Auto-Block'}</h3>
-        {#if onOpenThreats}
-          <button class="secondary" style="padding: 2px 8px" onclick={onOpenThreats}>View Threats</button>
-        {/if}
       </div>
       <p class="muted small" style="margin: 0 0 10px">
         Threats at or above the block threshold, not exempt or disputed{enforcing && !switchedOff ? '.' : ' - what Enforce mode would block.'}
