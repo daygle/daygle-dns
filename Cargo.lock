@@ -798,6 +798,7 @@ dependencies = [
  "parking_lot 0.13.0",
  "rand",
  "reqwest",
+ "rusqlite",
  "rustls-pki-types",
  "serde",
  "serde_json",

@@ -273,6 +273,22 @@ impl AiStore {
         Ok(Some((base, model)))
     }
 
+    /// Take the trial in force out of force because the scoring version that
+    /// owned it was promoted or rolled back. Its candidate threshold was
+    /// measured against a model the active version no longer carries, so it must
+    /// not be able to put its own base threshold back later as if it were still
+    /// in force. Returns how many rows were retired; `restored_threshold` stays
+    /// 0 because nothing was put back, and the row is kept as history.
+    pub fn retire_threshold_trials(&self) -> Result<usize> {
+        let conn = self.lock()?;
+        let retired = conn.execute(
+            "UPDATE ai_threshold_trials SET rolled_back_at = ?1
+             WHERE applied_at > 0 AND rolled_back_at = 0",
+            params![super::now_epoch()],
+        )?;
+        Ok(retired)
+    }
+
     /// The scores a threshold trial is fitted on: `(domain, score)`,
     /// highest first. `score` is exactly the number `fresh_blocked` compares
     /// with `ai.block_threshold` (see [`GATE_SCORE`]); reading `threat_score`

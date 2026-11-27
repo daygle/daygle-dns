@@ -262,7 +262,17 @@ version full is put back the same way: the store lists the version that was in
 force again, its artifact and model are restored and its weights and
 calibration are published. A restoration step that also fails is named in the
 returned error instead of being dropped, including the case where there were no
-bytes to put back at all. **Rollback** restores the previous
+bytes to put back at all.  A config publication that fails happens after the engine has committed the
+promotion, so the same undo runs from the record captured before it - the
+version that was in force, or, for a first promotion, the calibration, weights
+and displaced bytes - and the response names the publication error together
+with anything that could not be put back. A rollback whose restored
+configuration cannot be published is taken back for the same reason: the
+version that was in force stays whole rather than keeping its model and
+calibration under another version's threshold. A promotion or rollback also
+retires the threshold trial in force, whose candidate threshold was measured
+against the scoring the version replaced, so it can no longer put its own base
+threshold back over the active version's. **Rollback** restores the previous
 version's bytes, threshold, calibration, weights and scoring configuration
 together, and re-scores the stored verdicts the same way. Activating or
 disabling a calibration map re-scores them too: a stored score describes the
@@ -301,13 +311,20 @@ actual bytes restored, builtin has no artifact, missing artifact refused),
 `a_rollback_whose_artifact_is_gone_puts_the_active_version_back`,
 `a_rollback_whose_model_will_not_load_puts_the_active_version_back`,
 `a_failed_rescore_never_leaves_a_stale_calibration_deciding_the_gate`,
-`a_model_change_retires_a_calibration_map_fitted_for_the_old_model` and
-`a_restart_does_not_reapply_a_calibration_map_fitted_for_a_replaced_model`.
+`a_model_change_retires_a_calibration_map_fitted_for_the_old_model`,
+`a_restart_does_not_reapply_a_calibration_map_fitted_for_a_replaced_model`,
+and over HTTP `a_first_promotion_whose_config_cannot_be_published_is_undone`,
+`a_promotion_whose_config_cannot_be_published_keeps_the_previous_version`,
+`a_rollback_whose_config_cannot_be_published_keeps_the_version_in_force`,
+`a_promotion_whose_fusion_cannot_be_re_scored_is_undone`,
+`a_promotion_whose_undo_fails_reports_what_could_not_be_put_back` and
+`a_version_change_retires_the_threshold_trial_in_force`.
 
 **Limitations:** the config threshold is published after the engine promotion,
-with compensating rollback on failure, not in one distributed transaction
-(single process, so the window is small but real). Model artifacts are kept
-forever; there is no pruning yet.
+with compensating undo on failure, not in one distributed transaction: an
+ordinary error leaves nothing half applied, but a crash between the two steps
+(or a panic in the in-place apply) can still leave the persisted overlay one
+version behind. Model artifacts are kept forever; there is no pruning yet.
 
 ## Stage 5 - Signal fusion
 
