@@ -415,6 +415,37 @@ the result with the verdict. `ai.page_rule` decides what that reading may do:
 The page is written by the site being judged, so a site that shows a fetcher
 harmless text can game `decide`. That is why it is opt-in.
 
+Set `ai.monitor_page_discovery = true` to inspect uncertain threat results for
+review when `ai.fetch_pages` is on. Discovery uses up to four workers and the
+time remaining after the existing page stages. It records outcomes under
+`page_discovery` in `GET /api/ai/signals?domain=…` for a day after a readable
+response, or an hour after a failed fetch. A missing threat reading is unknown.
+Phishing findings require a password form and either a password-confirmation
+request paired with a suspension threat or a recognized brand sign-in title on
+another site. Cross-site redirects are recorded as unknown for the original
+host. The reported confidence is a heuristic score.
+When there is a threat finding, `page_discovery_fusion` previews its effect as
+a single page signal alongside independent evidence. Reward claims paired with
+a processing fee and payment-card or identity fields are surfaced as scam
+findings for review.
+
+`ai.enforce_page_discovery` defaults to `false`. When enabled alongside
+`ai.monitor_page_discovery` and `ai.fetch_pages`, AI Enforce mode can block a
+page-led phishing finding on the exact inspected hostname. That requires a
+brand sign-in mismatch, a password form, and a password-confirmation demand
+under threat of suspension. The heuristic score is capped at 0.95. Findings
+must clear both the 0.95 minimum and the configured block threshold, which
+defaults to 0.99. Fusion and calibration can lower the score used at the gate.
+The next regular block snapshot refresh considers new findings.
+`page_discovery_active` shows whether an exact-host finding was published.
+`GET /api/ai/authority` reports confirmations, corrections, and unreviewed
+findings for the current cache. Its correction share covers only explicit
+reviews. A missing share means there are no reviewed findings.
+Evidence-only page mode, overrides, popularity and established-domain
+disputes, automated finding authority, and the per-refresh cap still apply.
+Page-only entries stay out of the category snapshot and threat export, where
+downstream consumers may interpret a hostname as covering its subdomains.
+
 Disputed threat candidates are read too, after the undisputed ones. Their
 pages are the ordinary examples the page-text model learns from.
 

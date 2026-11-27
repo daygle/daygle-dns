@@ -1559,6 +1559,8 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         "retrain_interval_secs": settings.retrain_interval_secs,
         "learn_negatives": settings.learn_negatives,
         "fetch_pages": settings.fetch_pages,
+        "monitor_page_discovery": settings.monitor_page_discovery,
+        "enforce_page_discovery": settings.enforce_page_discovery,
         "page_fetch_timeout_secs": settings.page_fetch_timeout_secs,
         "page_fetch_max_bytes": settings.page_fetch_max_bytes,
         "page_candidates_per_scan": settings.page_candidates_per_scan,
@@ -7869,6 +7871,8 @@ pub struct AiUpdate {
     pub retrain_interval_secs: Option<u64>,
     pub learn_negatives: Option<bool>,
     pub fetch_pages: Option<bool>,
+    pub monitor_page_discovery: Option<bool>,
+    pub enforce_page_discovery: Option<bool>,
     pub page_fetch_timeout_secs: Option<u64>,
     pub page_fetch_max_bytes: Option<u32>,
     pub page_candidates_per_scan: Option<u32>,
@@ -8883,6 +8887,12 @@ pub async fn update_settings(
         }
         if let Some(v) = a.fetch_pages {
             config.ai.fetch_pages = v;
+        }
+        if let Some(v) = a.monitor_page_discovery {
+            config.ai.monitor_page_discovery = v;
+        }
+        if let Some(v) = a.enforce_page_discovery {
+            config.ai.enforce_page_discovery = v;
         }
         if let Some(v) = a.page_fetch_timeout_secs {
             config.ai.page_fetch_timeout_secs = v.clamp(1, 30);

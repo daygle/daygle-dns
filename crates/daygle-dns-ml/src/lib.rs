@@ -179,6 +179,37 @@ pub struct SignalReport {
     /// assessment when a map was in force, else the assessment score (the fused
     /// one when fusion decides, the confidence otherwise).
     pub gate_score: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_discovery: Option<PageDiscoveryReport>,
+    /// Read-only preview of the score with discovery evidence included.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_discovery_fusion: Option<fusion::Fusion>,
+    /// Whether an exact-host page finding is in the published block snapshot.
+    pub page_discovery_active: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PageDiscoveryReport {
+    #[serde(flatten)]
+    pub reading: page::DiscoveryReading,
+    pub inspected_at: i64,
+    pub retry_at: i64,
+}
+
+impl PageDiscoveryReport {
+    fn observation(&self) -> Option<assessment::SignalObservation> {
+        Some(assessment::SignalObservation::new(
+            assessment::SignalSource::Page,
+            assessment::Direction::Threat,
+            Some(self.reading.confidence?),
+            &self.reading.evidence,
+            self.inspected_at,
+            assessment::ObservationScope {
+                value: self.reading.final_host.clone()?,
+                kind: assessment::Scope::Hostname,
+            },
+        ))
+    }
 }
 
 impl AiEngine {
@@ -921,9 +952,23 @@ impl AiEngine {
             .store
             .gate_score(domain, "threat", self.settings.load().fusion)?
             .unwrap_or(row.confidence);
+        let page_discovery = if self.settings.load().monitor_page_discovery {
+            self.store
+                .page_discovery(domain, chrono::Utc::now().timestamp())?
+        } else {
+            None
+        };
+        let weights = self.scanner.signal_weights();
+        let page_discovery_fusion = page_discovery
+            .as_ref()
+            .and_then(PageDiscoveryReport::observation)
+            .map(|page| fusion::fuse_page_discovery(&observations, &weights, page));
+        let page_discovery_active = self.snapshot.load().get(domain).is_some_and(|block| {
+            block.exact_host && block.expires_at > chrono::Utc::now().timestamp()
+        });
         Ok(Some(SignalReport {
             domain: domain.to_string(),
-            fusion: fusion::fuse(&observations, &self.scanner.signal_weights()),
+            fusion: fusion::fuse(&observations, &weights),
             observations,
             observed_at,
             confidence: row.confidence,
@@ -932,6 +977,9 @@ impl AiEngine {
             calibrated,
             calibration_version,
             gate_score,
+            page_discovery,
+            page_discovery_fusion,
+            page_discovery_active,
         }))
     }
 
@@ -1545,8 +1593,23 @@ impl AiEngine {
     pub fn authority_status(&self) -> Result<serde_json::Value> {
         let settings = self.settings.load_full();
         let decisions = authority::evaluate(&self.store, &settings.authority)?;
+        let page_discovery_review = if settings.monitor_page_discovery {
+            let (findings, corrected, confirmed) = self
+                .store
+                .page_discovery_reviews(chrono::Utc::now().timestamp())?;
+            let reviewed = corrected + confirmed;
+            Some(serde_json::json!({
+                "unreviewed": findings.saturating_sub(reviewed),
+                "corrected": corrected,
+                "confirmed": confirmed,
+                "reviewed_correction_share": (reviewed > 0).then(|| corrected as f64 / reviewed as f64),
+            }))
+        } else {
+            None
+        };
         Ok(serde_json::json!({
             "enabled": settings.authority.enabled,
+            "page_discovery_review": page_discovery_review,
             "settings": {
                 "feed_stage": settings.authority.feed_stage.as_str(),
                 "model_stage": settings.authority.model_stage.as_str(),

@@ -37,8 +37,8 @@
 //! * the response must be HTML or plain text, is read through a byte cap, and
 //!   the whole request is bounded by a timeout.
 //!
-//! The stage is off unless `ai.fetch_pages` is on, and it only ever sees
-//! domains the threat channel already reported.
+//! `ai.fetch_pages` enables validation of existing threat candidates.
+//! `ai.monitor_page_discovery` also inspects uncertain threat results.
 
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
@@ -59,6 +59,7 @@ const FETCH_WORKERS: usize = 4;
 /// Below this much readable text a page is treated as having none: an empty
 /// shell, a consent wall, or a script-only page says nothing worth recording.
 const MIN_TEXT_CHARS: usize = 40;
+pub(crate) const DISCOVERY_ENFORCEMENT_FLOOR: f32 = 0.95;
 
 /// What a fetched page yielded: its address after redirects, its `<title>`
 /// and its readable text.
@@ -67,6 +68,9 @@ pub struct PageContent {
     pub url: String,
     pub title: String,
     pub text: String,
+    complete: bool,
+    has_password_form: bool,
+    has_sensitive_form: bool,
 }
 
 /// A category the page text suggests, with the cues that suggested it.
@@ -532,10 +536,14 @@ impl PageFetcher {
     /// Fetch `domain`'s home page, HTTPS first and plain HTTP if that fails.
     /// The error is a short human-readable reason, recorded as evidence.
     pub fn fetch(&self, domain: &str) -> Result<PageContent, String> {
+        self.fetch_page(domain, false)
+    }
+
+    fn fetch_page(&self, domain: &str, inspect_forms: bool) -> Result<PageContent, String> {
         let host = normalise_host(domain).ok_or_else(|| "not a fetchable host".to_string())?;
         let mut last = String::from("no attempt made");
         for scheme in ["https", "http"] {
-            match self.fetch_url(&host, scheme, "/", 0) {
+            match self.fetch_url(&host, scheme, "/", 0, inspect_forms) {
                 Ok(page) => return Ok(page),
                 Err(e) => last = e,
             }
@@ -549,6 +557,7 @@ impl PageFetcher {
         scheme: &str,
         target: &str,
         hops: usize,
+        inspect_forms: bool,
     ) -> Result<PageContent, String> {
         let addr = self.resolve(host, scheme)?;
         let url = match self.pinned {
@@ -583,7 +592,13 @@ impl PageFetcher {
                 .ok_or_else(|| "redirect without a location".to_string())?
                 .to_string();
             let (next_scheme, next_host, next_target) = redirect_target(scheme, host, &location)?;
-            return self.fetch_url(&next_host, &next_scheme, &next_target, hops + 1);
+            return self.fetch_url(
+                &next_host,
+                &next_scheme,
+                &next_target,
+                hops + 1,
+                inspect_forms,
+            );
         }
         if !status.is_success() {
             return Err(format!("HTTP {status}"));
@@ -616,11 +631,19 @@ impl PageFetcher {
             .read_to_end(&mut body)
             .map_err(|e| format!("read failed: {e}"))?;
         let html = String::from_utf8_lossy(&body);
-        let (title, text) = extract(&html);
+        let (title, text, has_password_form, has_sensitive_form) =
+            extract_page(&html, inspect_forms && content_type != "text/plain");
         if text.chars().count() < MIN_TEXT_CHARS {
             return Err("page had no readable text".to_string());
         }
-        Ok(PageContent { url, title, text })
+        Ok(PageContent {
+            url,
+            title,
+            text,
+            complete: body.len() < self.max_bytes,
+            has_password_form,
+            has_sensitive_form,
+        })
     }
 
     /// Resolve once, refuse if *any* answer is not globally routable, and hand
@@ -752,10 +775,18 @@ fn without_fragment(value: &str) -> String {
 /// Readable title and text out of an HTML document: scripts, styles,
 /// comments and tags dropped, entities decoded, whitespace collapsed.
 pub fn extract(html: &str) -> (String, String) {
+    let (title, text, _, _) = extract_page(html, false);
+    (title, text)
+}
+
+fn extract_page(html: &str, inspect_forms: bool) -> (String, String, bool, bool) {
     let lower = html.to_ascii_lowercase();
     let mut title = String::new();
     let mut text = String::new();
     let mut i = 0usize;
+    let mut in_form = false;
+    let mut has_password_form = false;
+    let mut has_sensitive_form = false;
     while i < html.len() {
         match lower[i..].find('<') {
             Some(offset) => {
@@ -789,6 +820,22 @@ pub fn extract(html: &str) -> (String, String) {
                 if skipped {
                     continue;
                 }
+                if inspect_forms {
+                    for (opening, close) in
+                        [("<template", "</template>"), ("<textarea", "</textarea>")]
+                    {
+                        if lower[open..].starts_with(opening) {
+                            i = lower[open..]
+                                .find(close)
+                                .map_or(html.len(), |end| open + end + close.len());
+                            skipped = true;
+                            break;
+                        }
+                    }
+                    if skipped {
+                        continue;
+                    }
+                }
                 if lower[open..].starts_with("<title")
                     && title.is_empty()
                     && lower[open..].find('>').is_some()
@@ -800,8 +847,30 @@ pub fn extract(html: &str) -> (String, String) {
                         continue;
                     }
                 }
-                match lower[open..].find('>') {
-                    Some(end) => i = open + end + 1,
+                let tail = &lower[open + 1..];
+                let end = if inspect_forms {
+                    tag_end(tail)
+                } else {
+                    tail.find('>')
+                };
+                match end {
+                    Some(end) => {
+                        if inspect_forms {
+                            let tag = &tail[..end];
+                            let split = tag.find(|c: char| c.is_ascii_whitespace() || c == '/');
+                            let name = &tag[..split.unwrap_or(tag.len())];
+                            if tag.trim_end() == "/form" {
+                                in_form = false;
+                            } else if name == "form" {
+                                in_form = true;
+                            } else if name == "input" && in_form {
+                                let (password, sensitive) = form_input(&tag[name.len()..]);
+                                has_password_form |= password;
+                                has_sensitive_form |= sensitive;
+                            }
+                        }
+                        i = open + end + 2;
+                    }
                     None => break,
                 }
             }
@@ -811,7 +880,69 @@ pub fn extract(html: &str) -> (String, String) {
             }
         }
     }
-    (collapse(&title), collapse(&decode(&text)))
+    (
+        collapse(&title),
+        collapse(&decode(&text)),
+        has_password_form,
+        has_sensitive_form,
+    )
+}
+
+fn tag_end(tag: &str) -> Option<usize> {
+    let mut quote = None;
+    for (index, byte) in tag.bytes().enumerate() {
+        match quote {
+            Some(end) if byte == end => quote = None,
+            Some(_) => {}
+            None if matches!(byte, b'\'' | b'"') => quote = Some(byte),
+            None if byte == b'>' => return Some(index),
+            None => {}
+        }
+    }
+    None
+}
+
+fn form_input(mut rest: &str) -> (bool, bool) {
+    let mut input_type = None;
+    let mut sensitive = false;
+    while !rest.trim_start().is_empty() {
+        rest = rest.trim_start();
+        let end = rest
+            .find(|c: char| c.is_ascii_whitespace() || c == '=')
+            .unwrap_or(rest.len());
+        let (name, tail) = rest.split_at(end);
+        let Some(value) = tail.trim_start().strip_prefix('=') else {
+            rest = tail;
+            continue;
+        };
+        let value = value.trim_start();
+        let (actual, tail) = match value.as_bytes().first() {
+            Some(b'\'' | b'"') => {
+                let Some((actual, tail)) = value[1..].split_once(value.as_bytes()[0] as char)
+                else {
+                    return (false, false);
+                };
+                (actual, tail)
+            }
+            _ => value.split_at(value.find(char::is_whitespace).unwrap_or(value.len())),
+        };
+        match name {
+            "type" if input_type.is_none() => input_type = Some(actual),
+            "autocomplete" => {
+                sensitive |= matches!(
+                    actual.split_ascii_whitespace().last(),
+                    Some("cc-number" | "cc-csc")
+                );
+            }
+            "name" => sensitive |= matches!(actual, "ssn" | "social_security_number" | "tax_id"),
+            _ => {}
+        }
+        rest = tail;
+    }
+    (
+        input_type == Some("password"),
+        sensitive && input_type != Some("hidden"),
+    )
 }
 
 fn decode(text: &str) -> String {
@@ -879,11 +1010,275 @@ pub struct Inspection {
 /// callers that already hold readings can supply their own without a network.
 pub trait PageReader: Send + Sync {
     fn inspect(&self, domain: &str) -> Inspection;
+
+    fn inspect_for_discovery(&self, _domain: &str, _floor: f32) -> DiscoveryReading {
+        DiscoveryReading::unknown(None, "discovery inspection unavailable")
+    }
+}
+
+/// A review finding sourced only from the inspected page.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DiscoveryReading {
+    pub final_host: Option<String>,
+    pub category: Option<String>,
+    pub confidence: Option<f32>,
+    pub evidence: String,
+}
+
+impl DiscoveryReading {
+    fn unknown(final_host: Option<String>, evidence: &str) -> Self {
+        Self {
+            final_host,
+            category: None,
+            confidence: None,
+            evidence: truncate(evidence, 160),
+        }
+    }
 }
 
 impl PageReader for PageFetcher {
     fn inspect(&self, domain: &str) -> Inspection {
         read_page(self, domain)
+    }
+
+    fn inspect_for_discovery(&self, domain: &str, floor: f32) -> DiscoveryReading {
+        match self.fetch_page(domain, true) {
+            Ok(page) => discovery_reading(domain, &page, floor),
+            Err(_) => DiscoveryReading::unknown(None, "page could not be inspected"),
+        }
+    }
+}
+
+fn discovery_reading(domain: &str, page: &PageContent, floor: f32) -> DiscoveryReading {
+    let final_host = reqwest::Url::parse(&page.url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned));
+    if !page.complete {
+        return DiscoveryReading::unknown(final_host, "page reached the response-size limit");
+    }
+    let registered = final_host.as_deref().and_then(psl::domain_str);
+    if registered.is_none() || registered != psl::domain_str(domain) {
+        return DiscoveryReading::unknown(final_host, "page redirected to another site");
+    }
+    // These are narrow title claims, not general brand mentions. Shared identity
+    // providers need their own entries when adding another brand here.
+    let title = normalise(&page.title);
+    let text = format!(" {title} {} ", normalise(&page.text));
+    let pressures_password =
+        text.contains(" account will be suspended ") && text.contains(" confirm your password ");
+    let brand = [
+        ("paypal", &["paypal.com"][..]),
+        (
+            "microsoft",
+            &["microsoft.com", "microsoftonline.com", "live.com"][..],
+        ),
+        ("apple", &["apple.com", "icloud.com"][..]),
+    ]
+    .into_iter()
+    .find(|(brand, _)| title.split_whitespace().next() == Some(*brand));
+    if let Some((brand, official)) = brand {
+        if registered.is_some_and(|host| official.contains(&host)) {
+            return DiscoveryReading::unknown(final_host, "page is on the named brand's site");
+        }
+        let title = format!(" {title} ");
+        let sign_in = [" sign in ", " sign into ", " log in ", " login "]
+            .iter()
+            .any(|phrase| title.contains(phrase));
+        let confidence = if pressures_password {
+            DISCOVERY_ENFORCEMENT_FLOOR
+        } else {
+            0.9
+        };
+        if page.has_password_form && sign_in && floor <= confidence {
+            return DiscoveryReading {
+                final_host,
+                category: Some("phishing".to_owned()),
+                confidence: Some(confidence),
+                evidence: if pressures_password {
+                    format!("{brand} sign-in title on a different site, password form, and password-confirmation demand under threat of suspension")
+                } else {
+                    format!("{brand} sign-in title on a different site with a password form")
+                },
+            };
+        }
+    }
+    let reward = text.contains(" claim your reward ") || text.contains(" claim your prize ");
+    if page.has_sensitive_form && reward && text.contains(" processing fee ") && floor <= 0.9 {
+        return DiscoveryReading {
+            final_host,
+            category: Some("scam".to_string()),
+            confidence: Some(0.9),
+            evidence: "reward claim with a processing fee and a payment or identity form"
+                .to_string(),
+        };
+    }
+    let reading = classify_text(&page.title, &page.text).filter(|reading| {
+        reading.confidence >= floor.max(0.8)
+            && reading.cues.len() >= 2
+            && daygle_dns_core::config::THREAT_FAMILIES.contains(&reading.category)
+            && (reading.category != "phishing"
+                || (page.has_password_form
+                    && reading.cues.contains(&"account will be suspended")
+                    && reading.cues.contains(&"confirm your password")))
+    });
+    match reading {
+        Some(reading) => DiscoveryReading {
+            final_host,
+            category: Some(reading.category.to_owned()),
+            confidence: Some(reading.confidence),
+            evidence: reading
+                .cues
+                .into_iter()
+                .take(3)
+                .chain((reading.category == "phishing").then_some("password form"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        },
+        None => DiscoveryReading::unknown(final_host, "no strong threat reading from page text"),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn discovery_requires_multiple_threat_cues_and_a_complete_response() {
+    let mut page = PageContent {
+        url: "https://accounts.example/login".to_owned(),
+        title: "Account sign-in".to_owned(),
+        text: "Verify your account. Verify your account. Verify your account.".to_owned(),
+        complete: true,
+        has_password_form: true,
+        has_sensitive_form: false,
+    };
+    assert!(discovery_reading("accounts.example", &page, 0.5)
+        .category
+        .is_none());
+    page.text.push_str(" Confirm your password.");
+    assert!(discovery_reading("accounts.example", &page, 0.5)
+        .category
+        .is_none());
+    page.text.push_str(" Your account will be suspended.");
+    let finding = discovery_reading("accounts.example", &page, 0.5);
+    assert_eq!(finding.category.as_deref(), Some("phishing"));
+    assert_eq!(finding.final_host.as_deref(), Some("accounts.example"));
+    page.has_password_form = false;
+    assert!(discovery_reading("accounts.example", &page, 0.5)
+        .category
+        .is_none());
+    page.has_password_form = true;
+    page.complete = false;
+    assert!(discovery_reading("accounts.example", &page, 0.5)
+        .confidence
+        .is_none());
+}
+
+#[cfg(test)]
+#[test]
+fn discovery_checks_password_forms_and_brand_claims() {
+    let signed_in = r#"<form><input title="a > b" TYPE = 'Password'></form>"#;
+    let html = format!("<title>PayPal sign in</title>{signed_in}");
+    let (title, text, has_password_form, has_sensitive_form) = extract_page(&html, true);
+    assert!(has_password_form);
+    let mut page = PageContent {
+        url: "https://accounts.example/".to_owned(),
+        title,
+        text,
+        complete: true,
+        has_password_form,
+        has_sensitive_form,
+    };
+    assert_eq!(
+        discovery_reading("accounts.example", &page, 0.6)
+            .category
+            .as_deref(),
+        Some("phishing")
+    );
+    assert!(discovery_reading("redirect.example", &page, 0.6)
+        .category
+        .is_none());
+    page.url = "https://www.paypal.com/signin".to_owned();
+    assert!(discovery_reading("www.paypal.com", &page, 0.6)
+        .category
+        .is_none());
+    page.url = "https://accounts.example/".to_owned();
+    page.title = "Sign in to your account".to_owned();
+    assert!(discovery_reading("accounts.example", &page, 0.6)
+        .category
+        .is_none());
+
+    for html in [
+        r#"<!-- <form><input type=password></form> -->"#,
+        r#"<script>'<form><input type=password></form>'</script>"#,
+        r#"<template><form><input type=password></form></template>"#,
+        r#"<textarea><form><input type=password></form></textarea>"#,
+        r#"<form><input data-note="type=password" type=email></form>"#,
+        r#"<form></form><input type=password>"#,
+    ] {
+        assert!(
+            !extract_page(html, true).2,
+            "unexpected password form: {html}"
+        );
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn discovery_distinguishes_sensitive_form_scams_from_ordinary_pages() {
+    for (title, text, input, expected) in [
+        (
+            "Checkout",
+            "Pay the processing fee for this order.",
+            "autocomplete=cc-number",
+            None,
+        ),
+        (
+            "Tax form",
+            "Enter your identity details to complete your tax return.",
+            "name=ssn",
+            None,
+        ),
+        (
+            "Prize announcement",
+            "Claim your prize and pay a processing fee.",
+            "type=hidden name=ssn",
+            None,
+        ),
+        (
+            "Prize claim",
+            "Claim your prize and pay a processing fee.",
+            "autocomplete='billing cc-number'",
+            Some("scam"),
+        ),
+        (
+            "Prize claim",
+            "Claim your reward after you pay the processing fee.",
+            "name=social_security_number",
+            Some("scam"),
+        ),
+        (
+            "PayPal Login",
+            "Sign in to continue. Confirm your password or your account will be suspended.",
+            "type=password",
+            Some("phishing"),
+        ),
+    ] {
+        let html = format!("<title>{title}</title>{text}<form><input {input}></form>");
+        let (title, text, has_password_form, has_sensitive_form) = extract_page(&html, true);
+        let reading = discovery_reading(
+            "ordinary.example",
+            &PageContent {
+                url: "https://ordinary.example/".to_owned(),
+                title,
+                text,
+                complete: true,
+                has_password_form,
+                has_sensitive_form,
+            },
+            0.6,
+        );
+        assert_eq!(reading.category.as_deref(), expected, "{html}");
+        if expected == Some("phishing") {
+            assert_eq!(reading.confidence, Some(DISCOVERY_ENFORCEMENT_FLOOR));
+        }
     }
 }
 

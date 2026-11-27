@@ -1617,6 +1617,10 @@ pub struct AiSettings {
     /// `page_fetch_timeout_secs`, `page_fetch_max_bytes` and
     /// `page_candidates_per_scan` for the limits.
     pub fetch_pages: bool,
+    /// Inspect uncertain threat results in the background for operator review.
+    pub monitor_page_discovery: bool,
+    /// Give high-confidence page discovery findings exact-host block authority.
+    pub enforce_page_discovery: bool,
     /// Timeout for one page fetch, in seconds (1-30).
     pub page_fetch_timeout_secs: u64,
     /// Bytes read from one page before the read stops (16 KiB - 2 MiB).
@@ -1700,6 +1704,8 @@ impl Default for AiSettings {
             trial_new_models: true,
             learn_negatives: false,
             fetch_pages: true,
+            monitor_page_discovery: false,
+            enforce_page_discovery: false,
             page_fetch_timeout_secs: 5,
             page_fetch_max_bytes: 512 * 1024,
             page_candidates_per_scan: 16,
@@ -2859,6 +2865,8 @@ pub struct AiUpdate {
     pub learn_negatives: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fetch_pages: Option<bool>,
+    pub monitor_page_discovery: Option<bool>,
+    pub enforce_page_discovery: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_fetch_timeout_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2920,6 +2928,8 @@ impl AiUpdate {
             trial_new_models: Some(settings.trial_new_models),
             learn_negatives: Some(settings.learn_negatives),
             fetch_pages: Some(settings.fetch_pages),
+            monitor_page_discovery: Some(settings.monitor_page_discovery),
+            enforce_page_discovery: Some(settings.enforce_page_discovery),
             page_fetch_timeout_secs: Some(settings.page_fetch_timeout_secs),
             page_fetch_max_bytes: Some(settings.page_fetch_max_bytes),
             page_candidates_per_scan: Some(settings.page_candidates_per_scan),
@@ -3035,6 +3045,12 @@ impl AiUpdate {
         }
         if let Some(v) = self.fetch_pages {
             ai.fetch_pages = v;
+        }
+        if let Some(v) = self.monitor_page_discovery {
+            ai.monitor_page_discovery = v;
+        }
+        if let Some(v) = self.enforce_page_discovery {
+            ai.enforce_page_discovery = v;
         }
         if let Some(v) = self.page_fetch_timeout_secs {
             ai.page_fetch_timeout_secs = v.clamp(1, 30);

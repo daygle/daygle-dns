@@ -47,13 +47,12 @@ use crate::scanner::{exempt, BlockSnapshot, CategorySnapshot, ExemptionSnapshot}
 fn suffix_match<'a, T>(
     name: &str,
     snapshot: &'a std::collections::HashMap<String, T>,
-    now: i64,
-    expires_at: impl Fn(&T) -> i64,
+    eligible: impl Fn(&T, bool) -> bool,
 ) -> Option<&'a T> {
     let mut candidate = name;
     loop {
         if let Some(found) = snapshot.get(candidate) {
-            if expires_at(found) > now {
+            if eligible(found, candidate == name) {
                 return Some(found);
             }
         }
@@ -145,8 +144,10 @@ impl PolicyPlugin for AiBlockPlugin {
         //    the server records, or record for one while it enforces).
         if policy.mode == AiMode::Enforce {
             let snapshot = self.snapshot.load();
-            if let Some(block) =
-                suffix_match(name, &snapshot, now, |b| b.expires_at).filter(|_| !is_exempt())
+            if let Some(block) = suffix_match(name, &snapshot, |b, exact| {
+                b.expires_at > now && (exact || !b.exact_host)
+            })
+            .filter(|_| !is_exempt())
             {
                 return Some(
                     Decision::new(
@@ -168,7 +169,7 @@ impl PolicyPlugin for AiBlockPlugin {
             return None;
         }
         let categories = self.categories.load();
-        let labelled = suffix_match(name, &categories, now, |c| c.expires_at)?;
+        let labelled = suffix_match(name, &categories, |c, _| c.expires_at > now)?;
         let category = labelled.category.as_str();
         if !blocked.iter().any(|c| c.eq_ignore_ascii_case(category)) || is_exempt() {
             return None;
@@ -296,6 +297,7 @@ mod tests {
             ActiveBlock {
                 category: "phishing".to_string(),
                 expires_at: i64::MAX,
+                exact_host: false,
             },
         );
         let p = plugin(AiMode::Train, snapshot);
@@ -310,6 +312,7 @@ mod tests {
             ActiveBlock {
                 category: "malware".to_string(),
                 expires_at: i64::MAX,
+                exact_host: false,
             },
         );
         let p = plugin(AiMode::Enforce, snapshot);
@@ -337,6 +340,7 @@ mod tests {
             ActiveBlock {
                 category: "malware".to_string(),
                 expires_at: i64::MAX,
+                exact_host: false,
             },
         );
         let p = plugin(AiMode::Enforce, snapshot);
@@ -358,6 +362,7 @@ mod tests {
             ActiveBlock {
                 category: "malware".to_string(),
                 expires_at: i64::MAX,
+                exact_host: false,
             },
         );
         let p = plugin(AiMode::Train, snapshot);
@@ -382,6 +387,7 @@ mod tests {
             ActiveBlock {
                 category: "malware".to_string(),
                 expires_at: i64::MAX,
+                exact_host: false,
             },
         );
         let p = plugin(AiMode::Enforce, snapshot);
@@ -418,6 +424,7 @@ mod tests {
             ActiveBlock {
                 category: "phishing".to_string(),
                 expires_at: chrono::Utc::now().timestamp() - 1,
+                exact_host: false,
             },
         );
         let p = plugin(AiMode::Enforce, snapshot);
@@ -437,6 +444,7 @@ mod tests {
             ActiveBlock {
                 category: "malware".to_string(),
                 expires_at: i64::MAX,
+                exact_host: false,
             },
         );
         let p = AiBlockPlugin::new(
@@ -510,6 +518,7 @@ mod tests {
             ActiveBlock {
                 category: "malware".to_string(),
                 expires_at: i64::MAX,
+                exact_host: false,
             },
         );
         let p = plugin_with(
