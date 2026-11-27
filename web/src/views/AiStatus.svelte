@@ -25,6 +25,12 @@
   let retraining = $state(false);
   let rollingBack = $state(false);
 
+  // Calibration is an action, not a stored setting: fit a map, apply it, or
+  // go back to the uncalibrated score.
+  let calibration = $state(null);
+  let calibrationBusy = $state(false);
+  let calibrationError = $state(null);
+
   // Viewers are read-only; with sign-in off there is no stored user at all.
   const isAdmin = getStoredUser()?.role !== 'viewer';
 
@@ -118,6 +124,7 @@
     error = null;
     try {
       status = await api.aiStatus();
+      loadCalibration();
       api
         .blockingGroups()
         .then((groups) => {
@@ -184,6 +191,65 @@
     } catch (e) {
       error = formatApiError(e);
       feedsBusy = false;
+    }
+  }
+
+  async function loadCalibration() {
+    try {
+      calibration = await api.aiCalibration();
+    } catch {
+      calibration = null;
+    }
+  }
+
+  async function fitCalibration() {
+    calibrationBusy = true;
+    calibrationError = null;
+    notice = null;
+    try {
+      const result = await api.aiCalibrationFit();
+      if (result?.fitted === false || result?.accepted === false) {
+        calibrationError = result?.reason || 'The fit was not accepted.';
+      } else {
+        notice = `Calibration ${result.version} was fitted and recorded on ${result.tuning_samples} tuning and ${result.holdout_samples} held-out sample(s). Apply it to put it in force.`;
+      }
+      await loadCalibration();
+    } catch (e) {
+      calibrationError = formatApiError(e);
+    } finally {
+      calibrationBusy = false;
+    }
+  }
+
+  async function applyCalibration(version) {
+    calibrationBusy = true;
+    calibrationError = null;
+    notice = null;
+    try {
+      await api.aiCalibrationApply(version);
+      notice = `Calibration ${version} is in force; the stored verdicts were re-scored.`;
+      await loadCalibration();
+      await load(true);
+    } catch (e) {
+      calibrationError = formatApiError(e);
+    } finally {
+      calibrationBusy = false;
+    }
+  }
+
+  async function disableCalibration() {
+    calibrationBusy = true;
+    calibrationError = null;
+    notice = null;
+    try {
+      await api.aiCalibrationDisable();
+      notice = 'Calibration is off; the assessment score is compared directly, as before.';
+      await loadCalibration();
+      await load(true);
+    } catch (e) {
+      calibrationError = formatApiError(e);
+    } finally {
+      calibrationBusy = false;
     }
   }
 
@@ -547,6 +613,86 @@
         <p class="muted">None.</p>
       {/if}
     </div>
+  </div>
+
+  <div class="card" style="margin-top: 14px">
+    <div class="spread" style="margin-bottom: 8px; gap: 8px; flex-wrap: wrap">
+      <h3 style="margin: 0">Calibration</h3>
+      {#if isAdmin}
+        <div class="row" style="gap: 8px">
+          <button onclick={fitCalibration} disabled={calibrationBusy}>Fit a Map</button>
+          <button class="secondary" onclick={disableCalibration} disabled={calibrationBusy || !calibration?.calibration_active}>Turn Off</button>
+        </div>
+      {/if}
+    </div>
+    <p class="muted small" style="margin: 0 0 10px">
+      A map turns the assessment score into a calibrated probability. Fitting
+      records one and measures it on a held-out fifth of the labelled evidence;
+      nothing changes until a map is applied.
+    </p>
+    {#if calibrationError}
+      <p style="color: var(--danger); margin: 0 0 10px">{calibrationError}</p>
+    {/if}
+    {#if calibration}
+      <table>
+        <tbody>
+          <tr>
+            <td class="muted">In Force</td>
+            <td>
+              {#if calibration.active}
+                <span class="pill ok">Active</span> {calibration.active.version}
+                {#if calibration.active.metrics}
+                  <span class="muted small">
+                    - Brier {calibration.active.metrics.brier.toFixed(4)}, ECE {calibration.active.metrics.ece.toFixed(4)} on {calibration.active.metrics.samples} held-out name(s)
+                  </span>
+                {/if}
+              {:else}
+                Identity
+                <span class="muted small">- the score is an assessment, not a calibrated probability</span>
+              {/if}
+            </td>
+          </tr>
+          <tr><td class="muted">Fitted For</td><td><code class="muted">{calibration.live_model}</code></td></tr>
+        </tbody>
+      </table>
+      {#if calibration.candidates?.length}
+        <table style="margin-top: 10px">
+          <thead>
+            <tr>
+              <th>Recorded Map</th>
+              <th>Fitted For</th>
+              <th class="num">Held-Out</th>
+              <th class="num">Brier</th>
+              <th class="num">ECE</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each calibration.candidates as candidate (candidate.version)}
+              <tr>
+                <td>
+                  <code>{candidate.version}</code>{#if candidate.active} <span class="pill ok">Active</span>{/if}
+                </td>
+                <td class="muted"><code class="muted">{candidate.source_model}</code></td>
+                <td class="num">{candidate.metrics?.samples ?? 0}</td>
+                <td class="num">{candidate.metrics ? candidate.metrics.brier.toFixed(4) : '-'}</td>
+                <td class="num">{candidate.metrics ? candidate.metrics.ece.toFixed(4) : '-'}</td>
+                <td>
+                  {#if isAdmin && !candidate.active && candidate.metrics}
+                    <button class="secondary" style="padding: 2px 8px" onclick={() => applyCalibration(candidate.version)} disabled={calibrationBusy}>Apply</button>
+                  {/if}
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {:else}
+        <p class="muted">No map has been recorded yet.</p>
+      {/if}
+      {#if calibration.note}<p class="muted small">{calibration.note}</p>{/if}
+    {:else}
+      <p class="muted">Calibration status is unavailable.</p>
+    {/if}
   </div>
 
   <div class="card" style="margin-top: 14px">

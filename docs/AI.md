@@ -283,14 +283,17 @@ beside the verdict without changing what blocks; `decide` makes it the
 assessment, so the gate compares it - with or without a calibration map; `off`
 records observations only. Changing the mode re-scores the stored verdicts from
 their observations before the block snapshot is rebuilt, so enforcement never
-compares a score the previous mode produced.
+compares a score the previous mode produced. It is set on AI -> Settings
+(Scoring), or with `ai.fusion` in the config file; either way the same
+re-score runs before the new mode is published.
 
 **Calibration** maps the assessment score to a calibrated probability. A map
 is fitted with isotonic regression on one part of the labelled evidence and
 evaluated on a held-out part split by registrable domain, reporting Brier
 score, expected calibration error and a reliability table. A candidate map
 that scores worse than the one in force is refused. Nothing is applied until
-you apply it (`POST /api/ai/calibration/apply`), and until then the score is
+you apply it (Fit a Map and Apply on the AI status page, or
+`POST /api/ai/calibration/fit` then `/apply`), and until then the score is
 an assessment score, **not** a real-world probability. The score of record is
 the calibrated assessment when a map is in force, else the assessment score (the
 fused score under `decide`, the confidence otherwise). The gate, the threshold
@@ -310,7 +313,8 @@ are recorded and listed but never reach the block snapshot, and a source whose
 measured false-positive share passes `demote_fp_rate` is demoted to `monitor`
 automatically. Operator labels and overrides are never filtered or demoted by
 it. The per-refresh limit on new blocks can be tightened here, never raised
-above its 500-domain ceiling.
+above its 500-domain ceiling. Turn it on under AI -> Settings (Scoring) ->
+Enforcement Authority, or with `ai.authority` in the config file.
 
 The audit and the exact migration, endpoint, test and limitation of each
 stage are in [AI_SCORING_AUDIT.md](AI_SCORING_AUDIT.md).

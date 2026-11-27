@@ -7851,6 +7851,12 @@ pub struct AiUpdate {
     pub block_threshold: Option<f32>,
     /// The false-positive rate a threshold trial must hold to (0.0-0.5).
     pub threshold_fpr_target: Option<f32>,
+    /// How the structured signal observations are combined: `off` records
+    /// them, `monitor` records the fused score beside the verdict, `decide`
+    /// makes it the assessment the gate compares.
+    pub fusion: Option<daygle_dns_core::config::FusionMode>,
+    /// Graduated enforcement authority, per evidence source.
+    pub authority: Option<daygle_dns_core::config::AuthoritySettings>,
     pub confidence_floor: Option<f32>,
     pub category_ttl_secs: Option<u64>,
     pub threat_ttl_secs: Option<u64>,
@@ -8816,6 +8822,20 @@ pub async fn update_settings(
         if let Some(v) = a.threshold_fpr_target {
             config.ai.threshold_fpr_target = v.clamp(0.0, 0.5);
         }
+        if let Some(v) = a.fusion {
+            config.ai.fusion = v;
+        }
+        if let Some(v) = &a.authority {
+            // The same rails the file gets: a configured new-block limit can
+            // only tighten the built-in ceiling, and the demotion thresholds
+            // stay in range, so a console save cannot widen them.
+            let mut authority = v.clone();
+            authority.max_new_blocks_per_refresh =
+                authority.max_new_blocks_per_refresh.clamp(1, 500);
+            authority.demote_fp_rate = authority.demote_fp_rate.clamp(0.0, 1.0);
+            authority.demote_min_samples = authority.demote_min_samples.max(1);
+            config.ai.authority = authority;
+        }
         if let Some(v) = a.confidence_floor {
             config.ai.confidence_floor = v;
         }
@@ -9012,6 +9032,21 @@ pub async fn update_settings(
         None
     };
 
+    // A fusion mode names the score the gate compares, and every stored
+    // assessment records the mode it was scored under. Re-score them before
+    // the configuration naming the new mode is written: a mode that cannot be
+    // applied is refused here, with nothing persisted, rather than reported
+    // saved while the gate reads scores the previous mode produced.
+    if config.ai.fusion != old_config.ai.fusion {
+        if let Some(ai) = &state.ai {
+            let engine = ai.clone();
+            let settings = config.ai.clone();
+            if let Err(e) = run_blocking(move || engine.rescore_for_settings(&settings)).await {
+                return map_err(e);
+            }
+        }
+    }
+
     // Persist the DB-owned runtime settings to the database, then publish
     // live. (The config file is no longer rewritten: it holds bootstrap
     // values only, and the DB overlay wins over it on every boot.)
@@ -9141,6 +9176,22 @@ pub async fn update_settings(
                 state.logs.info(
                     "api",
                     "AI settings stored; the scanner activates on the next restart".to_string(),
+                );
+            }
+        }
+    }
+    // The trial in force was measured against the scoring this save replaces,
+    // so it must not be able to put its own base threshold back over it. A
+    // failure is named rather than failing a save that is already published.
+    if ai_changed && config.ai.fusion != old_config.ai.fusion {
+        if let Some(ai) = &state.ai {
+            let engine = ai.clone();
+            if let Err(e) = run_blocking(move || engine.store.retire_threshold_trials()).await {
+                state.logs.warn(
+                    "api",
+                    format!(
+                        "the threshold trial in force could not be retired after the fusion mode changed ({e}); it still names the scoring that was replaced"
+                    ),
                 );
             }
         }

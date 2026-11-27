@@ -1752,3 +1752,78 @@ async fn a_version_change_retires_the_threshold_trial_in_force() {
     assert!(kept.applied_at > 0 && kept.rolled_back_at > 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn fusion_and_authority_are_settings_the_console_can_change() {
+    let dir = scratch_dir("scoring-settings");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai.clone()));
+    let (code, _, body) = call(
+        state.clone(),
+        "PUT",
+        "/api/config",
+        Some(serde_json::json!({ "ai": {
+            "fusion": "decide",
+            "authority": {
+                "enabled": true,
+                "feed_stage": "enforce",
+                "model_stage": "propose",
+                "operator_stage": "monitor",
+                "max_new_blocks_per_refresh": 9_999,
+                "demote_fp_rate": 0.25,
+                "demote_min_samples": 5
+            }
+        }})),
+    )
+    .await;
+    assert!(code.is_success(), "{body}");
+
+    // The running engine has them, so the save is not a stored no-op.
+    let applied = ai.settings.load_full();
+    assert_eq!(
+        applied.fusion,
+        daygle_dns_core::config::FusionMode::Decide,
+        "{body}"
+    );
+    assert!(applied.authority.enabled);
+    assert_eq!(
+        applied.authority.operator_stage,
+        daygle_dns_core::config::AuthorityStage::Monitor
+    );
+    // The per-refresh limit can only tighten the built-in ceiling, and the
+    // demotion numbers stay in range.
+    assert_eq!(applied.authority.max_new_blocks_per_refresh, 500);
+    assert_eq!(applied.authority.demote_fp_rate, 0.25);
+    assert_eq!(applied.authority.demote_min_samples, 5);
+
+    // The status page reads them back, so its rows stop saying Monitor/Off.
+    let status = json(state.clone(), "/api/ai/status").await;
+    assert_eq!(status["fusion"], "decide", "{status}");
+    assert_eq!(status["authority"]["enabled"], true, "{status}");
+    assert_eq!(status["authority"]["operator_stage"], "monitor", "{status}");
+
+    // And the same form can put the defaults back.
+    let (code, _, body) = call(
+        state,
+        "PUT",
+        "/api/config",
+        Some(serde_json::json!({ "ai": {
+            "fusion": "monitor",
+            "authority": {
+                "enabled": false,
+                "feed_stage": "enforce",
+                "model_stage": "propose",
+                "operator_stage": "enforce",
+                "max_new_blocks_per_refresh": 500,
+                "demote_fp_rate": 0.05,
+                "demote_min_samples": 20
+            }
+        }})),
+    )
+    .await;
+    assert!(code.is_success(), "{body}");
+    let applied = ai.settings.load_full();
+    assert_eq!(applied.fusion, daygle_dns_core::config::FusionMode::Monitor);
+    assert!(!applied.authority.enabled);
+    let _ = std::fs::remove_dir_all(&dir);
+}

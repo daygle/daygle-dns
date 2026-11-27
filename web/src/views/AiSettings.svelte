@@ -12,7 +12,24 @@
   // days, percent); turned back into seconds and fractions on save.
   const KEYS = ['enabled', 'mode', 'workers', 'max_domains_per_scan', 'scan_interval_secs', 'expire_check_secs',
     'block_threshold', 'confidence_floor', 'category_ttl_secs', 'threat_ttl_secs',
-    'autonomy', 'threshold_fpr_target'];
+    'autonomy', 'threshold_fpr_target', 'fusion', 'authority'];
+
+  // The built-in authority stages, so the section works on an install whose
+  // saved settings predate it (and after a reset).
+  const AUTHORITY_DEFAULTS = {
+    enabled: false,
+    feed_stage: 'enforce',
+    model_stage: 'propose',
+    operator_stage: 'enforce',
+    max_new_blocks_per_refresh: 500,
+    demote_fp_rate: 0.05,
+    demote_min_samples: 20,
+  };
+  const STAGES = [
+    ['monitor', 'Monitor - Record Only'],
+    ['propose', 'Propose - List, Never Block'],
+    ['enforce', 'Enforce - May Block'],
+  ];
 
   let ai_ = $state(null);
   let aiForm = $state({});
@@ -30,7 +47,12 @@
   }
 
   function fill(src) {
-    ai_ = { ...Object.fromEntries(KEYS.map((k) => [k, src[k]])), mode: src.mode || 'train' };
+    ai_ = {
+      ...Object.fromEntries(KEYS.map((k) => [k, src[k]])),
+      mode: src.mode || 'train',
+      fusion: src.fusion || 'monitor',
+      authority: { ...AUTHORITY_DEFAULTS, ...(src.authority || {}) },
+    };
     aiForm = {
       scanMinutes: round2(src.scan_interval_secs / 60),
       expireMinutes: round2(src.expire_check_secs / 60),
@@ -39,6 +61,7 @@
       thresholdPct: round2(src.block_threshold * 100),
       floorPct: round2(src.confidence_floor * 100),
       fprPct: round2((src.threshold_fpr_target ?? 0.01) * 100),
+      demotePct: round2((src.authority?.demote_fp_rate ?? AUTHORITY_DEFAULTS.demote_fp_rate) * 100),
     };
   }
 
@@ -58,6 +81,16 @@
       autonomy: !!ai_.autonomy,
       category_ttl_secs: Math.round(Number(aiForm.categoryDays) * 86400),
       threat_ttl_secs: Math.round(Number(aiForm.threatDays) * 86400),
+      fusion: ai_.fusion || 'monitor',
+      authority: {
+        enabled: !!ai_.authority.enabled,
+        feed_stage: ai_.authority.feed_stage,
+        model_stage: ai_.authority.model_stage,
+        operator_stage: ai_.authority.operator_stage,
+        max_new_blocks_per_refresh: Number(ai_.authority.max_new_blocks_per_refresh),
+        demote_fp_rate: Number(aiForm.demotePct) / 100,
+        demote_min_samples: Number(ai_.authority.demote_min_samples),
+      },
     };
   }
 
@@ -85,7 +118,9 @@
   function problem(body) {
     const blank = Object.entries(aiForm).some(([, v]) => v === '' || v == null)
       || ai_.workers === '' || ai_.workers == null
-      || ai_.max_domains_per_scan === '' || ai_.max_domains_per_scan == null;
+      || ai_.max_domains_per_scan === '' || ai_.max_domains_per_scan == null
+      || ai_.authority.max_new_blocks_per_refresh === '' || ai_.authority.max_new_blocks_per_refresh == null
+      || ai_.authority.demote_min_samples === '' || ai_.authority.demote_min_samples == null;
     if (blank) return 'Fill in every field before saving.';
     if (!(body.block_threshold >= 0.5 && body.block_threshold <= 1)) {
       return 'Block Threshold must be between 50 and 100%.';
@@ -98,6 +133,15 @@
     }
     if (!(body.workers >= 1 && body.workers <= 32)) return 'Classification Workers must be between 1 and 32.';
     if (!(body.max_domains_per_scan >= 1)) return 'Domains Classified Per Scan must be at least 1.';
+    if (!(body.authority.max_new_blocks_per_refresh >= 1 && body.authority.max_new_blocks_per_refresh <= 500)) {
+      return 'New Blocks Per Refresh must be between 1 and 500.';
+    }
+    if (!(body.authority.demote_fp_rate >= 0 && body.authority.demote_fp_rate <= 1)) {
+      return 'The Auto-Demote False-Positive Share must be between 0 and 100%.';
+    }
+    if (!(body.authority.demote_min_samples >= 1)) {
+      return 'Auto-Demote needs at least one measured finding.';
+    }
     if (body.enabled && (body.scan_interval_secs < 10 || body.expire_check_secs < 10)) {
       return 'Scan and expiry intervals must be at least 10 seconds (0.17 minutes).';
     }
@@ -208,6 +252,64 @@
       Domains are re-checked after this long (14 and 90 days by default). An
       expired threat stops blocking until it is checked again, so keep the
       expiry check frequent: it is cheap.
+    </p>
+  </div>
+
+  <div class="card">
+    <h3 style="margin: 0 0 6px">Scoring</h3>
+    <p class="muted help">
+      How the inputs behind a threat verdict become the score the block
+      threshold compares. The defaults record everything and change nothing.
+    </p>
+    <div class="form-grid">
+      <label>
+        <span>Signal Fusion</span>
+        <select bind:value={ai_.fusion}>
+          <option value="monitor">Monitor - Record the Fused Score</option>
+          <option value="decide">Decide - The Fused Score Sets the Gate</option>
+          <option value="off">Off - Observations Only</option>
+        </select>
+      </label>
+    </div>
+    <p class="muted help">
+      Monitor records the fused score beside each verdict and keeps comparing
+      the model confidence. Decide makes the fused score the assessment, so
+      the block threshold and any threshold trial measure that instead; stored
+      verdicts are re-scored when you save. Off records the observations only.
+    </p>
+
+    <h4>Enforcement Authority</h4>
+    <label class="check"><input type="checkbox" bind:checked={ai_.authority.enabled} /> <span>Grade Authority per Evidence Source</span></label>
+    <div class="form-grid">
+      <label>
+        <span>Feed-Confirmed Findings</span>
+        <select bind:value={ai_.authority.feed_stage}>
+          {#each STAGES as [value, label] (value)}<option value={value}>{label}</option>{/each}
+        </select>
+      </label>
+      <label>
+        <span>Model-Only Findings</span>
+        <select bind:value={ai_.authority.model_stage}>
+          {#each STAGES as [value, label] (value)}<option value={value}>{label}</option>{/each}
+        </select>
+      </label>
+      <label>
+        <span>Your Own Threat Labels</span>
+        <select bind:value={ai_.authority.operator_stage}>
+          {#each STAGES as [value, label] (value)}<option value={value}>{label}</option>{/each}
+        </select>
+      </label>
+      <label><span>New Blocks Per Refresh (Max 500)</span><input type="number" min="1" max="500" bind:value={ai_.authority.max_new_blocks_per_refresh} /></label>
+      <label><span>Auto-Demote Above (% False Positives)</span><input type="number" min="0" max="100" step="any" bind:value={aiForm.demotePct} /></label>
+      <label><span>Auto-Demote After (Measured Findings)</span><input type="number" min="1" bind:value={ai_.authority.demote_min_samples} /></label>
+    </div>
+    <p class="muted help">
+      Off leaves the Mode setting alone deciding what may block. When on, a
+      source at Monitor or Propose is recorded and listed but never blocks,
+      and a source whose measured false-positive share passes the auto-demote
+      share is demoted to Monitor on its own. Your labels and overrides are
+      never filtered or demoted. New Blocks Per Refresh can tighten the
+      built-in 500 ceiling, never raise it.
     </p>
   </div>
 </SettingsForm>
