@@ -71,6 +71,23 @@ pub struct PageContent {
     complete: bool,
     has_password_form: bool,
     has_sensitive_form: bool,
+    redirects: RedirectEvidence,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RedirectEvidence {
+    cross_site_hops: usize,
+    downgraded: bool,
+}
+
+impl RedirectEvidence {
+    fn record(&mut self, host: &str, scheme: &str, next_host: &str, next_scheme: &str) {
+        if psl::domain_str(host).unwrap_or(host) != psl::domain_str(next_host).unwrap_or(next_host)
+        {
+            self.cross_site_hops += 1;
+        }
+        self.downgraded |= scheme == "https" && next_scheme == "http";
+    }
 }
 
 /// A category the page text suggests, with the cues that suggested it.
@@ -592,13 +609,16 @@ impl PageFetcher {
                 .ok_or_else(|| "redirect without a location".to_string())?
                 .to_string();
             let (next_scheme, next_host, next_target) = redirect_target(scheme, host, &location)?;
-            return self.fetch_url(
+            let mut page = self.fetch_url(
                 &next_host,
                 &next_scheme,
                 &next_target,
                 hops + 1,
                 inspect_forms,
-            );
+            )?;
+            page.redirects
+                .record(host, scheme, &next_host, &next_scheme);
+            return Ok(page);
         }
         if !status.is_success() {
             return Err(format!("HTTP {status}"));
@@ -643,6 +663,7 @@ impl PageFetcher {
             complete: body.len() < self.max_bytes,
             has_password_form,
             has_sensitive_form,
+            redirects: RedirectEvidence::default(),
         })
     }
 
@@ -931,10 +952,30 @@ fn form_input(mut rest: &str) -> (bool, bool) {
             "autocomplete" => {
                 sensitive |= matches!(
                     actual.split_ascii_whitespace().last(),
-                    Some("cc-number" | "cc-csc")
+                    Some(
+                        "cc-number"
+                            | "cc-csc"
+                            | "cc-exp"
+                            | "cc-exp-month"
+                            | "cc-exp-year"
+                            | "one-time-code"
+                    )
                 );
             }
-            "name" => sensitive |= matches!(actual, "ssn" | "social_security_number" | "tax_id"),
+            "name" => {
+                sensitive |= matches!(
+                    actual,
+                    "ssn"
+                        | "social_security_number"
+                        | "tax_id"
+                        | "national_id"
+                        | "passport_number"
+                        | "routing_number"
+                        | "bank_account_number"
+                        | "card_number"
+                        | "cvv"
+                )
+            }
             _ => {}
         }
         rest = tail;
@@ -1056,10 +1097,43 @@ fn discovery_reading(domain: &str, page: &PageContent, floor: f32) -> DiscoveryR
     if !page.complete {
         return DiscoveryReading::unknown(final_host, "page reached the response-size limit");
     }
-    let registered = final_host.as_deref().and_then(psl::domain_str);
-    if registered.is_none() || registered != psl::domain_str(domain) {
-        return DiscoveryReading::unknown(final_host, "page redirected to another site");
+    let Some(registered) = final_host.as_deref().and_then(psl::domain_str) else {
+        return DiscoveryReading::unknown(final_host, "page hostname could not be assessed");
+    };
+    let crosses_sites =
+        Some(registered) != psl::domain_str(domain) || page.redirects.cross_site_hops > 0;
+    let mut reading = discovery_destination(page, registered, final_host.clone(), floor);
+    if crosses_sites || page.redirects.downgraded {
+        let chain = format!(
+            "redirect chain: {} cross-site hop(s){}",
+            page.redirects.cross_site_hops,
+            if page.redirects.downgraded {
+                ", HTTPS downgraded to HTTP"
+            } else {
+                ""
+            }
+        );
+        // A redirect alone is common for legitimate sign-in and payment flows.
+        // Keep the destination's evidence, with monitor-only authority for the chain.
+        if reading.confidence.is_some_and(|score| score >= 0.9) && floor <= 0.9 {
+            reading.confidence = Some(0.9);
+            reading.evidence = format!("{chain}; destination: {}", reading.evidence);
+            return reading;
+        }
+        return DiscoveryReading::unknown(
+            final_host,
+            &format!("{chain}; no strong destination finding"),
+        );
     }
+    reading
+}
+
+fn discovery_destination(
+    page: &PageContent,
+    registered: &str,
+    final_host: Option<String>,
+    floor: f32,
+) -> DiscoveryReading {
     // These are narrow title claims, not general brand mentions. Shared identity
     // providers need their own entries when adding another brand here.
     let title = normalise(&page.title);
@@ -1077,7 +1151,7 @@ fn discovery_reading(domain: &str, page: &PageContent, floor: f32) -> DiscoveryR
     .into_iter()
     .find(|(brand, _)| title.split_whitespace().next() == Some(*brand));
     if let Some((brand, official)) = brand {
-        if registered.is_some_and(|host| official.contains(&host)) {
+        if official.contains(&registered) {
             return DiscoveryReading::unknown(final_host, "page is on the named brand's site");
         }
         let title = format!(" {title} ");
@@ -1110,6 +1184,33 @@ fn discovery_reading(domain: &str, page: &PageContent, floor: f32) -> DiscoveryR
             confidence: Some(0.9),
             evidence: "reward claim with a processing fee and a payment or identity form"
                 .to_string(),
+        };
+    }
+    // A form requesting sensitive fields is normal on many sites. Pair it
+    // with a deceptive request and coercive context before surfacing a finding.
+    let pressured = [
+        " account will be suspended ",
+        " account will be closed ",
+        " avoid account closure ",
+        " avoid suspension ",
+    ]
+    .iter()
+    .any(|phrase| text.contains(phrase));
+    let verification = [
+        " verify your identity ",
+        " reconfirm your payment details ",
+        " verify your card ",
+        " enter your verification code ",
+        " confirm your bank details ",
+    ]
+    .iter()
+    .any(|phrase| text.contains(phrase));
+    if page.has_sensitive_form && pressured && verification && floor <= 0.9 {
+        return DiscoveryReading {
+            final_host,
+            category: Some("phishing".to_string()),
+            confidence: Some(0.9),
+            evidence: "sensitive payment, identity, or verification form paired with a pressured verification request".to_string(),
         };
     }
     let reading = classify_text(&page.title, &page.text).filter(|reading| {
@@ -1148,6 +1249,7 @@ fn discovery_requires_multiple_threat_cues_and_a_complete_response() {
         complete: true,
         has_password_form: true,
         has_sensitive_form: false,
+        redirects: RedirectEvidence::default(),
     };
     assert!(discovery_reading("accounts.example", &page, 0.5)
         .category
@@ -1185,6 +1287,7 @@ fn discovery_checks_password_forms_and_brand_claims() {
         complete: true,
         has_password_form,
         has_sensitive_form,
+        redirects: RedirectEvidence::default(),
     };
     assert_eq!(
         discovery_reading("accounts.example", &page, 0.6)
@@ -1192,10 +1295,25 @@ fn discovery_checks_password_forms_and_brand_claims() {
             .as_deref(),
         Some("phishing")
     );
+    page.redirects
+        .record("redirect.example", "https", "accounts.example", "http");
+    let redirected = discovery_reading("redirect.example", &page, 0.6);
+    assert_eq!(redirected.category.as_deref(), Some("phishing"));
+    assert_eq!(redirected.confidence, Some(0.9));
+    assert!(redirected.evidence.contains("HTTPS downgraded to HTTP"));
+    page.text = "Confirm your password or your account will be suspended.".to_owned();
+    page.redirects
+        .record("accounts.example", "http", "redirect.example", "https");
+    assert_eq!(
+        discovery_reading("accounts.example", &page, 0.6).confidence,
+        Some(0.9)
+    );
+    page.text.clear();
+    page.url = "https://www.paypal.com/signin".to_owned();
     assert!(discovery_reading("redirect.example", &page, 0.6)
         .category
         .is_none());
-    page.url = "https://www.paypal.com/signin".to_owned();
+    page.redirects = RedirectEvidence::default();
     assert!(discovery_reading("www.paypal.com", &page, 0.6)
         .category
         .is_none());
@@ -1260,6 +1378,30 @@ fn discovery_distinguishes_sensitive_form_scams_from_ordinary_pages() {
             "type=password",
             Some("phishing"),
         ),
+        (
+            "Account check",
+            "Verify your identity to avoid account closure.",
+            "name=passport_number",
+            Some("phishing"),
+        ),
+        (
+            "Payment check",
+            "Reconfirm your payment details or your account will be suspended.",
+            "name=bank_account_number",
+            Some("phishing"),
+        ),
+        (
+            "Account recovery",
+            "Enter your verification code or your account will be closed.",
+            "autocomplete=one-time-code",
+            Some("phishing"),
+        ),
+        (
+            "Two-factor sign in",
+            "Enter your verification code to sign in.",
+            "autocomplete=one-time-code",
+            None,
+        ),
     ] {
         let html = format!("<title>{title}</title>{text}<form><input {input}></form>");
         let (title, text, has_password_form, has_sensitive_form) = extract_page(&html, true);
@@ -1272,12 +1414,20 @@ fn discovery_distinguishes_sensitive_form_scams_from_ordinary_pages() {
                 complete: true,
                 has_password_form,
                 has_sensitive_form,
+                redirects: RedirectEvidence::default(),
             },
             0.6,
         );
         assert_eq!(reading.category.as_deref(), expected, "{html}");
         if expected == Some("phishing") {
-            assert_eq!(reading.confidence, Some(DISCOVERY_ENFORCEMENT_FLOOR));
+            assert_eq!(
+                reading.confidence,
+                Some(if html.contains("PayPal Login") {
+                    DISCOVERY_ENFORCEMENT_FLOOR
+                } else {
+                    0.9
+                })
+            );
         }
     }
 }

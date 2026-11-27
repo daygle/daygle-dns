@@ -420,10 +420,13 @@ review when `ai.fetch_pages` is on. Discovery uses up to four workers and the
 time remaining after the existing page stages. It records outcomes under
 `page_discovery` in `GET /api/ai/signals?domain=…` for a day after a readable
 response, or an hour after a failed fetch. A missing threat reading is unknown.
-Phishing findings require a password form and either a password-confirmation
-request paired with a suspension threat or a recognized brand sign-in title on
-another site. Cross-site redirects are recorded as unknown for the original
-host. The reported confidence is a heuristic score.
+Discovery recognises suspicious password forms, brand sign-in impersonation,
+and payment, identity, or verification-code forms paired with coercive
+verification demands. It records cross-site hops and HTTPS downgrades and
+checks the final page for corroborating evidence. Redirects with no strong
+destination finding stay unknown. Findings associated with a cross-site hop
+or downgrade are capped at the monitor-only score of 0.90. The reported
+confidence is a heuristic score.
 When there is a threat finding, `page_discovery_fusion` previews its effect as
 a single page signal alongside independent evidence. Reward claims paired with
 a processing fee and payment-card or identity fields are surfaced as scam
