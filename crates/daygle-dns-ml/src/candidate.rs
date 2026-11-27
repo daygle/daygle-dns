@@ -137,15 +137,26 @@ pub fn restore_artifact(store: &AiStore, candidate: &CandidateVersion) -> Result
     if path.as_os_str().is_empty() {
         return Ok(false);
     }
+    write_artifact(path, &bytes)?;
+    Ok(true)
+}
+
+/// Write artifact bytes to `path` atomically - a temporary file beside it,
+/// renamed into place - so a reader never sees half a model. Used by a restore
+/// and by a promotion that has to put back the bytes it displaced.
+pub fn write_artifact(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    if path.as_os_str().is_empty() {
+        return Ok(());
+    }
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(DaygleError::Io)?;
         }
     }
     let temporary = path.with_extension("restore-tmp");
-    std::fs::write(&temporary, &bytes).map_err(DaygleError::Io)?;
+    std::fs::write(&temporary, bytes).map_err(DaygleError::Io)?;
     std::fs::rename(&temporary, path).map_err(DaygleError::Io)?;
-    Ok(true)
+    Ok(())
 }
 
 #[cfg(test)]

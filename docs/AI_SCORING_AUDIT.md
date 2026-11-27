@@ -255,8 +255,14 @@ artifact bytes are on disk again, its model is loaded, and the scanner uses its
 weights and calibration. When there is no previous version - the first
 promotion - the candidate is taken out of force instead and the calibration
 map and signal weights it replaced are put back, since it produced none of the
-stored scores. A restoration step that also fails is named in the returned
-error instead of being dropped. **Rollback** restores the previous
+stored scores; the artifact bytes read before the promotion wrote over them go
+back on the live path and that model is loaded again, because a first promotion
+has no stored version to read either from. A failure to make the rolled-back
+version full is put back the same way: the store lists the version that was in
+force again, its artifact and model are restored and its weights and
+calibration are published. A restoration step that also fails is named in the
+returned error instead of being dropped, including the case where there were no
+bytes to put back at all. **Rollback** restores the previous
 version's bytes, threshold, calibration, weights and scoring configuration
 together, and re-scores the stored verdicts the same way. Activating or
 disabling a calibration map re-scores them too: a stored score describes the
@@ -271,7 +277,12 @@ in the scanner and the stored verdicts are re-scored back to their assessment
 scores, with a warning naming the old and new model. A restart runs the same
 check, so a retrain that finished while the service was down cannot bring back
 a map fitted for the model it replaced. Until a map is fitted for the new
-model, the gate compares the assessment score.
+model, the gate compares the assessment score. When the re-score that turning
+the map off requires cannot be written, the map version is cleared from every
+stored verdict as well: a row is read by the version recorded on it, so leaving
+it in place would keep the stale calibration deciding the gate. If that clearing
+fails too, the warning says the stored verdicts are still compared by the
+retired map's scores.
 
 **Migration:** `ai_candidates`, `ai_model_artifacts`.
 
@@ -286,6 +297,10 @@ actual bytes restored, builtin has no artifact, missing artifact refused),
 `a_candidate_is_snapshotted_promoted_and_restored_as_one_version` over HTTP,
 `activating_a_calibration_map_rescores_the_stored_verdicts`,
 `a_candidate_that_cannot_load_leaves_the_previous_version_in_force`,
+`a_first_promotion_whose_rescore_fails_restores_the_configured_model`,
+`a_rollback_whose_artifact_is_gone_puts_the_active_version_back`,
+`a_rollback_whose_model_will_not_load_puts_the_active_version_back`,
+`a_failed_rescore_never_leaves_a_stale_calibration_deciding_the_gate`,
 `a_model_change_retires_a_calibration_map_fitted_for_the_old_model` and
 `a_restart_does_not_reapply_a_calibration_map_fitted_for_a_replaced_model`.
 

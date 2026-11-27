@@ -1175,6 +1175,13 @@ impl AiEngine {
         let previous_calibration = self.store.active_calibration()?;
         let previous_weights = self.scanner.signal_weights();
         let live_model = self.live_model_path();
+        // A first promotion supersedes no stored version, so the bytes its
+        // artifact is about to replace are the only copy of what the live path
+        // held if the promotion has to be undone.
+        let displaced = match previous.is_none() {
+            true => std::fs::read(&candidate.model_path).ok(),
+            false => None,
+        };
         // Write the artifact and load it *before* the store says the version is
         // in force: a model that does not load is not a version, and while it is
         // tried the store still describes the previous one.
@@ -1182,6 +1189,8 @@ impl AiEngine {
         if let Err(e) = (self.install_model)(Path::new(&candidate.model_path)) {
             return Err(self.undo_promotion(
                 previous.as_ref(),
+                &candidate.model_path,
+                displaced.as_deref(),
                 &live_model,
                 "could not load the candidate's model",
                 e,
@@ -1192,6 +1201,8 @@ impl AiEngine {
             Err(e) => {
                 return Err(self.undo_promotion(
                     previous.as_ref(),
+                    &candidate.model_path,
+                    displaced.as_deref(),
                     &live_model,
                     "could not record the promotion",
                     e,
@@ -1211,8 +1222,9 @@ impl AiEngine {
                 // A first promotion supersedes nothing: undo it by taking the
                 // candidate out of force and putting back the scoring it
                 // replaced, rather than leaving it active over scores it never
-                // produced. Its model bytes are the only artifact on disk, so
-                // the runtime keeps the model it already loaded.
+                // produced. Its artifact bytes and the loaded model are the
+                // other half: neither has a stored version to be read from, so
+                // the bytes kept from before the promotion go back.
                 Ok(None) => {
                     if let Err(e) = self.store.retire_active_candidate(promoted.id) {
                         failures.push(format!(
@@ -1227,6 +1239,11 @@ impl AiEngine {
                     }
                     self.scanner.set_calibration(previous_calibration.clone());
                     self.scanner.set_signal_weights(previous_weights.clone());
+                    failures.extend(self.undo_first_promotion(
+                        &promoted.model_path,
+                        displaced.as_deref(),
+                        &live_model,
+                    ));
                 }
                 Err(e) => {
                     failures.push(format!("could not restore the previous version: {e}"));
@@ -1252,32 +1269,32 @@ impl AiEngine {
         let Some(restored) = self.store.rollback_active_candidate()? else {
             return Ok(None);
         };
-        candidate::restore_artifact(&self.store, &restored)?;
-        (self.install_model)(Path::new(&restored.model_path))?;
-        self.scanner
-            .set_signal_weights(restored.signal_weights.clone());
-        let calibration = self.store.active_calibration()?;
-        self.scanner.set_calibration(calibration);
-        if let Err(e) = self.rescore_stored_verdicts("a candidate was rolled back") {
-            // The restored version is only in force once the stored scores
-            // describe it: put the version that was rolled back from back.
-            let mut failures = Vec::new();
-            match self.store.promote_candidate(active.id) {
-                Ok(_) => failures.extend(self.restore_version(&active)),
-                Err(e) => failures.push(format!(
-                    "could not put candidate {} back: {e}",
-                    active.version
-                )),
+        // The store lists `restored` from here on, so the artifact, the loaded
+        // model, the weights and the calibration have to follow it: a failure
+        // at any of those stages puts `active` back rather than returning with
+        // the store and the runtime describing different versions.
+        let failures = self.restore_version(&restored);
+        if failures.is_empty() {
+            if let Err(e) = self.rescore_stored_verdicts("a candidate was rolled back") {
+                // The restored version is only in force once the stored scores
+                // describe it: put the version that was rolled back from back.
+                let undone = self.put_candidate_back(&active);
+                return Err(failed_change(
+                    "could not apply the restored version's scores to the stored verdicts",
+                    e,
+                    &undone,
+                ));
             }
-            return Err(failed_change(
-                "could not apply the restored version's scores to the stored verdicts",
-                e,
-                &failures,
-            ));
+            self.refresh_snapshot_now();
+            self.trigger_rescan();
+            return Ok(Some(restored));
         }
-        self.refresh_snapshot_now();
-        self.trigger_rescan();
-        Ok(Some(restored))
+        let undone = self.put_candidate_back(&active);
+        Err(failed_change(
+            "could not put the rolled-back version in force",
+            failures.join("; "),
+            &undone,
+        ))
     }
 
     /// Re-score every stored threat verdict from the observations kept beside it
@@ -1299,29 +1316,65 @@ impl AiEngine {
     /// back, and the channels load the model that was in force again. Returns
     /// the original failure, naming anything that could not be undone.
     ///
-    /// With no previous candidate there is no earlier artifact in the store to
-    /// write back; the configured model is reloaded from disk so the runtime
-    /// keeps running, and the error says which file was left holding the failed
-    /// version's bytes.
+    /// With no previous candidate there is no stored artifact to read back, so
+    /// the bytes the live path held before the promotion wrote over them are
+    /// put there and that model is loaded again; when there are none the error
+    /// says which file was left holding the failed version's bytes.
+    #[allow(clippy::too_many_arguments)]
     fn undo_promotion(
         &self,
         previous: Option<&store::CandidateVersion>,
+        artifact_path: &str,
+        displaced: Option<&[u8]>,
         live_model: &str,
         what: &str,
         cause: DaygleError,
     ) -> DaygleError {
-        let mut failures = Vec::new();
-        match previous {
+        let failures = match previous {
             Some(previous) => {
+                let mut failures = Vec::new();
                 if let Err(e) = candidate::restore_artifact(&self.store, previous) {
                     failures.push(format!(
                         "could not write candidate {}'s artifact back: {e}",
                         previous.version
                     ));
                 }
+                if let Err(e) = (self.install_model)(Path::new(live_model)) {
+                    failures.push(format!(
+                        "could not load the model that was in force again: {e}"
+                    ));
+                }
+                failures
             }
-            None => failures.push(format!(
-                "no candidate was active, so the file holding the failed version's bytes ({live_model}) has no stored artifact to restore"
+            None => self.undo_first_promotion(artifact_path, displaced, live_model),
+        };
+        failed_change(what, cause, &failures)
+    }
+
+    /// Put back what a first promotion displaced when no stored version holds
+    /// it: the artifact bytes the promotion wrote over, and the model the
+    /// channels were running, so the file the next start reads and the runtime
+    /// both describe the scoring that was in force before it. Returns what
+    /// could not be undone, rather than leaving it to be discovered later.
+    fn undo_first_promotion(
+        &self,
+        artifact_path: &str,
+        displaced: Option<&[u8]>,
+        live_model: &str,
+    ) -> Vec<String> {
+        let mut failures = Vec::new();
+        match (artifact_path.trim().is_empty(), displaced) {
+            // The built-in heuristic has no artifact to overwrite or restore.
+            (true, _) => {}
+            (false, Some(bytes)) => {
+                if let Err(e) = candidate::write_artifact(Path::new(artifact_path), bytes) {
+                    failures.push(format!(
+                        "could not put the configured artifact back at {artifact_path}: {e}"
+                    ));
+                }
+            }
+            (false, None) => failures.push(format!(
+                "there was no configured artifact at {artifact_path} before the promotion, so the bytes the failed version left there cannot be put back"
             )),
         }
         if let Err(e) = (self.install_model)(Path::new(live_model)) {
@@ -1329,7 +1382,22 @@ impl AiEngine {
                 "could not load the model that was in force again: {e}"
             ));
         }
-        failed_change(what, cause, &failures)
+        failures
+    }
+
+    /// Put one recorded version back in force at every layer, returning what
+    /// failed: the other half of a promotion or rollback that could not be
+    /// completed.
+    fn put_candidate_back(&self, version: &store::CandidateVersion) -> Vec<String> {
+        let mut failures = Vec::new();
+        match self.store.promote_candidate(version.id) {
+            Ok(_) => failures.extend(self.restore_version(version)),
+            Err(e) => failures.push(format!(
+                "could not put candidate {} back: {e}",
+                version.version
+            )),
+        }
+        failures
     }
 
     /// Put one recorded version back into force: its artifact bytes, the loaded
@@ -1525,7 +1593,11 @@ fn model_fingerprint(path: &str) -> String {
 /// An error for a scoring change that could not be applied everywhere: the
 /// original failure, plus whatever also failed while putting the previous
 /// version back. Both are named, so a half-applied change is never silent.
-fn failed_change(what: &str, cause: DaygleError, restorations: &[String]) -> DaygleError {
+fn failed_change(
+    what: &str,
+    cause: impl std::fmt::Display,
+    restorations: &[String],
+) -> DaygleError {
     let mut message = format!("{what}: {cause}");
     if !restorations.is_empty() {
         message.push_str("; putting the previous version back did not fully succeed: ");
@@ -1565,6 +1637,20 @@ fn retire_calibration_for_changed_model(
     scanner.set_calibration(None);
     if let Err(e) = scanner.rescore_assessments(settings) {
         failures.push(format!("could not re-score the stored verdicts: {e}"));
+        // A stored verdict is read by the map version recorded on it, so a row
+        // that still names the retired map keeps being decided by that map's
+        // score. Clearing the version is what puts the gate on the assessment
+        // score; without it this failure would leave a stale calibration in
+        // force over every stored verdict.
+        match store.clear_stored_calibration() {
+            Ok(0) => {}
+            Ok(n) => failures.push(format!(
+                "{n} stored verdict(s) no longer name the retired map, so the gate compares their assessment score"
+            )),
+            Err(e) => failures.push(format!(
+                "could not clear the retired map from the stored verdicts: {e}; they are still compared by its calibrated scores until a map is fitted for this model"
+            )),
+        }
     }
     let note = if failures.is_empty() {
         String::new()

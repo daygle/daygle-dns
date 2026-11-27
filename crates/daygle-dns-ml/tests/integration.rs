@@ -4993,3 +4993,285 @@ fn a_restart_does_not_reapply_a_calibration_map_fitted_for_a_replaced_model() {
         "the gate compares the assessment score again, not the old model's calibration"
     );
 }
+
+// ── A failed scoring change never leaves a half-applied one ──────────────────
+
+/// Make writes to a stored verdict fail, the way a locked or damaged database
+/// would. The re-score of the stored verdicts is the write a scoring change has
+/// to survive; every step that compensates for it afterwards writes other
+/// tables, so it still runs.
+fn fail_stored_verdict_writes(dir: &TempDir) {
+    let conn = rusqlite::Connection::open(dir.path().join("ai.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER injected_rescore_failure
+         BEFORE UPDATE OF assessment_mode ON ai_verdicts
+         BEGIN SELECT RAISE(ABORT, 'injected re-score failure'); END;",
+    )
+    .unwrap();
+}
+
+/// A version the store lists as active whose artifact is not a model: what an
+/// install that updated in place, or a restored database, leaves behind. It was
+/// never loaded here, which is why the store - not the runtime - is what a
+/// rollback has to be undone from.
+fn version_that_will_not_load(
+    ai: &AiEngine,
+    dir: &TempDir,
+) -> daygle_dns_ml::store::CandidateVersion {
+    let path = dir.path().join("broken.bin");
+    std::fs::write(&path, b"not-a-model").unwrap();
+    let candidate = daygle_dns_ml::candidate::build(
+        &ai.store,
+        &daygle_dns_ml::candidate::CandidateSpec {
+            model_path: path.to_string_lossy().into_owned(),
+            block_threshold: 0.9,
+            calibration: None,
+            signal_weights: daygle_dns_ml::fusion::SignalWeights::default(),
+            scoring_config: serde_json::json!({ "fusion": "monitor" }),
+            validation_report: serde_json::Value::Null,
+            metrics: None,
+        },
+    )
+    .unwrap();
+    ai.store.promote_candidate(candidate.id).unwrap();
+    candidate
+}
+
+/// An engine whose version in force superseded one whose model cannot load, so
+/// a rollback reaches a stage that fails.
+fn engine_whose_previous_version_cannot_load(
+    dir: &TempDir,
+) -> (
+    Arc<AiEngine>,
+    std::path::PathBuf,
+    daygle_dns_ml::store::CandidateVersion,
+    daygle_dns_ml::store::CandidateVersion,
+) {
+    let model = dir.path().join("model.bin");
+    std::fs::copy(PROMOTION_MODEL, &model).unwrap();
+    let ai = engine(
+        dir,
+        AiSettings {
+            model_path: model.to_string_lossy().into_owned(),
+            ..settings(AiMode::Enforce)
+        },
+    );
+    let broken = version_that_will_not_load(&ai, dir);
+    let live = ai.snapshot_candidate().unwrap();
+    ai.promote_candidate(live.id).unwrap();
+    (ai, model, broken, live)
+}
+
+/// A first promotion supersedes no stored version, so a re-score failure after
+/// it has nothing to fall back on: the artifact the promotion wrote over and the
+/// model the channels loaded both have to be put back explicitly, rather than
+/// leaving the runtime on a version the store says is not in force.
+#[test]
+fn a_first_promotion_whose_rescore_fails_restores_the_configured_model() {
+    let dir = TempDir::new().unwrap();
+    let configured = dir.path().join("model.bin");
+    std::fs::copy(PROMOTION_MODEL, &configured).unwrap();
+    let ai = engine(
+        &dir,
+        AiSettings {
+            model_path: configured.to_string_lossy().into_owned(),
+            ..settings(AiMode::Enforce)
+        },
+    );
+    one_threat_verdict(&ai, "first-promotion.example");
+    // A version whose artifact belongs at another path, so the runtime moving
+    // onto it - and back off it - is visible.
+    let elsewhere = dir.path().join("elsewhere.bin");
+    std::fs::copy(PROMOTION_MODEL, &elsewhere).unwrap();
+    let candidate = daygle_dns_ml::candidate::build(
+        &ai.store,
+        &daygle_dns_ml::candidate::CandidateSpec {
+            model_path: elsewhere.to_string_lossy().into_owned(),
+            block_threshold: 0.9,
+            calibration: None,
+            signal_weights: daygle_dns_ml::fusion::SignalWeights::default(),
+            scoring_config: serde_json::json!({ "fusion": "monitor" }),
+            validation_report: serde_json::Value::Null,
+            metrics: None,
+        },
+    )
+    .unwrap();
+    assert!(ai.store.active_candidate().unwrap().is_none());
+
+    fail_stored_verdict_writes(&dir);
+    let failed = ai.promote_candidate(candidate.id).unwrap_err();
+    assert!(
+        failed
+            .to_string()
+            .contains("could not apply the new version's scores"),
+        "{failed}"
+    );
+    assert!(
+        ai.store.active_candidate().unwrap().is_none(),
+        "a first promotion that failed leaves no version in force"
+    );
+    assert_eq!(
+        ai.store.candidate(candidate.id).unwrap().unwrap().status,
+        "candidate",
+        "the failed version is a candidate again, not the one in force"
+    );
+    assert_eq!(
+        ai.live_model_path(),
+        configured.to_string_lossy().into_owned(),
+        "the runtime runs the model the promotion replaced again"
+    );
+    assert_eq!(
+        std::fs::read(&configured).unwrap(),
+        std::fs::read(PROMOTION_MODEL).unwrap(),
+        "the configured artifact is on disk untouched"
+    );
+}
+
+/// A rollback changes the store first and the artifact second: when the
+/// artifact it would restore is gone, the version that was in force has to come
+/// back rather than the store listing a version no artifact can produce.
+#[test]
+fn a_rollback_whose_artifact_is_gone_puts_the_active_version_back() {
+    let dir = TempDir::new().unwrap();
+    let (ai, model, broken, live) = engine_whose_previous_version_cannot_load(&dir);
+    let artifact = ai
+        .store
+        .model_artifact(&live.model_sha256)
+        .unwrap()
+        .unwrap();
+    // The artifact the rollback would restore is gone from the store.
+    let conn = rusqlite::Connection::open(dir.path().join("ai.db")).unwrap();
+    conn.execute(
+        "DELETE FROM ai_model_artifacts WHERE sha256 = ?1",
+        rusqlite::params![broken.model_sha256],
+    )
+    .unwrap();
+    drop(conn);
+
+    let failed = ai.rollback_candidate().unwrap_err();
+    let message = failed.to_string();
+    assert!(
+        message.contains(&format!(
+            "could not write candidate {}'s artifact",
+            broken.version
+        )),
+        "{message}"
+    );
+    assert_eq!(
+        ai.store.active_candidate().unwrap().unwrap().id,
+        live.id,
+        "the version that was in force is the one in force after the failure"
+    );
+    assert_eq!(
+        ai.store.candidate(broken.id).unwrap().unwrap().status,
+        "superseded",
+        "the version that could not be restored stays out of force"
+    );
+    assert_eq!(
+        ai.live_model_path(),
+        model.to_string_lossy().into_owned(),
+        "the runtime runs the version in force again"
+    );
+    assert_eq!(
+        std::fs::read(&model).unwrap(),
+        artifact,
+        "the artifact in force is back on disk"
+    );
+}
+
+/// The same compensation when the artifact writes but the model will not load:
+/// the stage that fails is reported, and everything the version in force owns is
+/// put back.
+#[test]
+fn a_rollback_whose_model_will_not_load_puts_the_active_version_back() {
+    let dir = TempDir::new().unwrap();
+    let (ai, model, broken, live) = engine_whose_previous_version_cannot_load(&dir);
+    let artifact = ai
+        .store
+        .model_artifact(&live.model_sha256)
+        .unwrap()
+        .unwrap();
+
+    let failed = ai.rollback_candidate().unwrap_err();
+    let message = failed.to_string();
+    assert!(
+        message.contains(&format!("could not load candidate {}", broken.version)),
+        "{message}"
+    );
+    assert_eq!(
+        ai.store.active_candidate().unwrap().unwrap().id,
+        live.id,
+        "the version that was in force is the one in force after the failure"
+    );
+    assert_eq!(
+        ai.live_model_path(),
+        model.to_string_lossy().into_owned(),
+        "the runtime runs the version in force again"
+    );
+    assert_eq!(
+        std::fs::read(&model).unwrap(),
+        artifact,
+        "the artifact in force is back on disk"
+    );
+}
+
+/// Turning off a map fitted for a model that has been replaced depends on
+/// re-scoring every stored verdict. When that write fails the verdicts must not
+/// keep naming the map: the gate reads a row by the version on it, so it would
+/// go on deciding on the retired model's calibration.
+#[test]
+fn a_failed_rescore_never_leaves_a_stale_calibration_deciding_the_gate() {
+    let dir = TempDir::new().unwrap();
+    let learned = dir.path().join("learned.bin");
+    std::fs::copy(PROMOTION_MODEL, &learned).unwrap();
+    stamp(&learned, 600);
+    let previous = dir.path().join("learned.prev.bin");
+    std::fs::copy(PROMOTION_MODEL, &previous).unwrap();
+    stamp(&previous, 1_200);
+    let ai = engine(
+        &dir,
+        AiSettings {
+            model_path: learned.to_string_lossy().into_owned(),
+            ..settings(AiMode::Enforce)
+        },
+    );
+    let fusion = ai.settings.load_full().fusion;
+    one_threat_verdict(&ai, "stale-calibration.example");
+    let map = apply_a_map_fitted_for_the_live_model(&ai);
+    let calibrated = map.apply(0.9);
+    assert!(
+        (calibrated - 0.9).abs() > 1e-3,
+        "the fixture's map has to change the score for this test to mean anything"
+    );
+    assert_eq!(
+        ai.store
+            .gate_score("stale-calibration.example", "threat", fusion)
+            .unwrap(),
+        Some(calibrated)
+    );
+
+    fail_stored_verdict_writes(&dir);
+    ai.rollback_learned_model().unwrap();
+
+    assert!(
+        ai.store.active_calibration().unwrap().is_none(),
+        "the map fitted for the replaced model is off"
+    );
+    assert!(ai.scanner.calibration_map().is_none());
+    let (_, version, _) = ai
+        .store
+        .verdict_scores("stale-calibration.example", "threat")
+        .unwrap()
+        .unwrap();
+    assert!(
+        version.is_empty(),
+        "the verdict no longer names a map that is not in force"
+    );
+    assert_eq!(
+        ai.store
+            .gate_score("stale-calibration.example", "threat", fusion)
+            .unwrap(),
+        Some(0.9),
+        "the gate compares the assessment score, never the retired map's calibrated one"
+    );
+}
