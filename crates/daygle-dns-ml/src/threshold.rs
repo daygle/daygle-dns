@@ -614,7 +614,10 @@ fn artifact_version(path: &str) -> std::io::Result<String> {
     loop {
         let count = file.read(&mut buffer)?;
         if count == 0 {
-            return Ok(format!("sha256:{}", crate::candidate::hex(&hash.finalize())));
+            return Ok(format!(
+                "sha256:{}",
+                crate::candidate::hex(&hash.finalize())
+            ));
         }
         hash.update(&buffer[..count]);
     }
