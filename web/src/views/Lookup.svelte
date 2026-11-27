@@ -37,6 +37,21 @@
     }
   }
 
+  function exportResult() {
+    if (!result) return;
+    const safeName = result.name.replace(/\.$/, '').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || 'root';
+    const safeType = result.type.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const blob = new Blob([JSON.stringify(result, null, 2), '\n'], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `dns-lookup-${safeName}-${safeType}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
   // What a failure message means, in plain words, with what to try.
   function explain(message) {
     const m = (message || '').toLowerCase();
@@ -109,9 +124,12 @@
 
 {#if result}
   <div class="card" style="margin-top: 14px">
-    <div class="spread" style="margin-bottom: 10px">
+    <div class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap">
       <h3 style="margin: 0; overflow-wrap: anywhere">{result.name} {result.type}</h3>
-      <span class="pill {rcodeClass(result.rcode)}">{result.rcode}</span>
+      <div class="row" style="gap: 8px; flex-wrap: wrap">
+        <span class="pill {rcodeClass(result.rcode)}">{result.rcode}</span>
+        <button type="button" class="secondary" onclick={exportResult}>Export JSON</button>
+      </div>
     </div>
     <div class="summary">
       <div class="pair"><span class="muted">Resolved By</span><span class="value">{ROUTES[result.route] || result.route}</span></div>
