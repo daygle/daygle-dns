@@ -1364,3 +1364,391 @@ async fn a_candidate_is_snapshotted_promoted_and_restored_as_one_version() {
     assert_eq!(rolled.0, StatusCode::CONFLICT, "{}", rolled.2);
     let _ = std::fs::remove_dir_all(&dir);
 }
+// ---- The configuration boundary of a candidate version -------------------
+//
+// A candidate version is only in force once its threshold is published through
+// the config path, and that step happens after the engine has committed the
+// promotion. These tests fail the publication (an invalid stored overlay or a
+// re-score that cannot be written) and then check that the version, its
+// artifact, the loaded model, the threshold, the persisted overlay and the
+// threshold-trial bookkeeping all agree again.
+
+/// A candidate version recorded straight in the store: `bytes` are kept as its
+/// artifact at `path` (the engine's live model path), so a promotion moves the
+/// version into force exactly as a snapshot would.
+fn candidate_version(
+    ai: &AiEngine,
+    version: &str,
+    path: &str,
+    bytes: &[u8],
+    threshold: f32,
+    scoring_config: serde_json::Value,
+) -> i64 {
+    let sha = ai.store.store_model_artifact(path, bytes).unwrap();
+    ai.store
+        .save_candidate(&daygle_dns_ml::store::NewCandidate {
+            version: version.to_string(),
+            model_path: path.to_string(),
+            model_sha256: sha,
+            model_size: bytes.len() as i64,
+            block_threshold: threshold,
+            calibration: None,
+            signal_weights: Default::default(),
+            scoring_config,
+            validation_report: serde_json::Value::Null,
+            metrics: None,
+        })
+        .unwrap()
+        .id
+}
+
+/// The block threshold a restart would configure: the AI overlay persisted in
+/// the catalog, which is what the next boot applies.
+fn overlay_threshold(state: &AppState) -> Option<f32> {
+    state
+        .catalog
+        .store()
+        .get_named_setting::<daygle_dns_core::config::RuntimeSettings>("runtime")
+        .unwrap()
+        .and_then(|settings| settings.ai)
+        .and_then(|ai| ai.block_threshold)
+}
+
+/// Make every re-score that would write `mode` into a stored verdict fail at the
+/// persistence boundary: the mode column is written by a re-score and by nothing
+/// else, so a verdict already re-scored under another mode stays writable.
+fn fail_rescore_for(dir: &std::path::Path, mode: &str) {
+    let conn = rusqlite::Connection::open(dir.join("ai.db")).unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TRIGGER injected_rescore_failure BEFORE UPDATE OF assessment_mode ON ai_verdicts
+         WHEN NEW.assessment_mode = '{mode}'
+         BEGIN SELECT RAISE(ABORT, 'injected re-score failure'); END;"
+    ))
+    .unwrap();
+}
+
+/// One confident threat verdict, so a re-score has a row to write.
+fn seed_threat(ai: &AiEngine, domain: &str) {
+    ai.store.observe(domain).unwrap();
+    ai.store
+        .save_verdict(
+            Channel::Threat,
+            domain,
+            "phishing",
+            "threat",
+            "classified",
+            0.97,
+            "fasttext",
+            "model, phishing at 0.97",
+            3_600,
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_first_promotion_whose_config_cannot_be_published_is_undone() {
+    let dir = scratch_dir("first-promotion-publish");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai.clone()));
+    let live = ai.live_model_path();
+    assert_eq!(state.config.load_full().ai.block_threshold, 0.99);
+
+    // The built-in model has no artifact to displace, so what this path has to
+    // put back is the version itself, its calibration, weights and the
+    // threshold configuration. The artifact bytes a first promotion displaces
+    // are covered by the engine's own integration test, which can install a
+    // deliberately broken model.
+    let bytes = std::fs::read(&live).unwrap_or_default();
+    let id = candidate_version(
+        &ai,
+        "broken-config",
+        &live,
+        &bytes,
+        0.97,
+        serde_json::json!({ "workers": 0 }),
+    );
+
+    let promoted = call(
+        state.clone(),
+        "POST",
+        "/api/ai/candidates/promote",
+        Some(serde_json::json!({ "id": id })),
+    )
+    .await;
+    assert_eq!(promoted.0, StatusCode::BAD_REQUEST, "{}", promoted.2);
+
+    // No version in force, the candidate is a candidate again, and the file the
+    // next start reads and the model the channels run are the configured ones.
+    assert!(ai.store.active_candidate().unwrap().is_none());
+    assert_eq!(ai.store.candidate(id).unwrap().unwrap().status, "candidate");
+    assert_eq!(ai.live_model_path(), live, "the configured model is loaded");
+    // The threshold and the persisted overlay never moved.
+    assert_eq!(state.config.load_full().ai.block_threshold, 0.99);
+    assert_eq!(ai.settings.load_full().block_threshold, 0.99);
+    assert_eq!(overlay_threshold(&state), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_promotion_whose_config_cannot_be_published_keeps_the_previous_version() {
+    let dir = scratch_dir("promotion-publish");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai.clone()));
+    let live = ai.live_model_path();
+    let bytes = std::fs::read(&live).unwrap_or_default();
+    let first = candidate_version(&ai, "first", &live, &bytes, 0.95, serde_json::json!({}));
+    let promoted = call(
+        state.clone(),
+        "POST",
+        "/api/ai/candidates/promote",
+        Some(serde_json::json!({ "id": first })),
+    )
+    .await;
+    assert!(promoted.0.is_success(), "{}", promoted.2);
+    assert_eq!(overlay_threshold(&state), Some(0.95));
+
+    let second = candidate_version(
+        &ai,
+        "bad-config",
+        &live,
+        &bytes,
+        0.90,
+        serde_json::json!({ "category_ttl_secs": 1 }),
+    );
+    let promoted = call(
+        state.clone(),
+        "POST",
+        "/api/ai/candidates/promote",
+        Some(serde_json::json!({ "id": second })),
+    )
+    .await;
+    assert_eq!(promoted.0, StatusCode::BAD_REQUEST, "{}", promoted.2);
+
+    let active = ai.store.active_candidate().unwrap().unwrap();
+    assert_eq!(
+        active.id, first,
+        "the version that was in force stays in force"
+    );
+    assert_eq!(active.status, "active");
+    assert_eq!(
+        ai.store.candidate(second).unwrap().unwrap().status,
+        "rolled_back"
+    );
+    // Its threshold is the one in force, in the config, in the engine and in the
+    // overlay a restart would apply.
+    assert_eq!(state.config.load_full().ai.block_threshold, 0.95);
+    assert_eq!(ai.settings.load_full().block_threshold, 0.95);
+    assert_eq!(overlay_threshold(&state), Some(0.95));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_rollback_whose_config_cannot_be_published_keeps_the_version_in_force() {
+    let dir = scratch_dir("rollback-publish");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai.clone()));
+    let live = ai.live_model_path();
+    let bytes = std::fs::read(&live).unwrap_or_default();
+    let first = candidate_version(&ai, "first", &live, &bytes, 0.95, serde_json::json!({}));
+    let second = candidate_version(&ai, "second", &live, &bytes, 0.90, serde_json::json!({}));
+    for id in [first, second] {
+        let promoted = call(
+            state.clone(),
+            "POST",
+            "/api/ai/candidates/promote",
+            Some(serde_json::json!({ "id": id })),
+        )
+        .await;
+        assert!(promoted.0.is_success(), "{}", promoted.2);
+    }
+    assert_eq!(overlay_threshold(&state), Some(0.90));
+
+    // The version a rollback would restore can no longer be published.
+    let conn = rusqlite::Connection::open(dir.join("ai.db")).unwrap();
+    conn.execute(
+        "UPDATE ai_candidates SET scoring_config = ?1 WHERE id = ?2",
+        rusqlite::params![r#"{"workers":0}"#, first],
+    )
+    .unwrap();
+    drop(conn);
+
+    let rolled = call(state.clone(), "POST", "/api/ai/candidates/rollback", None).await;
+    assert_eq!(rolled.0, StatusCode::BAD_REQUEST, "{}", rolled.2);
+
+    // The rollback was taken back: the version that was in force is whole again,
+    // and no other version's threshold was published over it.
+    let active = ai.store.active_candidate().unwrap().unwrap();
+    assert_eq!(active.id, second);
+    assert_eq!(
+        ai.store.candidate(first).unwrap().unwrap().status,
+        "superseded"
+    );
+    assert_eq!(state.config.load_full().ai.block_threshold, 0.90);
+    assert_eq!(ai.settings.load_full().block_threshold, 0.90);
+    assert_eq!(overlay_threshold(&state), Some(0.90));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+#[tokio::test]
+async fn a_promotion_whose_fusion_cannot_be_re_scored_is_undone() {
+    let dir = scratch_dir("fusion-publish");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai.clone()));
+    seed_threat(&ai, "fusion-pending.example");
+    fail_rescore_for(&dir, "decide");
+
+    let live = ai.live_model_path();
+    let bytes = std::fs::read(&live).unwrap_or_default();
+    let id = candidate_version(
+        &ai,
+        "decide-mode",
+        &live,
+        &bytes,
+        0.97,
+        serde_json::json!({ "fusion": "decide" }),
+    );
+    let promoted = call(
+        state.clone(),
+        "POST",
+        "/api/ai/candidates/promote",
+        Some(serde_json::json!({ "id": id })),
+    )
+    .await;
+    assert!(!promoted.0.is_success(), "{}", promoted.2);
+
+    // A mode whose scores cannot be written is refused before it is published:
+    // nothing moved, and no version is in force.
+    assert!(ai.store.active_candidate().unwrap().is_none());
+    assert_eq!(ai.store.candidate(id).unwrap().unwrap().status, "candidate");
+    assert_eq!(state.config.load_full().ai.fusion.as_str(), "monitor");
+    assert_eq!(state.config.load_full().ai.block_threshold, 0.99);
+    assert_eq!(overlay_threshold(&state), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_promotion_whose_undo_fails_reports_what_could_not_be_put_back() {
+    let dir = scratch_dir("promotion-undo-publish");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai.clone()));
+    let live = ai.live_model_path();
+    let bytes = std::fs::read(&live).unwrap_or_default();
+    let first = candidate_version(&ai, "first", &live, &bytes, 0.95, serde_json::json!({}));
+    let promoted = call(
+        state.clone(),
+        "POST",
+        "/api/ai/candidates/promote",
+        Some(serde_json::json!({ "id": first })),
+    )
+    .await;
+    assert!(promoted.0.is_success(), "{}", promoted.2);
+
+    // The version that would have to come back now points at a file that is not
+    // a model, so its own restoration fails as well.
+    let broken = dir.join("broken.bin");
+    std::fs::write(&broken, b"not a model").unwrap();
+    let conn = rusqlite::Connection::open(dir.join("ai.db")).unwrap();
+    conn.execute(
+        "UPDATE ai_candidates SET model_path = ?1 WHERE id = ?2",
+        rusqlite::params![broken.to_string_lossy(), first],
+    )
+    .unwrap();
+    drop(conn);
+
+    let second = candidate_version(
+        &ai,
+        "bad-config",
+        &live,
+        &bytes,
+        0.90,
+        serde_json::json!({ "workers": 0 }),
+    );
+    let promoted = call(
+        state.clone(),
+        "POST",
+        "/api/ai/candidates/promote",
+        Some(serde_json::json!({ "id": second })),
+    )
+    .await;
+
+    // The failed configuration is reported together with the stage that could
+    // not be put back, rather than discarding the undo's own failure.
+    assert_eq!(
+        promoted.0,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        promoted.2
+    );
+    assert!(
+        promoted.2.contains("could not load candidate first"),
+        "{}",
+        promoted.2
+    );
+    // The store is back on the version that was in force, whose configuration
+    // was never replaced.
+    let active = ai.store.active_candidate().unwrap().unwrap();
+    assert_eq!(active.id, first);
+    assert_eq!(state.config.load_full().ai.block_threshold, 0.95);
+    assert_eq!(overlay_threshold(&state), Some(0.95));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_version_change_retires_the_threshold_trial_in_force() {
+    let dir = scratch_dir("trial-retired");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai.clone()));
+    let trial = ai
+        .store
+        .save_threshold_trial(&daygle_dns_ml::store::NewThresholdTrial {
+            model: "builtin".to_string(),
+            base_threshold: 0.99,
+            candidate: 0.96,
+            fpr_target: 0.01,
+            passed: true,
+            report: "{}".to_string(),
+        })
+        .unwrap();
+    assert!(ai
+        .store
+        .mark_threshold_applied(trial.id, 0.99, "builtin")
+        .unwrap());
+    assert!(ai.store.applied_threshold_trial().unwrap().is_some());
+
+    let live = ai.live_model_path();
+    let bytes = std::fs::read(&live).unwrap_or_default();
+    let id = candidate_version(
+        &ai,
+        "trial-owner",
+        &live,
+        &bytes,
+        0.95,
+        serde_json::json!({}),
+    );
+    let promoted = call(
+        state.clone(),
+        "POST",
+        "/api/ai/candidates/promote",
+        Some(serde_json::json!({ "id": id })),
+    )
+    .await;
+    assert!(promoted.0.is_success(), "{}", promoted.2);
+
+    // The trial measured the scoring the version replaced, so it is no longer in
+    // force and cannot put its own base threshold back over this version's.
+    assert!(ai.store.applied_threshold_trial().unwrap().is_none());
+    let status = json(state.clone(), "/api/ai/threshold").await;
+    assert!(status["in_force"].is_null());
+    let rolled = call(
+        state.clone(),
+        "POST",
+        "/api/ai/threshold/rollback",
+        Some(serde_json::json!({ "id": trial.id })),
+    )
+    .await;
+    assert_eq!(rolled.0, StatusCode::CONFLICT, "{}", rolled.2);
+    assert_eq!(state.config.load_full().ai.block_threshold, 0.95);
+    // The trial is kept as history: retired, not deleted.
+    let kept = ai.store.threshold_trial(trial.id).unwrap().unwrap();
+    assert!(kept.applied_at > 0 && kept.rolled_back_at > 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}

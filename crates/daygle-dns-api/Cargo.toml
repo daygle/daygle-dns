@@ -47,3 +47,5 @@ verifier-onnx = ["daygle-dns-ml/verifier-onnx"]
 
 [dev-dependencies]
 tempfile.workspace = true
+# Fault injection in the AI tests: a SQLite trigger on the engine database.
+rusqlite.workspace = true

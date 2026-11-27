@@ -2647,7 +2647,8 @@ async fn publish_candidate_config(
     ai: &Arc<daygle_dns_ml::AiEngine>,
     candidate: &daygle_dns_ml::store::CandidateVersion,
 ) -> daygle_dns_core::error::Result<()> {
-    let mut config = (*state.config.load_full()).clone();
+    let current = state.config.load_full();
+    let mut config = (*current).clone();
     if let Ok(update) = serde_json::from_value::<daygle_dns_core::config::AiUpdate>(
         candidate.scoring_config.clone(),
     ) {
@@ -2656,6 +2657,17 @@ async fn publish_candidate_config(
     // The threshold is the candidate's, whatever the overlay said.
     config.ai.block_threshold = candidate.block_threshold;
     config.validate()?;
+    // A version carries its fusion mode, and the stored assessments describe the
+    // mode they were scored under. Re-score them before the configuration that
+    // names the new mode is written, so a mode that cannot be applied is refused
+    // while the version can still be undone, rather than published and left with
+    // a gate reading scores from another mode. (`apply_settings` repeats this for
+    // the same settings; the re-score is idempotent.)
+    if config.ai.fusion != current.ai.fusion {
+        let engine = ai.clone();
+        let settings = config.ai.clone();
+        run_blocking(move || engine.rescore_for_settings(&settings)).await?;
+    }
     state
         .catalog
         .store()
@@ -2667,6 +2679,23 @@ async fn publish_candidate_config(
         move || ai.apply_settings(&settings)
     })
     .await;
+    // The trial in force was measured against the scoring this version replaces,
+    // so it must not be able to put its own base threshold back over this
+    // version's. Retiring is bookkeeping after the configuration is published: a
+    // failure is named rather than undoing a version that is already in force.
+    let retired = run_blocking({
+        let ai = ai.clone();
+        move || ai.store.retire_threshold_trials()
+    })
+    .await;
+    if let Err(e) = retired {
+        state.logs.warn(
+            "api",
+            format!(
+                "the threshold trial in force could not be retired after a version change ({e}); it still names the scoring that was replaced"
+            ),
+        );
+    }
     if restart {
         state.logs.warn(
             "api",
@@ -2675,6 +2704,26 @@ async fn publish_candidate_config(
         );
     }
     Ok(())
+}
+
+/// A change whose compensation could not be completed: the original cause, plus
+/// everything that could not be put back. With nothing left undone the cause's
+/// own status is kept; with compensation failures the operator has to see a
+/// server error that names them.
+fn failed_change_response(
+    cause: daygle_dns_core::error::DaygleError,
+    failures: &[String],
+) -> Response {
+    if failures.is_empty() {
+        return map_err(cause);
+    }
+    error_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!(
+            "{cause}; putting the previous version back did not fully succeed: {}",
+            failures.join("; ")
+        ),
+    )
 }
 
 /// `POST /api/ai/threshold/apply` - put a passed trial's candidate threshold
@@ -3009,23 +3058,27 @@ pub async fn ai_candidates_promote(
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
-    let promoted = run_blocking({
+    let outcome = run_blocking({
         let ai = ai.clone();
-        move || ai.promote_candidate(input.id)
+        move || ai.promote_candidate_with_undo(input.id)
     })
     .await;
-    let promoted = match promoted {
-        Ok(candidate) => candidate,
+    let (promoted, undo) = match outcome {
+        Ok(pair) => pair,
         Err(e) => return map_err(e),
     };
     if let Err(e) = publish_candidate_config(&state, &ai, &promoted).await {
-        // The candidate state is rolled back rather than left half applied.
-        let _ = run_blocking({
+        // The version's configuration was not published - a failure there writes
+        // nothing - so the version has to leave force with it. Undo the promotion
+        // at every layer, a first promotion included, and report anything that
+        // could not be undone rather than leave a version half applied behind a
+        // failed request.
+        let undone = run_blocking({
             let ai = ai.clone();
-            move || ai.rollback_candidate()
+            move || ai.abandon_promotion(undo)
         })
         .await;
-        return map_err(e);
+        return failed_change_response(e, &undone);
     }
     state.logs.push(
         daygle_dns_core::LogLevel::Info,
@@ -3060,14 +3113,18 @@ pub async fn ai_candidates_rollback(State(state): State<AppState>) -> Response {
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
-    let restored = run_blocking({
+    let rolled = run_blocking({
         let ai = ai.clone();
-        move || ai.rollback_candidate()
+        move || {
+            let in_force = ai.store.active_candidate()?;
+            let restored = ai.rollback_candidate()?;
+            Ok::<_, daygle_dns_core::error::DaygleError>((in_force, restored))
+        }
     })
     .await;
-    let restored = match restored {
-        Ok(Some(candidate)) => candidate,
-        Ok(None) => {
+    let (in_force, restored) = match rolled {
+        Ok((in_force, Some(restored))) => (in_force, restored),
+        Ok((_, None)) => {
             return error_response(
                 StatusCode::CONFLICT,
                 "there is no previous candidate version to restore",
@@ -3076,7 +3133,22 @@ pub async fn ai_candidates_rollback(State(state): State<AppState>) -> Response {
         Err(e) => return map_err(e),
     };
     if let Err(e) = publish_candidate_config(&state, &ai, &restored).await {
-        return map_err(e);
+        // The restored version's configuration is not in force, so neither is the
+        // restored version: take the rollback back and leave the version that was
+        // in force whole, rather than pair its model, artifact and calibration
+        // with another version's threshold.
+        let undone = match in_force {
+            Some(version) => {
+                run_blocking({
+                    let ai = ai.clone();
+                    let id = version.id;
+                    move || ai.restore_candidate_version(id)
+                })
+                .await
+            }
+            None => Vec::new(),
+        };
+        return failed_change_response(e, &undone);
     }
     state.logs.push(
         daygle_dns_core::LogLevel::Info,

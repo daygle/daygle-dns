@@ -1166,6 +1166,20 @@ impl AiEngine {
     /// caller publishes the candidate's threshold through the config path (the
     /// engine does not own the configuration).
     pub fn promote_candidate(&self, id: i64) -> Result<store::CandidateVersion> {
+        self.promote_candidate_with_undo(id)
+            .map(|(promoted, _undo)| promoted)
+    }
+
+    /// [`Self::promote_candidate`] with what undoing it needs while the caller
+    /// confirms it. The engine does not own the configuration, so a promotion is
+    /// complete only once the caller has published the version's threshold
+    /// through the config path; when that fails, the caller passes the record to
+    /// [`Self::abandon_promotion`] and the version leaves force exactly as if the
+    /// promotion had failed inside the engine, a first promotion included.
+    pub fn promote_candidate_with_undo(
+        &self,
+        id: i64,
+    ) -> Result<(store::CandidateVersion, PromotionUndo)> {
         let Some(candidate) = self.store.candidate(id)? else {
             return Err(DaygleError::NotFound(format!("no candidate version {id}")));
         };
@@ -1257,7 +1271,14 @@ impl AiEngine {
         }
         self.refresh_snapshot_now();
         self.trigger_rescan();
-        Ok(promoted)
+        let undo = PromotionUndo {
+            promoted: promoted.clone(),
+            previous_calibration,
+            previous_weights,
+            displaced,
+            live_model,
+        };
+        Ok((promoted, undo))
     }
 
     /// Restore the complete previous version: artifact bytes, threshold (the
@@ -1295,6 +1316,102 @@ impl AiEngine {
             failures.join("; "),
             &undone,
         ))
+    }
+
+    /// Take a promotion that the caller could not confirm back out of force: the
+    /// version that was in force before it comes back at every layer and the
+    /// stored scores describe it again. Used when the engine has already returned
+    /// the promotion - the configuration that travels with the version could not
+    /// be published - so it works from the record captured before anything
+    /// changed. Returns what could not be put back, so the caller can report it
+    /// rather than leave the version half applied.
+    pub fn abandon_promotion(&self, undo: PromotionUndo) -> Vec<String> {
+        match self.store.active_candidate() {
+            // A later promotion or rollback already decided what runs: undoing
+            // this one would take that decision back.
+            Ok(Some(active)) if active.id != undo.promoted.id => return Vec::new(),
+            Ok(None) => return Vec::new(),
+            Ok(Some(_)) => {}
+            Err(e) => {
+                return vec![format!(
+                    "could not read the version in force before undoing the promotion: {e}"
+                )]
+            }
+        }
+        let mut failures = Vec::new();
+        match self.store.rollback_active_candidate() {
+            Ok(Some(restored)) => failures.extend(self.restore_version(&restored)),
+            // A first promotion supersedes nothing, so what it replaced has no
+            // stored version to be read from: the calibration map, weights and
+            // artifact bytes captured before it go back instead.
+            Ok(None) => {
+                if let Err(e) = self.store.retire_active_candidate(undo.promoted.id) {
+                    failures.push(format!(
+                        "could not take candidate {} out of force: {e}",
+                        undo.promoted.version
+                    ));
+                }
+                if let Err(e) = self.store.activate_calibration(
+                    undo.previous_calibration
+                        .as_ref()
+                        .map(|m| m.version.as_str()),
+                ) {
+                    failures.push(format!("could not put the calibration map back: {e}"));
+                }
+                self.scanner
+                    .set_calibration(undo.previous_calibration.clone());
+                self.scanner
+                    .set_signal_weights(undo.previous_weights.clone());
+                failures.extend(self.undo_first_promotion(
+                    &undo.promoted.model_path,
+                    undo.displaced.as_deref(),
+                    &undo.live_model,
+                ));
+            }
+            Err(e) => failures.push(format!("could not restore the previous version: {e}")),
+        }
+        // The promotion re-scored the verdicts under its own calibration, so the
+        // version that comes back has to own them again.
+        if let Err(e) = self.rescore_stored_verdicts("a promotion was abandoned") {
+            failures.push(format!(
+                "could not put the stored verdicts back under the scoring that was in force: {e}"
+            ));
+        }
+        if failures.is_empty() {
+            self.refresh_snapshot_now();
+            self.trigger_rescan();
+        }
+        failures
+    }
+
+    /// Put one recorded version back in force as one version, stored scores
+    /// included: the rollback a caller has to take back when the restored
+    /// version's configuration cannot be published. Returns what could not be
+    /// put back.
+    pub fn restore_candidate_version(&self, id: i64) -> Vec<String> {
+        let version = match self.store.candidate(id) {
+            Ok(Some(version)) => version,
+            Ok(None) => return vec![format!("no candidate version {id} to put back")],
+            Err(e) => return vec![format!("could not read candidate version {id}: {e}")],
+        };
+        let mut failures = self.put_candidate_back(&version);
+        if let Err(e) = self.rescore_stored_verdicts("a rollback was taken back") {
+            failures.push(format!(
+                "could not put the stored verdicts back under the version that was in force: {e}"
+            ));
+        }
+        if failures.is_empty() {
+            self.refresh_snapshot_now();
+            self.trigger_rescan();
+        }
+        failures
+    }
+
+    /// Re-score the stored assessments for `settings` and report what could not
+    /// be written, so a caller can refuse a configuration change before
+    /// publishing it rather than apply it with scores from another fusion mode.
+    pub fn rescore_for_settings(&self, settings: &AiSettings) -> Result<usize> {
+        self.scanner.rescore_assessments(settings)
     }
 
     /// Re-score every stored threat verdict from the observations kept beside it
@@ -1593,6 +1710,21 @@ fn model_fingerprint(path: &str) -> String {
 /// An error for a scoring change that could not be applied everywhere: the
 /// original failure, plus whatever also failed while putting the previous
 /// version back. Both are named, so a half-applied change is never silent.
+/// What taking a promotion back needs, captured before it changed anything. The
+/// API publishes a version's configuration after the engine has committed the
+/// promotion; when that fails the version has to leave force again, and a first
+/// promotion has no stored version to be restored from, so its displaced
+/// artifact bytes, calibration and weights travel here instead.
+#[derive(Debug, Clone)]
+pub struct PromotionUndo {
+    /// The version the promotion put in force.
+    pub promoted: store::CandidateVersion,
+    previous_calibration: Option<calibration::CalibrationMap>,
+    previous_weights: fusion::SignalWeights,
+    displaced: Option<Vec<u8>>,
+    live_model: String,
+}
+
 fn failed_change(
     what: &str,
     cause: impl std::fmt::Display,
