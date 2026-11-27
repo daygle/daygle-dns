@@ -629,7 +629,8 @@ pub fn train(pairs: &[(String, String)], out: &Path) -> Result<()> {
     trained?;
     // The file is renamed into place next; make sure its bytes reach the
     // disk first, so a power cut cannot leave a truncated model behind.
-    std::fs::File::open(out).and_then(|file| file.sync_all())?;
+    // Windows requires write access on the handle used to flush the file.
+    std::fs::File::options().write(true).open(out)?.sync_all()?;
     Ok(())
 }
 
