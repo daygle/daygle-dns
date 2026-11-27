@@ -7851,6 +7851,12 @@ pub struct AiUpdate {
     pub block_threshold: Option<f32>,
     /// The false-positive rate a threshold trial must hold to (0.0-0.5).
     pub threshold_fpr_target: Option<f32>,
+    /// How the structured signal observations are combined: `off` records
+    /// them, `monitor` records the fused score beside the verdict, `decide`
+    /// makes it the assessment the gate compares.
+    pub fusion: Option<daygle_dns_core::config::FusionMode>,
+    /// Graduated enforcement authority, per evidence source.
+    pub authority: Option<daygle_dns_core::config::AuthoritySettings>,
     pub confidence_floor: Option<f32>,
     pub category_ttl_secs: Option<u64>,
     pub threat_ttl_secs: Option<u64>,
@@ -8816,6 +8822,20 @@ pub async fn update_settings(
         if let Some(v) = a.threshold_fpr_target {
             config.ai.threshold_fpr_target = v.clamp(0.0, 0.5);
         }
+        if let Some(v) = a.fusion {
+            config.ai.fusion = v;
+        }
+        if let Some(v) = &a.authority {
+            // The same rails the file gets: a configured new-block limit can
+            // only tighten the built-in ceiling, and the demotion thresholds
+            // stay in range, so a console save cannot widen them.
+            let mut authority = v.clone();
+            authority.max_new_blocks_per_refresh =
+                authority.max_new_blocks_per_refresh.clamp(1, 500);
+            authority.demote_fp_rate = authority.demote_fp_rate.clamp(0.0, 1.0);
+            authority.demote_min_samples = authority.demote_min_samples.max(1);
+            config.ai.authority = authority;
+        }
         if let Some(v) = a.confidence_floor {
             config.ai.confidence_floor = v;
         }
@@ -8911,6 +8931,7 @@ pub async fn update_settings(
     // whole AI form with every save, and reacting to an unchanged one forced
     // a snapshot rebuild and a full scan cycle on every unrelated edit.
     let ai_changed = config.ai != old_config.ai;
+    let fusion_changed = config.ai.fusion != old_config.ai.fusion;
 
     // A selected console-managed certificate must exist in the store.
     for (label, name) in [
@@ -9032,6 +9053,40 @@ pub async fn update_settings(
             || old_config.doh != config.doh
             || old_config.doq != config.doq);
     state.config.store(Arc::new(config.clone()));
+    // A fusion mode names the score the gate compares, and every stored
+    // assessment records the mode it was scored under. The configuration is
+    // persisted and published first, so a row is only ever re-scored under a
+    // mode the saved settings name. A re-score that fails wrote nothing (it
+    // runs in one transaction), so putting the previous configuration back is
+    // enough: the save stores no change and the rows keep describing the mode
+    // still in force.
+    if fusion_changed {
+        if let Some(ai) = &state.ai {
+            let engine = ai.clone();
+            let settings = config.ai.clone();
+            if let Err(e) = run_blocking(move || engine.rescore_for_settings(&settings)).await {
+                let mut failures = Vec::new();
+                if let Err(undo) = state.catalog.store().put_runtime_settings(
+                    &daygle_dns_core::config::RuntimeSettings::capture(&old_config),
+                ) {
+                    failures.push(format!(
+                        "could not put the previous runtime settings back: {undo}"
+                    ));
+                }
+                state.config.store(Arc::new(old_config.clone()));
+                if failures.is_empty() {
+                    return map_err(e);
+                }
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!(
+                        "{e}; putting the previous configuration back did not fully succeed: {}",
+                        failures.join("; ")
+                    ),
+                );
+            }
+        }
+    }
     // Filtering-group schedules are read in the display time zone.
     daygle_dns_core::schedule::set_time_zone(&config.display.time_zone);
     // Server-side knobs read from their own state rather than the config
@@ -9141,6 +9196,22 @@ pub async fn update_settings(
                 state.logs.info(
                     "api",
                     "AI settings stored; the scanner activates on the next restart".to_string(),
+                );
+            }
+        }
+    }
+    // The trial in force was measured against the scoring this save replaces,
+    // so it must not be able to put its own base threshold back over it. A
+    // failure is named rather than failing a save that is already published.
+    if ai_changed && fusion_changed {
+        if let Some(ai) = &state.ai {
+            let engine = ai.clone();
+            if let Err(e) = run_blocking(move || engine.store.retire_threshold_trials()).await {
+                state.logs.warn(
+                    "api",
+                    format!(
+                        "the threshold trial in force could not be retired after the fusion mode changed ({e}); it still names the scoring that was replaced"
+                    ),
                 );
             }
         }
