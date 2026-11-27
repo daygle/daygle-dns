@@ -1751,13 +1751,19 @@ artifact hash, threshold, calibration, weights, scoring config, validation
 report); `snapshot` records the current system, `promote` activates one as a
 whole and `rollback` restores the complete previous one. `GET
 /api/ai/authority` reports each source's stage and measured false-positive
-record. Details in [AI_SCORING_AUDIT.md](AI_SCORING_AUDIT.md).
+record. Its `reviewed_sources` field counts explicit reviews for current feed and
+model findings. A matching operator label confirms a finding and a
+`not_threat` review corrects it. An allow exemption alone leaves a finding
+unreviewed. Reviews predating the verdict are excluded. These counts are
+diagnostic and do not set authority. Details in
+[AI_SCORING_AUDIT.md](AI_SCORING_AUDIT.md).
 
 Nothing is applied. `POST /api/ai/threshold/apply` with `{"id": n}` puts that
 trial's candidate in force and publishes it as `ai.block_threshold`, recording
 the matching live model as `applied_model`. A failed trial returns `400` and
-an unknown ID returns `404`. An already-applied trial, a different model or
-an unreadable artifact returns `409`. A successful apply supersedes the
+an unknown ID returns `404`. An already-applied trial, a different model, an
+unreadable artifact or a trial run against a looser false-positive target
+returns `409`. A successful apply supersedes the
 previous trial. `POST /api/ai/threshold/rollback`
 with the id in force puts back the threshold that trial replaced, again
 without touching the model, and returns `model` (the one it was applied under)

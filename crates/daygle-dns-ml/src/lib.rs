@@ -1598,10 +1598,26 @@ impl AiEngine {
     pub fn authority_status(&self) -> Result<serde_json::Value> {
         let settings = self.settings.load_full();
         let decisions = authority::evaluate(&self.store, &settings.authority)?;
+        let now = chrono::Utc::now().timestamp();
+        let reviews = self.store.authority_reviews(now)?;
+        let reviewed_sources = [authority::Source::Feed, authority::Source::Model]
+            .iter()
+            .map(|source| {
+                let (_, findings, corrected, confirmed) = reviews
+                    .iter()
+                    .find(|(name, ..)| name == source.as_str())
+                    .cloned()
+                    .unwrap_or_default();
+                serde_json::json!({
+                    "source": source.as_str(),
+                    "unreviewed": findings - corrected - confirmed,
+                    "corrected": corrected,
+                    "confirmed": confirmed,
+                })
+            })
+            .collect::<Vec<_>>();
         let page_discovery_review = if settings.monitor_page_discovery {
-            let (findings, corrected, confirmed) = self
-                .store
-                .page_discovery_reviews(chrono::Utc::now().timestamp())?;
+            let (findings, corrected, confirmed) = self.store.page_discovery_reviews(now)?;
             let reviewed = corrected + confirmed;
             Some(serde_json::json!({
                 "unreviewed": findings.saturating_sub(reviewed),
@@ -1614,6 +1630,7 @@ impl AiEngine {
         };
         Ok(serde_json::json!({
             "enabled": settings.authority.enabled,
+            "reviewed_sources": reviewed_sources,
             "page_discovery_review": page_discovery_review,
             "settings": {
                 "feed_stage": settings.authority.feed_stage.as_str(),

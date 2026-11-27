@@ -2777,7 +2777,14 @@ pub async fn ai_threshold_apply(
     // The threshold this application replaces is the one in force now (the
     // trial's own recorded base may be older, if another trial moved it), and
     // it is what undoing this trial must put back.
-    let base = ai.settings.load_full().block_threshold;
+    let settings = ai.settings.load_full();
+    let base = settings.block_threshold;
+    if trial.fpr_target > settings.threshold_fpr_target {
+        return error_response(
+            StatusCode::CONFLICT,
+            "the false-positive target is stricter than the one this trial used; run a new trial",
+        );
+    }
     // A retrain can replace the model between measurement and application.
     let applied_model = daygle_dns_ml::threshold::model_version(&ai.live_model_path());
     if applied_model != trial.model || applied_model.starts_with("unreadable:") {

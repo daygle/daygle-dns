@@ -1199,6 +1199,44 @@ async fn a_passing_threshold_trial_for_a_different_model_cannot_be_applied() {
 }
 
 #[tokio::test]
+async fn a_threshold_trial_cannot_be_applied_after_the_target_tightens() {
+    let dir = scratch_dir("threshold-stricter-target");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai.clone()));
+    let threshold = ai.settings.load().block_threshold;
+    let trial = ai
+        .store
+        .save_threshold_trial(&daygle_dns_ml::store::NewThresholdTrial {
+            model: daygle_dns_ml::threshold::model_version(&ai.live_model_path()),
+            base_threshold: threshold,
+            candidate: 0.96,
+            fpr_target: 0.01,
+            passed: true,
+            report: "{}".to_string(),
+        })
+        .unwrap();
+    let (code, _, body) = call(
+        state.clone(),
+        "PUT",
+        "/api/config",
+        Some(serde_json::json!({ "ai": { "threshold_fpr_target": 0.005 } })),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let (code, _, body) = call(
+        state.clone(),
+        "POST",
+        "/api/ai/threshold/apply",
+        Some(serde_json::json!({ "id": trial.id })),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CONFLICT, "{body}");
+    assert!(ai.store.applied_threshold_trial().unwrap().is_none());
+    assert_eq!(ai.settings.load().block_threshold, threshold);
+    assert_eq!(overlay_threshold(&state), Some(threshold));
+}
+
+#[tokio::test]
 async fn autonomy_and_the_false_positive_target_round_trip() {
     let dir = scratch_dir("threshold-settings");
     let ai = engine(&dir);

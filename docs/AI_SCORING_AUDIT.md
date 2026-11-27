@@ -438,3 +438,68 @@ warning is likewise platform-only.
 Not measured: Brier/ECE on real traffic, fused-versus-unfused precision,
 authority demotion on production corrections, and a visual check of the new
 status rows (the bundle was rebuilt, but the console was not opened).
+## Follow-up design for autonomous scoring and enforcement
+
+Scheduled learning and the manual candidate endpoints should use the same
+activation service. Keep the existing shadow trial, rollback watch and
+operator controls as the entry points into that service.
+
+### Candidate validation
+
+- Keep the content category and the automated threat assessment separate in
+  stored results. The assessment carries a threat score, evidence sources
+  and any disputed or exempt status. The category remains available for
+  explanation, explicit suppression and group policy. A benign name-model
+  reading becomes one observation that independent evidence can challenge.
+- Freeze the classifier, verifier reference, fusion weights and scoring
+  policy before shadow evaluation. Run the candidate against observations
+  kept for replay and record the candidate version on every resulting score.
+  Fit calibration on the tuning partition. Evaluate it and the proposed
+  threshold on a separate registrable-domain holdout using the candidate's
+  exact enforcement score. Require enough labelled benign and threatening
+  examples. Leave the active version in service if evidence is insufficient
+  or a validation gate fails.
+- Keep discovery and verdict reviews source-tagged. A useful outcome needs
+  the finding ID, scoring version, review time and explicit adjudication.
+  A matching operator label can confirm a finding. An explicit false-positive
+  adjudication can correct it. Policy allow exemptions, repeat observations
+  and unreviewed predictions supply no promotion credit. Until those
+  identifiers are recorded, the current override-derived counts are
+  diagnostic only.
+
+### Publication and recovery
+
+Stage an immutable, digest-verified artifact and prepare the candidate's
+model and block snapshot before changing the active version. Serialize
+manual and scheduled promotion, rollback and relevant policy changes through
+one writer. Commit the active and previous version IDs together in the AI
+database. Publish a single in-memory scoring bundle after the commit. A
+restart loads the committed ID and verifies the bundle before enabling
+automated enforcement. An interrupted operation before commit keeps the
+previous version selected. An interruption after commit reconstructs the
+new version from durable state. Keep the old artifact while rollback is
+available, and roll back by committing its version ID through the same
+activation service.
+
+Keep current operator exemptions and explicit policy in the settings overlay.
+Rolling back a classifier must preserve later operator policy updates.
+Treat changes to the false-positive target, fusion policy or enforcement
+scope as inputs that can invalidate a candidate's validation. At startup,
+existing installations can import the effective configuration as a baseline
+version without granting new authority or claiming fresh validation.
+
+### Authority and rollout
+
+Require an explicit operator ceiling and start new automated sources in
+Monitor or Propose. Use independently reviewed, source-specific outcomes
+under the active scoring version to assess advancement, including enough
+negative evidence to bound false positives. Unreviewed findings remain a
+separate count. Match the review and enforcement scopes for each source,
+including exact-host page findings. Keep disputes, exemptions, the refresh
+cap, the global enforcement mode and the rollback watch in the final policy
+path.
+
+Verify failure before and after the active-version commit, restart in both
+states, corrupt or absent artifacts, changes to settings during a trial,
+rollback with newer operator exemptions, and insufficient or conflicting
+review evidence before enabling autonomous activation.

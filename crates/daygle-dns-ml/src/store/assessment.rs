@@ -870,6 +870,31 @@ impl AiStore {
         Ok(rows)
     }
 
+    /// Explicit reviews of current findings. An allow exemption is a policy
+    /// decision and does not by itself establish that the finding was wrong.
+    pub(crate) fn authority_reviews(&self, now: i64) -> Result<Vec<(String, i64, i64, i64)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT CASE WHEN instr(v.evidence, ', listed by ') > 0
+                         THEN 'feed' ELSE 'model' END AS source,
+                    count(*),
+                    count(CASE WHEN o.action = 'not_threat' THEN 1 END),
+                    count(CASE WHEN o.action IS NULL AND c.category = v.category THEN 1 END)
+             FROM ai_verdicts v
+             LEFT JOIN ai_overrides o
+               ON o.domain = v.domain AND o.created_at >= v.classified_at
+             LEFT JOIN ai_category_overrides c
+               ON c.domain = v.domain AND c.created_at >= v.classified_at
+             WHERE v.channel = 'threat' AND v.status = 'classified'
+               AND v.severity = 'threat' AND v.expires_at > ?1
+             GROUP BY source",
+        )?;
+        let rows = stmt
+            .query_map([now], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Every source's authority, the tightest first.
     pub fn authority(&self) -> Result<Vec<AuthorityRow>> {
         let conn = self.lock()?;

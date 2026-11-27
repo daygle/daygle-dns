@@ -194,6 +194,51 @@ mod tests {
     }
 
     #[test]
+    fn only_explicit_reviews_count_and_survive_reopening() {
+        let (dir, store) = store();
+        for domain in [
+            "confirmed.example",
+            "corrected.example",
+            "allowed.example",
+            "unreviewed.example",
+            "old-review.example",
+        ] {
+            verdict(&store, domain, "model, malware", 0.99);
+        }
+        verdict(&store, "listed.example", "model, listed by feed", 0.99);
+        store
+            .set_category_override("confirmed.example", "malware")
+            .unwrap();
+        store
+            .set_category_override("old-review.example", "malware")
+            .unwrap();
+        store
+            .set_override("corrected.example", "not_threat", "reviewed")
+            .unwrap();
+        store
+            .set_override("allowed.example", "allow", "exempt")
+            .unwrap();
+        drop(store);
+        rusqlite::Connection::open(dir.path().join("ai.db")).unwrap().execute(
+            "UPDATE ai_category_overrides SET created_at = 0 WHERE domain = 'old-review.example'",
+            [],
+        ).unwrap();
+
+        let reopened = AiStore::open(&dir.path().join("ai.db")).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let mut reviews = reopened.authority_reviews(now).unwrap();
+        reviews.sort();
+        assert_eq!(
+            reviews,
+            [
+                ("feed".to_string(), 1, 0, 0),
+                ("model".to_string(), 5, 1, 1)
+            ]
+        );
+        assert!(reopened.authority_reviews(now + 7_200).unwrap().is_empty());
+    }
+
+    #[test]
     fn a_source_is_demoted_when_its_corrections_pass_the_limit() {
         let (_dir, store) = store();
         // Ten model-only findings, four of them corrected as false positives:
