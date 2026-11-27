@@ -153,12 +153,14 @@
   }
 
   async function save() {
+    if (busy) return;
     notice = null;
-    error = problem(buildBody());
+    const body = buildBody();
+    error = problem(body);
     if (error) return;
     busy = true;
     try {
-      await api.updateSettings({ ai: buildBody() });
+      await api.updateSettings({ ai: body });
       notice = 'AI settings saved and applied.';
       await load();
       onSaved();
@@ -171,15 +173,19 @@
 
   // Fill the form with the built-in defaults; nothing is saved until Save.
   async function reset() {
+    if (busy) return;
     if (!confirm('Reset the AI settings to their defaults? Nothing is saved until you click Save Changes.')) return;
     notice = null;
     error = null;
+    busy = true;
     try {
       const d = await api.configDefaults();
       fill(d.ai || {});
       notice = 'AI settings reset to their defaults. Click Save Changes to apply them.';
     } catch (e) {
       error = formatApiError(e);
+    } finally {
+      busy = false;
     }
   }
 

@@ -128,6 +128,7 @@ fn an_update_request_runs_the_setup_helper_and_reports_done() {
     );
     let state = state(&run);
     assert!(state.contains("\"phase\":\"done\""), "{state}");
+    assert!(state.contains("\"kind\":\"ollama\""), "{state}");
     assert!(
         state.contains("Ollama updated from 0.5.1 to 0.6.0"),
         "{state}"
@@ -160,6 +161,7 @@ fn a_failing_helper_is_reported() {
     assert!(!run.ok);
     let state = state(&run);
     assert!(state.contains("\"phase\":\"error\""), "{state}");
+    assert!(state.contains("\"kind\":\"ollama\""), "{state}");
     assert!(state.contains("1024 MB of memory"), "{state}");
 }
 

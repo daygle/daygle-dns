@@ -82,14 +82,14 @@ json_escape() {
 # Write state atomically (temp file + rename) so the server's status polls
 # never observe a half-written file.
 state() { # phase message
-  printf '{"phase":"%s","pid":%s,"started_at":"%s","message":"%s","exit_code":0,"automatic":%s}\n' \
-    "$1" "$$" "$(date -u +%FT%TZ)" "$(json_escape "$2")" "$([ "$AUTOMATIC" -eq 1 ] && printf true || printf false)" > "$DIR/state.json.tmp" \
+  printf '{"kind":"%s","phase":"%s","pid":%s,"started_at":"%s","message":"%s","exit_code":0,"automatic":%s}\n' \
+    "$MODE" "$1" "$$" "$(date -u +%FT%TZ)" "$(json_escape "$2")" "$([ "$AUTOMATIC" -eq 1 ] && printf true || printf false)" > "$DIR/state.json.tmp" \
     && mv -f "$DIR/state.json.tmp" "$DIR/state.json"
 }
 
 fail() { # message
-  printf '{"phase":"error","pid":%s,"started_at":"%s","message":"%s","exit_code":1,"automatic":%s}\n' \
-    "$$" "$(date -u +%FT%TZ)" "$(json_escape "$1")" "$([ "$AUTOMATIC" -eq 1 ] && printf true || printf false)" > "$DIR/state.json.tmp" \
+  printf '{"kind":"%s","phase":"error","pid":%s,"started_at":"%s","message":"%s","exit_code":1,"automatic":%s}\n' \
+    "$MODE" "$$" "$(date -u +%FT%TZ)" "$(json_escape "$1")" "$([ "$AUTOMATIC" -eq 1 ] && printf true || printf false)" > "$DIR/state.json.tmp" \
     && mv -f "$DIR/state.json.tmp" "$DIR/state.json"
 }
 
