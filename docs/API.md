@@ -1725,9 +1725,9 @@ off the cycle still runs the expiry check and refreshes the block snapshot;
 (`ai.threshold_fpr_target`), `model` (the live model's `sha256:<artifact digest>`,
 `builtin` when there is none), `in_force` (the applied trial, or `null`) and
 the last 20 `trials`. `POST /api/ai/threshold/trial` runs one: it scores the
-store's threat verdicts by the same confidence `ai.block_threshold` compares,
-chooses the lowest threshold whose false-positive rate on established and
-unseen domains meets the target, validates it on a held-out fifth of the
+store's threat verdicts by the score `ai.block_threshold` compares,
+chooses the lowest threshold whose false-positive rate on labelled benign
+domains meets the target, and validates it on a held-out fifth of the
 evidence, records it with the model version and returns `{trial, message}`.
 The trial also reports `provenance` (where each label came from and how far it
 can be trusted: operator corrections strong, feed listings moderate,
@@ -1755,9 +1755,10 @@ record. Details in [AI_SCORING_AUDIT.md](AI_SCORING_AUDIT.md).
 
 Nothing is applied. `POST /api/ai/threshold/apply` with `{"id": n}` puts that
 trial's candidate in force and publishes it as `ai.block_threshold`, recording
-the model that was live at that moment as `applied_model`; a trial that did
-not pass is a `400`, an unknown id a `404`, and one already in force a `409`
-(applying a trial rolls back whichever one was). `POST /api/ai/threshold/rollback`
+the matching live model as `applied_model`. A failed trial returns `400` and
+an unknown ID returns `404`. An already-applied trial, a different model or
+an unreadable artifact returns `409`. A successful apply supersedes the
+previous trial. `POST /api/ai/threshold/rollback`
 with the id in force puts back the threshold that trial replaced, again
 without touching the model, and returns `model` (the one it was applied under)
 and `live_model` (the one running now) so the two can be told apart; a trial
@@ -1771,8 +1772,9 @@ sentence).
 Every threat row and `/api/ai/explain` also carry `signals`: the scored inputs
 shown on their own - `model`, `feed`, `popular`, `established`, `age`, `name` -
 each with a `direction` (`threat`, `benign`, `neutral`, `unknown`), a `value`
-(or `null`) and a `detail` line. They are for inspection: none of them feeds
-the decision, which the confidence and `ai.block_threshold` still make. A
+(or `null`) and a `detail` line. With Signal Fusion set to Decide, the
+fused assessment contributes to the score compared with `ai.block_threshold`.
+Monitor records the fused score for inspection. A
 feed hit is attributed to the exact name or its wildcard parent; a plain
 listing of a parent is recorded against the parent and never condemns an
 unrelated subdomain.
