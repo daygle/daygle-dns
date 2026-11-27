@@ -661,6 +661,20 @@ impl AiStore {
             .optional()?)
     }
 
+    /// Take the candidate in force out of force when there is no version to put
+    /// back: a first promotion supersedes nothing, so undoing it leaves the
+    /// candidate a candidate again. Its calibration is not touched - the caller
+    /// restores the map that was active before.
+    pub fn retire_active_candidate(&self, id: i64) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE ai_candidates SET status = 'candidate', promoted_at = 0, superseded_id = 0
+             WHERE id = ?1 AND status = 'active'",
+            params![id],
+        )?;
+        Ok(())
+    }
+
     /// Promote a candidate as one version: every other active candidate is
     /// superseded, the calibration map that travels with it is activated (or
     /// cleared when it has none), and the candidate it replaces is recorded so
@@ -1019,6 +1033,26 @@ mod tests {
         );
         // Nothing before the first candidate to restore.
         assert!(store.rollback_active_candidate().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_first_promotion_can_be_taken_out_of_force() {
+        let (_dir, store) = store();
+        let first = candidate(&store, 0.99, None);
+        store.promote_candidate(first).unwrap();
+        assert!(store.active_candidate().unwrap().is_some());
+
+        // Nothing to roll back to, so undoing the first promotion retires it.
+        assert!(store.rollback_active_candidate().unwrap().is_none());
+        store.retire_active_candidate(first).unwrap();
+        assert!(store.active_candidate().unwrap().is_none());
+        assert_eq!(
+            store.candidate(first).unwrap().unwrap().status,
+            "candidate",
+            "it is a candidate again"
+        );
+        store.promote_candidate(first).unwrap();
+        assert_eq!(store.active_candidate().unwrap().unwrap().id, first);
     }
 
     #[test]

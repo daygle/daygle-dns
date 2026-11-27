@@ -252,8 +252,11 @@ threat-label policy and authority setting - through the existing config path,
 validating the merged configuration first. A failure at any of those steps puts
 the previous version back in full: the store still lists it active, its
 artifact bytes are on disk again, its model is loaded, and the scanner uses its
-weights and calibration. A restoration step that also fails is named in the
-returned error instead of being dropped. **Rollback** restores the previous
+weights and calibration. When there is no previous version - the first
+promotion - the candidate is taken out of force instead and the calibration
+map and signal weights it replaced are put back, since it produced none of the
+stored scores. A restoration step that also fails is named in the returned
+error instead of being dropped. **Rollback** restores the previous
 version's bytes, threshold, calibration, weights and scoring configuration
 together, and re-scores the stored verdicts the same way. Activating or
 disabling a calibration map re-scores them too: a stored score describes the

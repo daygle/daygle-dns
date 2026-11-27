@@ -1172,6 +1172,8 @@ impl AiEngine {
         // The version in force now, so a promotion that cannot be completed
         // puts exactly that back instead of leaving the candidate half applied.
         let previous = self.store.active_candidate()?;
+        let previous_calibration = self.store.active_calibration()?;
+        let previous_weights = self.scanner.signal_weights();
         let live_model = self.live_model_path();
         // Write the artifact and load it *before* the store says the version is
         // in force: a model that does not load is not a version, and while it is
@@ -1206,8 +1208,25 @@ impl AiEngine {
             let mut failures = Vec::new();
             match self.store.rollback_active_candidate() {
                 Ok(Some(restored)) => failures.extend(self.restore_version(&restored)),
+                // A first promotion supersedes nothing: undo it by taking the
+                // candidate out of force and putting back the scoring it
+                // replaced, rather than leaving it active over scores it never
+                // produced. Its model bytes are the only artifact on disk, so
+                // the runtime keeps the model it already loaded.
                 Ok(None) => {
-                    failures.push("there was no previous version to restore".to_string());
+                    if let Err(e) = self.store.retire_active_candidate(promoted.id) {
+                        failures.push(format!(
+                            "could not take candidate {} out of force: {e}",
+                            promoted.version
+                        ));
+                    }
+                    if let Err(e) = self.store.activate_calibration(
+                        previous_calibration.as_ref().map(|m| m.version.as_str()),
+                    ) {
+                        failures.push(format!("could not put the calibration map back: {e}"));
+                    }
+                    self.scanner.set_calibration(previous_calibration.clone());
+                    self.scanner.set_signal_weights(previous_weights.clone());
                 }
                 Err(e) => {
                     failures.push(format!("could not restore the previous version: {e}"));
