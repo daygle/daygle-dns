@@ -220,7 +220,7 @@
       page = data.page || page;
       // Past the end (verdicts expired or were exempted since the page
       // was opened): show the last page instead of an empty one.
-      if (!rows.length && total > 0 && page > 1) {
+      if (!rows.length && total > 0 && page > pages()) {
         page = pages();
         return load();
       }
@@ -320,7 +320,7 @@
 
   async function runExplain() {
     const domain = explainInput.trim();
-    if (!domain) return;
+    if (!domain || explaining) return;
     explaining = true;
     explainError = null;
     explainResult = null;
@@ -499,7 +499,7 @@
         They apply when it runs again.
       </p>
       <div class="row" style="gap: 8px; flex-wrap: wrap">
-        <input bind:value={labelsText} placeholder="malware, phishing, scam" style="flex: 1; min-width: 200px" />
+        <input bind:value={labelsText} placeholder="malware, phishing, scam" style="flex: 1; min-width: min(100%, 200px)" />
         <button onclick={() => saveThreatLabels(labelsText.split(',').map((l) => l.trim().toLowerCase()).filter(Boolean))} disabled={savingLabels}>
           {savingLabels ? 'Saving...' : 'Save Labels'}
         </button>
@@ -659,6 +659,7 @@
     <div class="row" style="gap: 8px; flex-wrap: wrap">
       <input
         bind:value={explainInput}
+        disabled={explaining}
         placeholder="news.example.com"
         spellcheck="false"
         style="flex: 1; min-width: 220px"
@@ -746,7 +747,7 @@
     <div class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap">
       <h3 style="margin: 0">Detected Threats ({fmt(total)})</h3>
       <div class="row" style="gap: 8px; flex-wrap: wrap">
-        <input type="search" placeholder="Search Domains" aria-label="Search domains" bind:value={search} style="min-width: 200px" />
+        <input type="search" placeholder="Search Domains" aria-label="Search domains" bind:value={search} style="min-width: min(100%, 200px)" />
         <select bind:value={categoryFilter} aria-label="Filter by category" style="min-width: 150px">
           <option value="">All Categories</option>
           {#each categories as category (category)}

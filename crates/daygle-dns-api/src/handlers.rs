@@ -1824,6 +1824,8 @@ pub async fn ai_threats(
     match listed {
         Ok((rows, total, not_threat, relabels)) => {
             let snapshot = ai.snapshot().load();
+            let now = chrono::Utc::now().timestamp();
+            let exemptions = ai.scanner.exemptions().load_full();
             let categories = ai.category_snapshot();
             let categories = categories.load();
             let groups = state.advanced_blocking.load();
@@ -1831,7 +1833,8 @@ pub async fn ai_threats(
                 axum::Json(serde_json::json!({
                     "entries": rows.iter().map(|(r, signals)| {
                         let role = settings.label_role(&r.category);
-                        let blocked = snapshot.contains_key(&r.domain);
+                        let exempt = daygle_dns_ml::scanner::exempt(&r.domain, &exemptions);
+                        let blocked = !exempt && threat_block_entry(&r.domain, &snapshot, now).is_some();
                         let overridden = r.overridden;
                         let not_threat = not_threat.contains(&r.domain);
                         serde_json::json!({
@@ -1854,9 +1857,9 @@ pub async fn ai_threats(
                         "overridden": overridden,
                         "not_threat": not_threat,
                         "blocked": blocked,
-                        "category_blocked": categories
+                        "category_blocked": !exempt && categories
                             .get(&r.domain)
-                            .is_some_and(|c| groups.blocks_category(&c.category)),
+                            .is_some_and(|c| c.expires_at > now && groups.blocks_category(&c.category)),
                         "classified_at": chrono::DateTime::<chrono::Utc>::from_timestamp(r.classified_at, 0)
                             .map(|t| t.to_rfc3339()),
                         "expires_at": chrono::DateTime::<chrono::Utc>::from_timestamp(r.expires_at, 0)
@@ -2071,18 +2074,27 @@ pub async fn ai_threats_export(
 fn suffix_entry<'a, T>(
     domain: &str,
     snapshot: &'a std::collections::HashMap<String, T>,
-    expires_at: impl Fn(&T) -> i64,
-    now: i64,
+    eligible: impl Fn(&T, bool) -> bool,
 ) -> Option<(&'a str, &'a T)> {
     let mut candidate = domain;
     loop {
         if let Some((name, found)) = snapshot.get_key_value(candidate) {
-            if expires_at(found) > now {
+            if eligible(found, candidate == domain) {
                 return Some((name.as_str(), found));
             }
         }
         candidate = candidate.split_once('.')?.1;
     }
+}
+
+fn threat_block_entry<'a>(
+    domain: &str,
+    snapshot: &'a daygle_dns_ml::scanner::BlockSnapshot,
+    now: i64,
+) -> Option<(&'a str, &'a daygle_dns_ml::scanner::ActiveBlock)> {
+    suffix_entry(domain, snapshot, |block, exact| {
+        block.expires_at > now && (exact || !block.exact_host)
+    })
 }
 
 /// `GET /api/ai/explain?domain=` - why a domain is blocked, or why it is not:
@@ -2155,7 +2167,9 @@ pub async fn ai_explain(
             // would. An exact-name lookup reported "not blocked" for a
             // subdomain the plugin was blocking through its parent.
             let now = chrono::Utc::now().timestamp();
-            let block_hit = suffix_entry(&domain, &blocks, |b| b.expires_at, now);
+            let exemptions = ai.scanner.exemptions().load_full();
+            let block_hit = threat_block_entry(&domain, &blocks, now)
+                .filter(|_| !daygle_dns_ml::scanner::exempt(&domain, &exemptions));
             let blocked_category = block_hit.map(|(_, block)| block.category.clone());
             let blocked_through = block_hit
                 .map(|(name, _)| name)
@@ -2174,7 +2188,7 @@ pub async fn ai_explain(
             let label = relabel
                 .clone()
                 .or_else(|| {
-                    suffix_entry(&domain, &categories, |c| c.expires_at, now)
+                    suffix_entry(&domain, &categories, |c, _| c.expires_at > now)
                         .map(|(_, category)| category.category.clone())
                 })
                 .or_else(|| content.map(|r| r.category.clone()));
@@ -9729,6 +9743,25 @@ fn serve_gui(path: &str) -> Response {
 #[cfg(test)]
 mod settings_persistence_tests {
     use super::*;
+
+    #[test]
+    fn threat_block_entry_respects_expiry_and_exact_host_scope() {
+        use daygle_dns_ml::scanner::ActiveBlock;
+        let mut snapshot = daygle_dns_ml::scanner::BlockSnapshot::new();
+        snapshot.insert(
+            "login.example".into(),
+            ActiveBlock {
+                category: "phishing".into(),
+                expires_at: 10,
+                exact_host: true,
+            },
+        );
+        assert!(threat_block_entry("login.example", &snapshot, 9).is_some());
+        assert!(threat_block_entry("sub.login.example", &snapshot, 9).is_none());
+        assert!(threat_block_entry("login.example", &snapshot, 10).is_none());
+        snapshot.get_mut("login.example").unwrap().exact_host = false;
+        assert!(threat_block_entry("sub.login.example", &snapshot, 9).is_some());
+    }
 
     /// Keep in sync with the fields of [`SettingsUpdate`] above: one entry
     /// per section the settings API accepts. The test below then refuses to

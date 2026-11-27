@@ -119,15 +119,20 @@
 
   // `quiet` refreshes the figures in place (after Scan Now) instead of
   // blanking the page to a loading state.
+  let statusRequest = 0;
   async function load(quiet = false) {
+    const request = ++statusRequest;
     loading = !quiet;
     error = null;
     try {
-      status = await api.aiStatus();
+      const next = await api.aiStatus();
+      if (request !== statusRequest) return;
+      status = next;
       loadCalibration();
       api
         .blockingGroups()
         .then((groups) => {
+          if (request !== statusRequest) return;
           const enabled = (groups || []).filter((g) => g.enabled);
           aiEnforceGroups = enabled
             .filter((g) => g.ai_mode === 'enforce')
@@ -138,17 +143,19 @@
         })
         .catch(() => {});
     } catch (e) {
+      if (request !== statusRequest) return;
       status = null;
       // 404 means the scanner is off: an empty state, not a failure.
       error = e.status === 404 ? null : formatApiError(e);
       if (e.status === 404) {
-        enabledInSettings = await api
+        const enabled = await api
           .config()
           .then((c) => !!c.ai?.enabled)
           .catch(() => null);
+        if (request === statusRequest) enabledInSettings = enabled;
       }
     } finally {
-      loading = false;
+      if (request === statusRequest) loading = false;
     }
   }
 
