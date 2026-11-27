@@ -2654,10 +2654,8 @@ async fn publish_block_threshold(
     Ok(())
 }
 
-/// Publish a candidate's whole scoring configuration, not only its threshold:
-/// the version's fusion mode, confidence floor, FPR target, threat-label
-/// policy and authority setting travel with it, so promoting or rolling back a
-/// version restores what its hash describes.
+/// Restore the version's threshold, fusion mode and confidence floor while
+/// keeping the operator's current threat labels, authority and FPR target.
 async fn publish_candidate_config(
     state: &AppState,
     ai: &Arc<daygle_dns_ml::AiEngine>,
@@ -2670,6 +2668,10 @@ async fn publish_candidate_config(
     ) {
         update.apply_to(&mut config.ai);
     }
+    config.ai.authority = current.ai.authority.clone();
+    config.ai.auto_block_categories = current.ai.auto_block_categories.clone();
+    config.ai.auto_block_removals = current.ai.auto_block_removals.clone();
+    config.ai.threshold_fpr_target = current.ai.threshold_fpr_target;
     // The threshold is the candidate's, whatever the overlay said.
     config.ai.block_threshold = candidate.block_threshold;
     config.validate()?;
@@ -2750,6 +2752,7 @@ pub async fn ai_threshold_apply(
     State(state): State<AppState>,
     Json(input): Json<ThresholdTrialInput>,
 ) -> Response {
+    let _config_write = state.config_write.lock().await;
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
@@ -2847,6 +2850,7 @@ pub async fn ai_threshold_rollback(
     State(state): State<AppState>,
     Json(input): Json<ThresholdTrialInput>,
 ) -> Response {
+    let _config_write = state.config_write.lock().await;
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
@@ -3082,6 +3086,7 @@ pub async fn ai_candidates_promote(
     State(state): State<AppState>,
     Json(input): Json<CandidateInput>,
 ) -> Response {
+    let _config_write = state.config_write.lock().await;
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
@@ -3137,6 +3142,7 @@ pub async fn ai_candidates_promote(
 /// `POST /api/ai/candidates/rollback` - restore the complete previous
 /// version: its model artifact, threshold, calibration and signal weights.
 pub async fn ai_candidates_rollback(State(state): State<AppState>) -> Response {
+    let _config_write = state.config_write.lock().await;
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };

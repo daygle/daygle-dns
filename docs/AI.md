@@ -311,6 +311,8 @@ as one version - the model artifact bytes and hash, the threshold, the
 calibration map, the signal weights, the scoring configuration and the
 validation report. Promoting one activates all of it; one rollback restores
 the complete previous version, artifact included, not just a model name.
+The current operator threat labels, authority settings and false-positive
+target carry forward when a candidate is promoted or rolled back.
 
 **Graduated authority** (`ai.authority`, off by default) decides which
 evidence may block: feed-confirmed findings can be enforced while model-only
@@ -426,7 +428,9 @@ Set `ai.monitor_page_discovery = true` to inspect uncertain threat results for
 review when `ai.fetch_pages` is on. Discovery uses up to four workers and the
 time remaining after the existing page stages. It records outcomes under
 `page_discovery` in `GET /api/ai/signals?domain=…` for a day after a readable
-response, or an hour after a failed fetch. A missing threat reading is unknown.
+response, or an hour after a failed fetch. The scanner considers a skipped
+verdict or one whose raw confidence or current assessment is below the
+confidence floor. A missing threat reading is unknown.
 Discovery recognises suspicious password forms, brand sign-in impersonation,
 and payment, identity, or verification-code forms paired with coercive
 verification demands. It records cross-site hops and HTTPS downgrades and
@@ -452,7 +456,8 @@ The next regular block snapshot refresh considers new findings.
 `page_discovery_active` shows whether an exact-host finding was published.
 `GET /api/ai/authority` reports confirmations, corrections, and unreviewed
 findings for the current cache. Its correction share covers only explicit
-reviews. A missing share means there are no reviewed findings.
+reviews. A policy allow exemption alone leaves the finding unreviewed.
+A missing share means there are no reviewed findings.
 Evidence-only page mode, overrides, popularity and established-domain
 disputes, automated finding authority, and the per-refresh cap still apply.
 Page-only entries stay out of the category snapshot and threat export, where

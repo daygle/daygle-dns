@@ -145,17 +145,24 @@ pub fn restore_artifact(store: &AiStore, candidate: &CandidateVersion) -> Result
 /// renamed into place - so a reader never sees half a model. Used by a restore
 /// and by a promotion that has to put back the bytes it displaced.
 pub fn write_artifact(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+
     if path.as_os_str().is_empty() {
         return Ok(());
     }
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(DaygleError::Io)?;
-        }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(bytes)?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    #[cfg(unix)]
+    if let Err(error) = std::fs::File::open(parent).and_then(|directory| directory.sync_all()) {
+        tracing::warn!(path = %parent.display(), %error, "could not flush the restored model directory");
     }
-    let temporary = path.with_extension("restore-tmp");
-    std::fs::write(&temporary, bytes).map_err(DaygleError::Io)?;
-    std::fs::rename(&temporary, path).map_err(DaygleError::Io)?;
     Ok(())
 }
 
@@ -231,6 +238,20 @@ mod tests {
         let candidate = build(&store, &spec(std::path::Path::new(""), 0.99)).unwrap();
         assert_eq!(candidate.model_sha256, "builtin");
         assert!(!restore_artifact(&store, &candidate).unwrap());
+    }
+
+    #[test]
+    fn an_interrupted_restore_does_not_reuse_its_temporary_file() {
+        let (dir, _store) = store();
+        let model = dir.path().join("model.bin");
+        let interrupted = model.with_extension("restore-tmp");
+        std::fs::create_dir(&interrupted).unwrap();
+        std::fs::write(&model, b"old model").unwrap();
+
+        write_artifact(&model, b"replacement model").unwrap();
+
+        assert_eq!(std::fs::read(&model).unwrap(), b"replacement model");
+        assert!(interrupted.is_dir());
     }
 
     #[test]

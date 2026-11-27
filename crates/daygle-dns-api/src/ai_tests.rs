@@ -1545,6 +1545,49 @@ fn seed_threat(ai: &AiEngine, domain: &str) {
 }
 
 #[tokio::test]
+async fn candidate_rollback_preserves_newer_operator_policy() {
+    let dir = scratch_dir("rollback-operator-policy");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai.clone()));
+    let first = ai.snapshot_candidate().unwrap();
+    let live = ai.live_model_path();
+    let bytes = std::fs::read(&live).unwrap_or_default();
+    let second = candidate_version(&ai, "second", &live, &bytes, 0.96, serde_json::json!({}));
+    for id in [first.id, second] {
+        let (code, _, body) = call(
+            state.clone(),
+            "POST",
+            "/api/ai/candidates/promote",
+            Some(serde_json::json!({ "id": id })),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{body}");
+    }
+    let (code, _, body) = call(
+        state.clone(),
+        "PUT",
+        "/api/config",
+        Some(serde_json::json!({ "ai": {
+            "auto_block_removals": ["phishing"],
+            "threshold_fpr_target": 0.005,
+            "authority": { "enabled": true, "model_stage": "monitor" }
+        }})),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+
+    let (code, _, body) = call(state.clone(), "POST", "/api/ai/candidates/rollback", None).await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let settings = ai.settings.load_full();
+    assert_eq!(settings.block_threshold, first.block_threshold);
+    assert_eq!(settings.threshold_fpr_target, 0.005);
+    assert!(!settings.is_auto_block_category("phishing"));
+    assert!(settings.authority.enabled);
+    assert_eq!(settings.authority.model_stage.as_str(), "monitor");
+    assert_eq!(overlay_threshold(&state), Some(first.block_threshold));
+}
+
+#[tokio::test]
 async fn a_first_promotion_whose_config_cannot_be_published_is_undone() {
     let dir = scratch_dir("first-promotion-publish");
     let ai = engine(&dir);

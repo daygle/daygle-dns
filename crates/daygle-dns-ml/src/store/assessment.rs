@@ -752,14 +752,24 @@ impl AiStore {
     /// candidate now active, including its stored calibration map; the caller
     /// restores the artifact bytes and the threshold that travel with it.
     pub fn rollback_active_candidate(&self) -> Result<Option<CandidateVersion>> {
-        let Some(active) = self.active_candidate()? else {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let active = tx
+            .query_row(
+                &format!(
+                    "SELECT {CANDIDATE_COLUMNS} FROM ai_candidates
+                     WHERE status = 'active' ORDER BY promoted_at DESC LIMIT 1"
+                ),
+                [],
+                candidate_row,
+            )
+            .optional()?;
+        let Some(active) = active else {
             return Ok(None);
         };
         if active.superseded_id == 0 {
             return Ok(None);
         }
-        let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
         let now = now_epoch();
         tx.execute(
             "UPDATE ai_candidates SET status = 'rolled_back', rolled_back_at = ?1 WHERE id = ?2",

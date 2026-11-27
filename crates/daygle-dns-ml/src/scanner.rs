@@ -878,6 +878,7 @@ impl Scanner {
             now,
             cfg.confidence_floor,
             cfg.max_domains_per_scan as usize,
+            cfg.fusion,
         )?;
         let live = crate::page::PageFetcher::new(
             std::time::Duration::from_secs(cfg.page_fetch_timeout_secs.clamp(1, 30)),
