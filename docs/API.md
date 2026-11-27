@@ -1524,6 +1524,12 @@ Each answer's `dnssec` is `secure`, `insecure`, `bogus` or `indeterminate`.
 `outcome` is a short description of what came back, and its `rcode` is
 `null` when the server did not answer.
 
+The lookup runs under the client answer budget (`server.client_timeout_ms`),
+the same limit a client query gets. A lookup still running when it expires is
+stopped and returned as `SERVFAIL`, with `error` saying so and `trace` listing
+the queries that were still out; a diagnostic therefore never waits through
+retries a client would not wait for.
+
 An empty name or an invalid type is `400`; `409` when recursion is disabled.
 
 ### Local root zone

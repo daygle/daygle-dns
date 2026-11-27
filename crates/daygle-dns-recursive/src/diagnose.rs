@@ -99,6 +99,13 @@ impl RecursiveResolver {
     /// are flushed from the cache first. Without it, cached answers are
     /// used as for a client query, but the separate failure cache is not,
     /// so a failure is retried and its reason reported.
+    ///
+    /// The lookup runs under the client answer budget
+    /// (`server.client_timeout_ms`), the same limit the dispatcher gives a
+    /// client query. A lookup still running when it expires is stopped and
+    /// reported as SERVFAIL with the queries that were still out; without
+    /// this a diagnostic waited out every retry (several times the budget
+    /// when an upstream is silent).
     pub async fn diagnose(&self, name: &str, record_type: &str, fresh: bool) -> Result<Diagnosis> {
         let mut qname = crate::name_text::parse_name(name.trim())
             .map_err(|e| DaygleError::InvalidRecord(format!("invalid name '{name}': {e}")))?;
@@ -130,15 +137,26 @@ impl RecursiveResolver {
             route => route,
         };
 
-        let started = Instant::now();
-        let ((result, negative), trace) =
-            recursor::trace_queries(track_negative_soa(route.lookup(qname.clone(), rtype))).await;
-        let elapsed = started.elapsed();
-        let result = reject_bogus(&inner.settings, result);
+        // 0 means no client budget is known (a resolver built directly, as
+        // in unit tests), which leaves the lookup unbounded as before.
+        let limit = (inner.settings.client_timeout_ms > 0)
+            .then(|| Duration::from_millis(inner.settings.client_timeout_ms));
 
+        let started = Instant::now();
+        let (output, trace) = recursor::trace_queries_within(
+            track_negative_soa(route.lookup(qname.clone(), rtype)),
+            limit,
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        let (result, negative) = match output {
+            Some((result, negative)) => (Some(reject_bogus(&inner.settings, result)), negative),
+            None => (None, None),
+        };
         let negative_zone = negative.map(|n| n.soa.name.to_string());
         let (rcode, answers, error, negative_zone) = match result {
-            Ok(lookup) => {
+            Some(Ok(lookup)) => {
                 let answers = lookup
                     .answers()
                     .iter()
@@ -152,20 +170,29 @@ impl RecursiveResolver {
                     .collect();
                 ("NOERROR".to_string(), answers, None, None)
             }
-            Err(DaygleError::Resolution {
+            Some(Err(DaygleError::Resolution {
                 message,
                 response_code: Some(code),
-            }) => {
+            })) => {
                 let code = <ResponseCode as From<u16>>::from(code);
                 // NXDOMAIN and NODATA are answers, not failures.
                 let error = (!matches!(code, ResponseCode::NoError | ResponseCode::NXDomain))
                     .then(|| failure_summary(message, &trace));
                 (rcode_name(code), Vec::new(), error, negative_zone)
             }
-            Err(e) => (
+            Some(Err(e)) => (
                 "SERVFAIL".to_string(),
                 Vec::new(),
                 Some(failure_summary(e.to_string(), &trace)),
+                None,
+            ),
+            None => (
+                "SERVFAIL".to_string(),
+                Vec::new(),
+                Some(format!(
+                    "the lookup was still running when the client timeout of {} ms expired, so it was stopped; the trace shows the queries it had sent",
+                    inner.settings.client_timeout_ms
+                )),
                 None,
             ),
         };
