@@ -90,6 +90,14 @@ pub(super) fn upgrade(conn: &Connection) -> rusqlite::Result<()> {
     // agree read the same under either mode. The column is added before the
     // assessment columns on a database older than them, where there is nothing
     // to backfill.
+    //
+    // A zero assessment is a real score - fusion clamps to the 0-1 range - so
+    // a positive score alone would leave such a row reading its confidence and
+    // keep blocking on it. A zero cannot be told from a row the assessment
+    // layer never touched by value, so it counts only when the observations
+    // recorded beside an assessment are there; a database older than the
+    // assessment columns keeps every row at the default zero and must not be
+    // read as decided.
     if !has_column("assessment_mode")? {
         conn.execute(
             "ALTER TABLE ai_verdicts ADD COLUMN assessment_mode TEXT NOT NULL DEFAULT ''",
@@ -98,8 +106,12 @@ pub(super) fn upgrade(conn: &Connection) -> rusqlite::Result<()> {
         if has_column("assessment_score")? {
             conn.execute(
                 "UPDATE ai_verdicts SET assessment_mode = 'decide'
-                 WHERE assessment_score > 0
-                   AND abs(assessment_score - confidence) > 0.000001",
+                 WHERE abs(assessment_score - confidence) > 0.000001
+                   AND (assessment_score > 0 OR EXISTS (
+                       SELECT 1 FROM ai_signal_observations o
+                       WHERE o.domain = ai_verdicts.domain
+                         AND o.channel = ai_verdicts.channel
+                   ))",
                 [],
             )?;
         }

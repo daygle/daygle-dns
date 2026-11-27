@@ -689,7 +689,7 @@
         </ul>
         <p class="muted small" style="margin: 0">
           {#if explainResult.threat}
-            Threat label {titleCase(explainResult.threat.category)} at {percent(explainResult.threat.confidence)}{#if explainResult.threat.threat_score != null} (model threat score {percent(explainResult.threat.threat_score)}){:else} (not scored by the model){/if}{#if explainResult.threat.over_threshold}, at or above the threshold{:else}, below the threshold{/if}{#if explainResult.threat.severity === 'disputed'}, disputed{/if}.
+            Threat label {titleCase(explainResult.threat.category)} at {percent(explainResult.threat.confidence)}{#if explainResult.gate_score != null && explainResult.gate_score !== explainResult.threat.confidence} (gate score {percent(explainResult.gate_score)}){/if}{#if explainResult.threat.threat_score != null} (model threat score {percent(explainResult.threat.threat_score)}){:else} (not scored by the model){/if}{#if explainResult.threat.over_threshold}, at or above the threshold{:else}, below the threshold{/if}{#if explainResult.threat.severity === 'disputed'}, disputed{/if}.
             {#if explainResult.threat.evidence}
               <span class="evidence-line">Evidence: {explainResult.threat.evidence}.</span>
             {/if}

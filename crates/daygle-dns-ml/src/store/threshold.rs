@@ -49,6 +49,17 @@ pub(super) const GATE_SCORE: &str = "CASE \
          CASE WHEN calibration_version <> '' THEN calibrated_score ELSE confidence END \
      ELSE confidence END";
 
+/// The score calibration is fitted on: the assessment the active map was applied
+/// to. It follows the same mode rule as [`GATE_SCORE`] - `:fusion` is the live
+/// mode, and a verdict from another mode has no assessment for this one - but it
+/// stops before the map, so a second map never learns from the first map's
+/// output. A row the live mode assessed is read even when its assessment is
+/// exactly zero: the mode, not the value, says whether there is an assessment.
+pub(super) const ASSESSMENT_SCORE: &str = "CASE \
+     WHEN assessment_mode = :fusion THEN assessment_score \
+     WHEN assessment_mode = '' AND assessment_score > 0 THEN assessment_score \
+     ELSE confidence END";
+
 /// Add the columns a database from before this feature lacks.
 pub(super) fn upgrade(conn: &Connection) -> rusqlite::Result<()> {
     let has: bool = conn.query_row(
@@ -337,27 +348,42 @@ impl AiStore {
     }
 
     /// [`Self::gate_samples`] on the score before calibration: the assessment
-    /// score the active map was applied to. Calibration is fitted on this, so a
-    /// second map never learns from the first map's output.
-    pub fn assessment_samples(&self, limit: u32) -> Result<Vec<(String, f32, i64)>> {
+    /// score the active map was applied to, under the live fusion mode. A
+    /// verdict from another mode has no assessment for this one and reads as its
+    /// confidence (what the gate would use until it is re-scored), and a zero
+    /// the live mode assessed stays a zero rather than falling back. Calibration
+    /// is fitted on this, so a second map never learns from the first map's
+    /// output.
+    pub fn assessment_samples(
+        &self,
+        limit: u32,
+        fusion: FusionMode,
+    ) -> Result<Vec<(String, f32, i64)>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT domain,
-                    CASE WHEN assessment_score > 0 THEN assessment_score ELSE confidence END,
+                    {score},
                     classified_at
              FROM ai_verdicts
              WHERE channel = 'threat' AND status = 'classified'
-               AND CASE WHEN assessment_score > 0 THEN assessment_score ELSE confidence END > 0
-             ORDER BY 2 DESC, domain LIMIT ?1",
-        )?;
+             ORDER BY {score} DESC,
+                      domain LIMIT :limit",
+            score = ASSESSMENT_SCORE
+        ))?;
         let collected = stmt
-            .query_map(params![limit.clamp(1, 200_000)], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, f32>(1)?,
-                    r.get::<_, i64>(2)?,
-                ))
-            })?
+            .query_map(
+                named_params! {
+                    ":fusion": fusion.as_str(),
+                    ":limit": limit.clamp(1, 200_000),
+                },
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, f32>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                },
+            )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(collected)
     }
@@ -589,12 +615,79 @@ mod tests {
             vec![("mapped.example".to_string(), 0.2)]
         );
         let assessment: Vec<(String, f32)> = store
-            .assessment_samples(10)
+            .assessment_samples(10, FusionMode::Monitor)
             .unwrap()
             .into_iter()
             .map(|(domain, score, _)| (domain, score))
             .collect();
         assert_eq!(assessment, vec![("mapped.example".to_string(), 0.9)]);
+    }
+
+    /// Calibration is fitted on the assessment the live mode produced, not on
+    /// the confidence: under `decide` that is the fused score, and an assessed
+    /// zero is a sample rather than a missing value.
+    #[test]
+    fn calibration_fitting_reads_the_live_modes_assessment() {
+        let (_dir, store) = store();
+        for (domain, confidence, assessment) in [
+            ("fused.example", 0.9, 0.4),
+            ("fused-zero.example", 0.95, 0.0),
+        ] {
+            store.observe(domain).unwrap();
+            store
+                .save_verdicts(&[crate::store::NewVerdict {
+                    domain: domain.to_string(),
+                    channel: crate::store::Channel::Threat,
+                    category: "phishing".to_string(),
+                    severity: "threat".to_string(),
+                    status: "classified".to_string(),
+                    confidence,
+                    backend: "fasttext".to_string(),
+                    evidence: format!("model, phishing at {confidence}"),
+                    threat_score: confidence,
+                    expires_after_secs: 3_600,
+                }])
+                .unwrap();
+            store
+                .save_assessment(
+                    domain,
+                    "threat",
+                    FusionMode::Decide,
+                    &AssessmentScore {
+                        assessment,
+                        calibrated: None,
+                        calibration_version: String::new(),
+                        fused: Some(assessment),
+                    },
+                )
+                .unwrap();
+        }
+
+        let scores = |fusion| -> Vec<(String, f32)> {
+            store
+                .assessment_samples(10, fusion)
+                .unwrap()
+                .into_iter()
+                .map(|(domain, score, _)| (domain, score))
+                .collect()
+        };
+        assert_eq!(
+            scores(FusionMode::Decide),
+            vec![
+                ("fused.example".to_string(), 0.4),
+                ("fused-zero.example".to_string(), 0.0),
+            ],
+            "the fused assessment is what a map is fitted on, zero included"
+        );
+        // A verdict from another mode has no assessment for this one, so it
+        // reads as its confidence until it is re-scored.
+        assert_eq!(
+            scores(FusionMode::Monitor),
+            vec![
+                ("fused-zero.example".to_string(), 0.95),
+                ("fused.example".to_string(), 0.9),
+            ]
+        );
     }
 
     #[test]
@@ -720,6 +813,39 @@ mod tests {
                     },
                 )
                 .unwrap();
+            // A decided zero: fusion clamps to the 0-1 range, so 0 is a real
+            // score, and the observations recorded beside it are what tell it
+            // from a row the assessment layer never touched.
+            store.observe("zeroed.example").unwrap();
+            store
+                .save_verdict(
+                    crate::store::Channel::Threat,
+                    "zeroed.example",
+                    "phishing",
+                    "threat",
+                    "classified",
+                    0.95,
+                    "fasttext",
+                    "model, phishing at 0.95",
+                    3_600,
+                )
+                .unwrap();
+            store
+                .save_observations("zeroed.example", "threat", 1, &[])
+                .unwrap();
+            store
+                .save_assessment(
+                    "zeroed.example",
+                    "threat",
+                    FusionMode::Decide,
+                    &AssessmentScore {
+                        assessment: 0.0,
+                        calibrated: None,
+                        calibration_version: String::new(),
+                        fused: Some(0.0),
+                    },
+                )
+                .unwrap();
             // The database as it stood before the mode column existed.
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute("ALTER TABLE ai_verdicts DROP COLUMN assessment_mode", [])
@@ -731,6 +857,13 @@ mod tests {
             store.gate_scores(10, FusionMode::Decide).unwrap(),
             vec![("decided.example".to_string(), 0.30)],
             "the score `decide` produced is still the decided one"
+        );
+        assert_eq!(
+            store
+                .gate_score("zeroed.example", "threat", FusionMode::Decide)
+                .unwrap(),
+            Some(0.0),
+            "a decided zero is a score, not a missing assessment"
         );
     }
 

@@ -521,15 +521,21 @@ pub fn collect(
 }
 
 /// [`collect`] on the score calibration is fitted against: the assessment
-/// score before any map was applied. Fitting on the gate score while a map is
-/// already in force would learn from that map's own output.
+/// score before any map was applied, under the live fusion mode. Fitting on the
+/// gate score while a map is already in force would learn from that map's own
+/// output; fitting on the confidence would ignore a fused assessment.
 pub fn collect_for_calibration(
     store: &AiStore,
     intel: &IntelIndex,
     settings: &AiSettings,
     limit: u32,
 ) -> Result<Vec<Sample>> {
-    collect_rows(store, intel, settings, store.assessment_samples(limit)?)
+    collect_rows(
+        store,
+        intel,
+        settings,
+        store.assessment_samples(limit, settings.fusion)?,
+    )
 }
 
 fn collect_rows(

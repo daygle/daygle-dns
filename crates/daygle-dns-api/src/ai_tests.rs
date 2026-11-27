@@ -390,6 +390,13 @@ async fn threat_export_and_corrections_are_served_as_csv() {
         capped["page_adjustment"]
     );
     assert_eq!(capped["threat"]["over_threshold"], false);
+    assert!(
+        capped["reasons"].as_array().unwrap().iter().any(|r| r
+            .as_str()
+            .unwrap_or_default()
+            .contains("gate score, 20%, is below")),
+        "the below-threshold reason compares the gate score, not the confidence: {capped}"
+    );
     assert_eq!(capped["page_reading"]["category"], "shopping");
     assert!(
         (capped["page_reading"]["confidence"].as_f64().unwrap() - 0.8).abs() < 1e-3,

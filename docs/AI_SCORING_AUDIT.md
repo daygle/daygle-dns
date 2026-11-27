@@ -92,6 +92,20 @@ legitimately calibrates a name to zero. Pinned by
 `fusion_decide_changes_the_gate_score_without_calibration` and
 `switching_fusion_mode_rescores_stored_verdicts`.
 
+Two readers that still fell back to the confidence are on the same score now.
+The scan's blocking-rate metric (`scanner.rs::blocking_count`, the number
+`ai_threat_rate` records for the promoted-model watch) counts the score of
+record the gate would compare, not the model's confidence. Calibration fitting
+(`store::assessment_samples`) reads the assessment the live mode produced, under
+the same `assessment_mode` rule but before the map - a second map must not learn
+from the first map's output - and a zero the live mode assessed stays a sample
+rather than falling back. The upgrade tags a stored assessment that differs from
+its confidence and has observations beside it as `decide`, so an assessed zero
+is not mistaken for a missing score. Pinned by
+`the_blocking_rate_counts_the_score_of_record`,
+`calibration_fitting_reads_the_live_modes_assessment` and
+`reopening_a_store_keeps_a_decided_score_decided`.
+
 ### Scoring methods that could confuse (found in the audit)
 
 | Item | Status |
