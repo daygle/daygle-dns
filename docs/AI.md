@@ -252,13 +252,13 @@ correction says so), the operator's corrections, and unseen domains.
 
 A trial is a record, not a change. It stores the threshold it started from,
 the candidate, the false-positive target, the outcome, the per-group rows and
-the model version it measured (`path@stamp:bytes`, or `builtin`) in one row,
+the model version it measured (`sha256:<artifact digest>`, or `builtin`) in one row,
 because a threshold means nothing apart from the model that produced the
 scores. `POST /api/ai/threshold/apply` puts a trial's candidate in force, and
-refuses a trial that did not keep the target on the held-out half. Applying
-also records the model that was live at that moment beside the threshold it
-replaced, since a retrain can promote a different model between the trial and
-its application. `POST /api/ai/threshold/rollback` puts back the threshold
+refuses a trial that missed the target on the held-out half or was measured
+against a different model. Applying records the model beside the threshold it
+replaced. Run a fresh trial to apply a threshold from a file-backed trial
+recorded before artifact digests were introduced. `POST /api/ai/threshold/rollback` puts back the threshold
 that trial replaced; that moves the threshold alone, so a model promoted
 since stays live, and the response names the model the trial was applied
 under so the two can be reverted together by hand if that is what is wanted.
@@ -300,6 +300,12 @@ fused score under `decide`, the confidence otherwise). The gate, the threshold
 trial, the console's explanation and the exported threat list all read that one
 number.
 
+Calibration follows the artifact bytes across a restore or restart. On
+upgrade, an active map identified only by an older file path and timestamp is
+retired at startup. Fit and apply a new map for the live model. Scheduled
+classifier promotion does not fit a new calibration map or publish a new
+validated threshold.
+
 **Versioned candidates** (`/api/ai/candidates`) hold the whole scoring system
 as one version - the model artifact bytes and hash, the threshold, the
 calibration map, the signal weights, the scoring configuration and the
@@ -311,7 +317,8 @@ evidence may block: feed-confirmed findings can be enforced while model-only
 findings are only proposed, or the reverse. Findings at `monitor`/`propose`
 are recorded and listed but never reach the block snapshot, and a source whose
 measured false-positive share passes `demote_fp_rate` is demoted to `monitor`
-automatically. Operator labels and overrides are never filtered or demoted by
+automatically. The configured stage is the ceiling for each source. Moving
+that ceiling to Enforce requires an operator change. Operator labels and overrides are never filtered or demoted by
 it. The per-refresh limit on new blocks can be tightened here, never raised
 above its 500-domain ceiling. Turn it on under AI -> Settings (Scoring) ->
 Enforcement Authority, or with `ai.authority` in the config file.

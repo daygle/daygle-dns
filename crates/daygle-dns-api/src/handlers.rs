@@ -2778,10 +2778,14 @@ pub async fn ai_threshold_apply(
     // trial's own recorded base may be older, if another trial moved it), and
     // it is what undoing this trial must put back.
     let base = ai.settings.load_full().block_threshold;
-    // The model actually live at this moment, not the one the trial was
-    // measured against: a retrain may have promoted another one in between,
-    // and the threshold and the model only mean something together.
+    // A retrain can replace the model between measurement and application.
     let applied_model = daygle_dns_ml::threshold::model_version(&ai.live_model_path());
+    if applied_model != trial.model || applied_model.starts_with("unreadable:") {
+        return error_response(
+            StatusCode::CONFLICT,
+            "that trial was not validated for the identifiable live model; run a new trial",
+        );
+    }
     let marked = run_blocking({
         let ai = ai.clone();
         let id = trial.id;

@@ -5020,15 +5020,15 @@ fn a_candidate_that_cannot_load_leaves_the_previous_version_in_force() {
 
 // ── A new model retires a calibration map fitted for the old one ─────────────
 
-/// Set a model file's modification time, so replacing the model (which the
-/// version stamp reads) is visible without rewriting its bytes.
-fn stamp(path: &std::path::Path, secs_ago: u64) {
-    let when = std::time::SystemTime::now() - std::time::Duration::from_secs(secs_ago);
+/// Make an artifact with distinct bytes. The fastText reader stops at the
+/// end of the model matrices and permits trailing bytes.
+fn mark_artifact(path: &std::path::Path) {
+    use std::io::Write;
     std::fs::File::options()
-        .write(true)
+        .append(true)
         .open(path)
         .unwrap()
-        .set_modified(when)
+        .write_all(b"replacement artifact")
         .unwrap();
 }
 
@@ -5079,10 +5079,9 @@ fn a_model_change_retires_a_calibration_map_fitted_for_the_old_model() {
     let dir = TempDir::new().unwrap();
     let learned = dir.path().join("learned.bin");
     std::fs::copy(PROMOTION_MODEL, &learned).unwrap();
-    stamp(&learned, 600);
     let previous = dir.path().join("learned.prev.bin");
     std::fs::copy(PROMOTION_MODEL, &previous).unwrap();
-    stamp(&previous, 1_200);
+    mark_artifact(&previous);
     let live_settings = AiSettings {
         model_path: learned.to_string_lossy().into_owned(),
         ..settings(AiMode::Enforce)
@@ -5154,7 +5153,6 @@ fn a_restart_does_not_reapply_a_calibration_map_fitted_for_a_replaced_model() {
     let dir = TempDir::new().unwrap();
     let model = dir.path().join("model.bin");
     std::fs::copy(PROMOTION_MODEL, &model).unwrap();
-    stamp(&model, 600);
     let model_settings = AiSettings {
         model_path: model.to_string_lossy().into_owned(),
         ..settings(AiMode::Enforce)
@@ -5170,8 +5168,15 @@ fn a_restart_does_not_reapply_a_calibration_map_fitted_for_a_replaced_model() {
         map.version
     };
 
-    // The model is replaced while the service is down.
-    stamp(&model, 60);
+    // Restoring identical bytes while the service is down preserves the map.
+    std::fs::copy(PROMOTION_MODEL, &model).unwrap();
+    {
+        let ai = engine(&dir, model_settings.clone());
+        assert_eq!(ai.scanner.calibration_map().unwrap().version, version);
+    }
+
+    // Replacing the bytes while the service is down invalidates the map.
+    mark_artifact(&model);
     let ai = engine(&dir, model_settings);
     assert!(
         ai.store.active_calibration().unwrap().is_none(),
@@ -5427,10 +5432,9 @@ fn a_failed_rescore_never_leaves_a_stale_calibration_deciding_the_gate() {
     let dir = TempDir::new().unwrap();
     let learned = dir.path().join("learned.bin");
     std::fs::copy(PROMOTION_MODEL, &learned).unwrap();
-    stamp(&learned, 600);
     let previous = dir.path().join("learned.prev.bin");
     std::fs::copy(PROMOTION_MODEL, &previous).unwrap();
-    stamp(&previous, 1_200);
+    mark_artifact(&previous);
     let ai = engine(
         &dir,
         AiSettings {

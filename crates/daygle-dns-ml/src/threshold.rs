@@ -24,8 +24,10 @@
 //! operator applies it (see [`crate::store::ThresholdTrial`]).
 
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use daygle_dns_core::config::AiSettings;
 use daygle_dns_core::error::Result;
@@ -595,25 +597,26 @@ fn collect_rows(
         .collect())
 }
 
-/// The model's identity for a trial record: `builtin` for the shipped
-/// classifier, else the path with its stamp, so the threshold can always be
-/// read beside the model it was measured with.
+/// The model's identity for calibration and threshold records. Restoring
+/// identical bytes preserves the identity even when the path or stamp changes.
 pub fn model_version(path: &str) -> String {
     let path = path.trim();
     if path.is_empty() {
         return "builtin".to_string();
     }
-    match std::fs::metadata(path) {
-        Ok(meta) => {
-            let stamp = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            format!("{path}@{stamp}:{}", meta.len())
+    artifact_version(path).unwrap_or_else(|_| format!("unreadable:{path}"))
+}
+
+fn artifact_version(path: &str) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0; 16 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            return Ok(format!("sha256:{}", crate::candidate::hex(&hash.finalize())));
         }
-        Err(_) => path.to_string(),
+        hash.update(&buffer[..count]);
     }
 }
 
@@ -852,11 +855,24 @@ mod tests {
     }
 
     #[test]
-    fn a_model_path_is_part_of_the_candidate() {
+    fn an_unreadable_artifact_has_no_content_identity() {
         assert_eq!(model_version(""), "builtin");
         assert_eq!(
             model_version("/nonexistent/model.bin"),
-            "/nonexistent/model.bin"
+            "unreadable:/nonexistent/model.bin"
         );
+    }
+
+    #[test]
+    fn model_identity_follows_the_bytes_across_restores() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("live.bin");
+        let restored = dir.path().join("restored.bin");
+        std::fs::write(&live, b"first").unwrap();
+        let original = model_version(live.to_str().unwrap());
+        std::fs::write(&restored, b"first").unwrap();
+        assert_eq!(model_version(restored.to_str().unwrap()), original);
+        std::fs::write(&live, b"other").unwrap();
+        assert_ne!(model_version(live.to_str().unwrap()), original);
     }
 }

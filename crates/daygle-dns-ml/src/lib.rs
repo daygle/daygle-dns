@@ -1032,6 +1032,11 @@ impl AiEngine {
             }
         }
         let source_model = threshold::model_version(&self.live_model_path());
+        if source_model.starts_with("unreadable:") {
+            return Err(DaygleError::Config(format!(
+                "cannot fit calibration without a readable model artifact ({source_model})"
+            )));
+        }
         let Some(mut map) =
             calibration::fit(&tuning, &source_model, chrono::Utc::now().timestamp())
         else {
@@ -1080,7 +1085,7 @@ impl AiEngine {
         // the fit replaces that distribution, so the held-out report no longer
         // describes the scores the map would be applied to.
         let live = threshold::model_version(&self.live_model_path());
-        if record.map.source_model != live {
+        if record.map.source_model != live || live.starts_with("unreadable:") {
             return Err(DaygleError::Config(format!(
                 "that calibration map was fitted for {}, but the live model is {live}: fit it again",
                 record.map.source_model
@@ -1820,7 +1825,7 @@ fn retire_calibration_for_changed_model(
     let Ok(Some(map)) = store.active_calibration() else {
         return;
     };
-    if map.source_model == live {
+    if map.source_model == live && !live.starts_with("unreadable:") {
         return;
     }
     let mut failures = Vec::new();

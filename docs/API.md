@@ -1722,7 +1722,7 @@ off the cycle still runs the expiry check and refreshes the block snapshot;
 `ai.mode` is unaffected, so existing threats keep enforcing.
 
 `GET /api/ai/threshold` reports `block_threshold`, `fpr_target`
-(`ai.threshold_fpr_target`), `model` (the live model's `path@stamp:bytes`,
+(`ai.threshold_fpr_target`), `model` (the live model's `sha256:<artifact digest>`,
 `builtin` when there is none), `in_force` (the applied trial, or `null`) and
 the last 20 `trials`. `POST /api/ai/threshold/trial` runs one: it scores the
 store's threat verdicts by the same confidence `ai.block_threshold` compares,

@@ -1169,6 +1169,36 @@ async fn applying_a_trial_records_the_live_model_and_rollback_reports_it() {
 }
 
 #[tokio::test]
+async fn a_passing_threshold_trial_for_a_different_model_cannot_be_applied() {
+    let dir = scratch_dir("threshold-stale-model");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai.clone()));
+    let trial = ai
+        .store
+        .save_threshold_trial(&daygle_dns_ml::store::NewThresholdTrial {
+            model: "sha256:replaced-model".to_string(),
+            base_threshold: 0.99,
+            candidate: 0.96,
+            fpr_target: 0.01,
+            passed: true,
+            report: "{}".to_string(),
+        })
+        .unwrap();
+    let threshold = ai.settings.load().block_threshold;
+    let (code, _, body) = call(
+        state.clone(),
+        "POST",
+        "/api/ai/threshold/apply",
+        Some(serde_json::json!({ "id": trial.id })),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CONFLICT, "{body}");
+    assert!(ai.store.applied_threshold_trial().unwrap().is_none());
+    assert_eq!(ai.settings.load().block_threshold, threshold);
+    assert_eq!(overlay_threshold(&state), None);
+}
+
+#[tokio::test]
 async fn autonomy_and_the_false_positive_target_round_trip() {
     let dir = scratch_dir("threshold-settings");
     let ai = engine(&dir);
