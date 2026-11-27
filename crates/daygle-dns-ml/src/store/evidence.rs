@@ -283,7 +283,7 @@ impl AiStore {
         Ok(rows)
     }
 
-    pub(crate) fn page_discovery_reviews(&self, now: i64) -> Result<(u64, u64, u64)> {
+    pub(crate) fn page_discovery_reviews(&self, now: i64) -> Result<(i64, i64, i64)> {
         let counts = self.lock()?.query_row(
             "SELECT count(*),
                     count(CASE WHEN o.action IN ('allow', 'not_threat') THEN 1 END),
