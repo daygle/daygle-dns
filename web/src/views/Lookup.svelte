@@ -37,6 +37,21 @@
     }
   }
 
+  function exportResult() {
+    if (!result) return;
+    const safeName = result.name.replace(/\.$/, '').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || 'root';
+    const safeType = result.type.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const blob = new Blob([JSON.stringify(result, null, 2), '\n'], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `dns-lookup-${safeName}-${safeType}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
   // What a failure message means, in plain words, with what to try.
   function explain(message) {
     const m = (message || '').toLowerCase();
@@ -44,6 +59,8 @@
       return 'A name server for this domain refused to answer. It is usually misconfigured (lame) for this zone; the trace shows which one.';
     if (m.includes('recursion limit') || m.includes('query budget'))
       return 'The resolver gave up after too many steps. The trace shows where the walk went.';
+    if (m.includes('stopped at the client timeout') || m.includes('client timeout of'))
+      return 'The lookup was still running when the client answer budget ran out, so it was stopped where a client would get SERVFAIL. The trace marks the queries that were still waiting; if one server stayed silent throughout, that is usually the zone\'s own name server.';
     if (m.includes('timed out') || m.includes('timeout'))
       return 'No name server answered in time. Usually the zone\'s own name servers are the problem: they are down, no longer host the zone, or drop its queries (the trace names them; if they ignore the zone over IPv4 too, nothing on this server can fix it). Only if those servers do answer other tools, check this server\'s IPv6 route, or set Outbound IP Versions to IPv4.';
     if (m.includes('dnssec') || m.includes('bogus') || m.includes('rrsig') || m.includes('nsec'))
@@ -109,9 +126,12 @@
 
 {#if result}
   <div class="card" style="margin-top: 14px">
-    <div class="spread" style="margin-bottom: 10px">
+    <div class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap">
       <h3 style="margin: 0; overflow-wrap: anywhere">{result.name} {result.type}</h3>
-      <span class="pill {rcodeClass(result.rcode)}">{result.rcode}</span>
+      <div class="row" style="gap: 8px; flex-wrap: wrap">
+        <span class="pill {rcodeClass(result.rcode)}">{result.rcode}</span>
+        <button type="button" class="secondary" onclick={exportResult}>Export JSON</button>
+      </div>
     </div>
     <div class="summary">
       <div class="pair"><span class="muted">Resolved By</span><span class="value">{ROUTES[result.route] || result.route}</span></div>
