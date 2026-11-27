@@ -384,6 +384,23 @@ impl AiStore {
         Ok(written)
     }
 
+    /// Take the calibration version off every stored verdict, so the gate
+    /// compares the assessment score instead of a calibrated one a map that is
+    /// no longer in force produced. Rows are read by the map version recorded
+    /// on them (see the gate score expression in `threshold.rs`), so a row that
+    /// still names a retired map keeps being decided by that map's score until
+    /// this clears it. The calibrated value is kept for the audit: nothing
+    /// reads it without a version.
+    pub fn clear_stored_calibration(&self) -> Result<usize> {
+        let conn = self.lock()?;
+        let cleared = conn.execute(
+            "UPDATE ai_verdicts SET calibration_version = ''
+             WHERE calibration_version <> ''",
+            [],
+        )?;
+        Ok(cleared)
+    }
+
     /// What the assessment stored beside one verdict: `(calibrated score,
     /// calibration version, fused score)`. `None` when the verdict has no
     /// row.
