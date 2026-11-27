@@ -383,7 +383,7 @@ impl AiEngine {
             settings_swap.clone(),
             snapshot.clone(),
             categories.clone(),
-            logs,
+            logs.clone(),
         );
         scanner.set_maintenance(maintenance.clone());
         scanner.set_page_model(page_model.clone());
@@ -398,6 +398,30 @@ impl AiEngine {
         if let Ok(Some(active)) = store.active_candidate() {
             scanner.set_signal_weights(active.signal_weights.clone());
         }
+        // A map recorded for a model that is no longer live - a retrain or a
+        // restore finished while the service was down - must not be applied
+        // again: fit and apply it to the model this start loaded, or it stays
+        // off.
+        let startup_model = shared.model.load_full();
+        retire_calibration_for_changed_model(&store, &scanner, settings, &startup_model, &logs);
+        // Maintenance installs models too (a retrain, a scheduled promotion, a
+        // restore), and the scanner is the only holder of the map in force, so
+        // the engine hands the retrainer the step that retires a stale one.
+        let installed_scanner = scanner.clone();
+        shared.retrainer.set_installed(Box::new({
+            let store = store.clone();
+            let settings = settings_swap.clone();
+            let logs = logs.clone();
+            move |path: &Path| {
+                retire_calibration_for_changed_model(
+                    &store,
+                    &installed_scanner,
+                    &settings.load_full(),
+                    &path.to_string_lossy(),
+                    &logs,
+                );
+            }
+        }));
         let domain_age =
             age::DomainAge::new(store.clone(), daygle_dns_policy::rdap::IANA_BOOTSTRAP);
         scanner.set_domain_age(domain_age.clone());
@@ -1490,6 +1514,52 @@ fn failed_change(what: &str, cause: DaygleError, restorations: &[String]) -> Day
     }
     tracing::error!(error = %message, "a scoring change could not be applied");
     DaygleError::Internal(message)
+}
+
+/// Turn off a calibration map that a different model has made stale, and
+/// re-score the verdicts stored under it. A map is fitted to one model's score
+/// distribution (its `source_model`); a retrain, a scheduled promotion or a
+/// restore replaces that distribution, so leaving the map in force would
+/// compare every verdict by a calibration of the previous model's confidence.
+/// Never fails the caller: the model is already live, so a logged, named
+/// failure is better than leaving the map applied silently.
+fn retire_calibration_for_changed_model(
+    store: &AiStore,
+    scanner: &Scanner,
+    settings: &AiSettings,
+    path: &str,
+    logs: &LogStore,
+) {
+    let live = threshold::model_version(path);
+    let Ok(Some(map)) = store.active_calibration() else {
+        return;
+    };
+    if map.source_model == live {
+        return;
+    }
+    let mut failures = Vec::new();
+    if let Err(e) = store.activate_calibration(None) {
+        failures.push(format!("could not record that calibration is off: {e}"));
+    }
+    // The scanner's map is what the next verdict is scored through, so the
+    // store's record alone would not stop it being applied.
+    scanner.set_calibration(None);
+    if let Err(e) = scanner.rescore_assessments(settings) {
+        failures.push(format!("could not re-score the stored verdicts: {e}"));
+    }
+    let note = if failures.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", failures.join("; "))
+    };
+    logs.push(
+        daygle_dns_core::LogLevel::Warn,
+        "ai",
+        format!(
+            "the model in use changed ({0} -> {live}): the calibration map fitted for the previous model is off, so the gate compares the assessment score{note}; fit a map for this model to calibrate again",
+            map.source_model
+        ),
+    );
 }
 
 /// forward the re-check of the verdicts the old model made (see

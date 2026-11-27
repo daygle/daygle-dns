@@ -4814,3 +4814,182 @@ fn a_candidate_that_cannot_load_leaves_the_previous_version_in_force() {
     );
     assert_eq!(ai.live_model_path(), model.to_string_lossy());
 }
+
+// ── A new model retires a calibration map fitted for the old one ─────────────
+
+/// Set a model file's modification time, so replacing the model (which the
+/// version stamp reads) is visible without rewriting its bytes.
+fn stamp(path: &std::path::Path, secs_ago: u64) {
+    let when = std::time::SystemTime::now() - std::time::Duration::from_secs(secs_ago);
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+}
+
+/// Fit a map for the model now live, record it and put it in force: what an
+/// operator does after a fit.
+fn apply_a_map_fitted_for_the_live_model(
+    ai: &AiEngine,
+) -> daygle_dns_ml::calibration::CalibrationMap {
+    let sample = |score: f32, threat: bool| daygle_dns_ml::calibration::Labelled { score, threat };
+    let tuning: Vec<_> = (0..40)
+        .map(|i| sample(if i % 2 == 0 { 0.9 } else { 0.15 }, i % 2 == 0))
+        .collect();
+    let holdout: Vec<_> = (0..40)
+        .map(|i| sample(if i % 2 == 0 { 0.85 } else { 0.2 }, i % 2 == 0))
+        .collect();
+    let live = daygle_dns_ml::threshold::model_version(&ai.live_model_path());
+    let map = daygle_dns_ml::calibration::fit(&tuning, &live, 1_700_000_000).unwrap();
+    let metrics = daygle_dns_ml::calibration::evaluate(&holdout, &map);
+    assert!(ai.store.save_calibration(&map, Some(&metrics)).unwrap());
+    ai.apply_calibration(&map.version).unwrap();
+    map
+}
+
+/// Seed one threat verdict so the gate has a stored score to compare.
+fn one_threat_verdict(ai: &AiEngine, domain: &str) {
+    ai.store.observe(domain).unwrap();
+    ai.store
+        .save_verdict(
+            Channel::Threat,
+            domain,
+            "phishing",
+            "threat",
+            "classified",
+            0.9,
+            "fasttext",
+            "model, phishing at 0.9",
+            3_600,
+        )
+        .unwrap();
+}
+
+/// A new model going live through maintenance (here a restore; a retrain
+/// installs its result the same way) turns off a calibration map fitted for the
+/// model it replaced and re-scores the verdicts stored under it, so the gate
+/// never compares the new model's scores through the old model's calibration.
+#[test]
+fn a_model_change_retires_a_calibration_map_fitted_for_the_old_model() {
+    let dir = TempDir::new().unwrap();
+    let learned = dir.path().join("learned.bin");
+    std::fs::copy(PROMOTION_MODEL, &learned).unwrap();
+    stamp(&learned, 600);
+    let previous = dir.path().join("learned.prev.bin");
+    std::fs::copy(PROMOTION_MODEL, &previous).unwrap();
+    stamp(&previous, 1_200);
+    let live_settings = AiSettings {
+        model_path: learned.to_string_lossy().into_owned(),
+        ..settings(AiMode::Enforce)
+    };
+    let ai = engine(&dir, live_settings);
+    assert_eq!(ai.live_model_path(), learned.to_string_lossy());
+    let fusion = ai.settings.load_full().fusion;
+
+    one_threat_verdict(&ai, "old-model.example");
+    let map = apply_a_map_fitted_for_the_live_model(&ai);
+    let calibrated = map.apply(0.9);
+    let (stored, version, _) = ai
+        .store
+        .verdict_scores("old-model.example", "threat")
+        .unwrap()
+        .unwrap();
+    assert_eq!(version, map.version);
+    assert!(
+        (stored - calibrated).abs() < 1e-5,
+        "{stored} vs {calibrated}"
+    );
+    assert_eq!(
+        ai.store
+            .gate_score("old-model.example", "threat", fusion)
+            .unwrap(),
+        Some(calibrated)
+    );
+
+    ai.rollback_learned_model().unwrap();
+    let now_live = daygle_dns_ml::threshold::model_version(&ai.live_model_path());
+    assert_ne!(
+        now_live, map.source_model,
+        "a different model is live, so the map no longer describes it"
+    );
+    assert!(
+        ai.store.active_calibration().unwrap().is_none(),
+        "the map fitted for the replaced model is off"
+    );
+    assert!(
+        ai.scanner.calibration_map().is_none(),
+        "and the scanner is not applying it to the next verdict"
+    );
+    let (_, version, _) = ai
+        .store
+        .verdict_scores("old-model.example", "threat")
+        .unwrap()
+        .unwrap();
+    assert!(
+        version.is_empty(),
+        "no verdict claims a map that is no longer in force"
+    );
+    assert_eq!(
+        ai.store
+            .gate_score("old-model.example", "threat", fusion)
+            .unwrap(),
+        Some(0.9)
+    );
+    assert_eq!(
+        ai.calibration_status().unwrap()["live_model"],
+        serde_json::json!(now_live),
+        "the status names the model a new map has to be fitted for"
+    );
+}
+
+/// A retrain that finishes while the service is down leaves a map recorded for
+/// the model it replaced; the next start must not apply that map again.
+#[test]
+fn a_restart_does_not_reapply_a_calibration_map_fitted_for_a_replaced_model() {
+    let dir = TempDir::new().unwrap();
+    let model = dir.path().join("model.bin");
+    std::fs::copy(PROMOTION_MODEL, &model).unwrap();
+    stamp(&model, 600);
+    let model_settings = AiSettings {
+        model_path: model.to_string_lossy().into_owned(),
+        ..settings(AiMode::Enforce)
+    };
+    let version = {
+        let ai = engine(&dir, model_settings.clone());
+        one_threat_verdict(&ai, "replaced-model.example");
+        let map = apply_a_map_fitted_for_the_live_model(&ai);
+        assert_eq!(
+            ai.store.active_calibration().unwrap().unwrap().version,
+            map.version
+        );
+        map.version
+    };
+
+    // The model is replaced while the service is down.
+    stamp(&model, 60);
+    let ai = engine(&dir, model_settings);
+    assert!(
+        ai.store.active_calibration().unwrap().is_none(),
+        "the map recorded for {version} is not applied to a different model"
+    );
+    assert!(ai.scanner.calibration_map().is_none());
+    let (_, row_version, _) = ai
+        .store
+        .verdict_scores("replaced-model.example", "threat")
+        .unwrap()
+        .unwrap();
+    assert!(row_version.is_empty());
+    assert_eq!(
+        ai.store
+            .gate_score(
+                "replaced-model.example",
+                "threat",
+                ai.settings.load_full().fusion
+            )
+            .unwrap(),
+        Some(0.9),
+        "the gate compares the assessment score again, not the old model's calibration"
+    );
+}

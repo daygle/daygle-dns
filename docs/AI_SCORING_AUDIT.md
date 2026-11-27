@@ -260,6 +260,16 @@ disabling a calibration map re-scores them too: a stored score describes the
 map that produced it, so enforcement never compares a mixture of calibrated and
 uncalibrated scores.
 
+A model that goes live through **maintenance** - a retrain, a scheduled
+promotion, a restore - follows the same rule for the map: the retrainer calls
+back into the engine once its installer has loaded the new model, and a map
+whose `source_model` is not the model now live is turned off in the store and
+in the scanner and the stored verdicts are re-scored back to their assessment
+scores, with a warning naming the old and new model. A restart runs the same
+check, so a retrain that finished while the service was down cannot bring back
+a map fitted for the model it replaced. Until a map is fitted for the new
+model, the gate compares the assessment score.
+
 **Migration:** `ai_candidates`, `ai_model_artifacts`.
 
 **API/UI:** `GET /api/ai/candidates`, `POST /api/ai/candidates/snapshot`,
@@ -271,8 +281,10 @@ actual bytes restored, builtin has no artifact, missing artifact refused),
 `a_rollback_restores_the_previous_candidate_and_its_artifact`,
 `a_candidate_carries_its_calibration_map_through_promotion_and_rollback`,
 `a_candidate_is_snapshotted_promoted_and_restored_as_one_version` over HTTP,
-`activating_a_calibration_map_rescores_the_stored_verdicts` and
-`a_candidate_that_cannot_load_leaves_the_previous_version_in_force`.
+`activating_a_calibration_map_rescores_the_stored_verdicts`,
+`a_candidate_that_cannot_load_leaves_the_previous_version_in_force`,
+`a_model_change_retires_a_calibration_map_fitted_for_the_old_model` and
+`a_restart_does_not_reapply_a_calibration_map_fitted_for_a_replaced_model`.
 
 **Limitations:** the config threshold is published after the engine promotion,
 with compensating rollback on failure, not in one distributed transaction

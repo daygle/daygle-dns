@@ -46,6 +46,11 @@ use crate::store::AiStore;
 /// rollback - goes live the same way.
 pub type Installer = Box<dyn Fn(&Path) -> Result<()> + Send + Sync>;
 
+/// Runs once a model this retrainer installed is live, with the model now in
+/// use: the engine retires a calibration map fitted for the model it replaced.
+/// Never fails the install - the new model is already serving.
+pub type InstalledHook = Box<dyn Fn(&Path) + Send + Sync>;
+
 /// A maintenance step with nothing to report (the verifier refresh).
 pub type Step = Box<dyn Fn() + Send + Sync>;
 
@@ -287,6 +292,7 @@ pub struct Retrainer {
     /// and rotate the same model files.
     running: Mutex<()>,
     installer: OnceLock<Installer>,
+    installed: OnceLock<InstalledHook>,
     /// Threat feeds and this network's usage: confirmation, probes and trial
     /// truths that do not depend on the operator.
     evidence: OnceLock<Arc<NetworkEvidence>>,
@@ -309,6 +315,7 @@ impl Retrainer {
             last_attempt: Mutex::new(None),
             running: Mutex::new(()),
             installer: OnceLock::new(),
+            installed: OnceLock::new(),
             evidence: OnceLock::new(),
         }
     }
@@ -325,6 +332,11 @@ impl Retrainer {
     /// written to disk.
     pub fn set_installer(&self, installer: Installer) {
         let _ = self.installer.set(installer);
+    }
+
+    /// Hand the retrainer a step that runs once a model it installed is live.
+    pub fn set_installed(&self, installed: InstalledHook) {
+        let _ = self.installed.set(installed);
     }
 
     /// The model file this retrainer maintains.
@@ -547,10 +559,15 @@ impl Retrainer {
     // ── Going live ──────────────────────────────────────────────────────
 
     fn install(&self) -> Result<()> {
-        match self.installer.get() {
-            Some(install) => install(&self.learned),
-            None => Ok(()),
+        if let Some(install) = self.installer.get() {
+            install(&self.learned)?;
         }
+        // The model is live now: whatever the engine keys to the identity of
+        // the model it replaced is stale (see [`Self::set_installed`]).
+        if let Some(installed) = self.installed.get() {
+            installed(&self.learned);
+        }
+        Ok(())
     }
 
     /// Put `file` in place as the learned model and load it: the model it
