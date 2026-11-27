@@ -1797,9 +1797,14 @@ async fn discovery_fetch_can_stall_without_delaying_dns_policy() {
         listener: None,
     };
     let plugin = ai.block_plugin();
-    let verdict = tokio::time::timeout(timeout, plugin.evaluate(&query)).await;
+    let verdict = tokio::time::timeout(timeout, async {
+        for _ in 0..128 {
+            assert!(plugin.evaluate(&query).await.is_none());
+        }
+    })
+    .await;
     finish.send(()).unwrap();
-    assert!(verdict.unwrap().is_none());
+    verdict.unwrap();
     scan.await.unwrap();
 }
 

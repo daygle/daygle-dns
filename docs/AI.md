@@ -423,7 +423,9 @@ response, or an hour after a failed fetch. A missing threat reading is unknown.
 Discovery recognises suspicious password forms, brand sign-in impersonation,
 and payment, identity, or verification-code forms paired with coercive
 verification demands. It records cross-site hops and HTTPS downgrades and
-checks the final page for corroborating evidence. Redirects with no strong
+checks the final page for corroborating evidence. Discovery also follows
+short-delay HTML meta-refresh redirects through the same validated hop limit.
+Redirects with no strong
 destination finding stay unknown. Findings associated with a cross-site hop
 or downgrade are capped at the monitor-only score of 0.90. The reported
 confidence is a heuristic score.

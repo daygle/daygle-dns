@@ -78,6 +78,7 @@ pub struct PageContent {
 struct RedirectEvidence {
     cross_site_hops: usize,
     downgraded: bool,
+    meta_refresh: bool,
 }
 
 impl RedirectEvidence {
@@ -576,6 +577,24 @@ impl PageFetcher {
         hops: usize,
         inspect_forms: bool,
     ) -> Result<PageContent, String> {
+        let follow = |location: &str, meta_refresh: bool| {
+            if hops >= MAX_REDIRECTS {
+                return Err("too many redirects".to_string());
+            }
+            let (next_host_scheme, next_host, next_target) =
+                redirect_target(scheme, host, location)?;
+            let mut page = self.fetch_url(
+                &next_host,
+                &next_host_scheme,
+                &next_target,
+                hops + 1,
+                inspect_forms,
+            )?;
+            page.redirects
+                .record(host, scheme, &next_host, &next_host_scheme);
+            page.redirects.meta_refresh |= meta_refresh;
+            Ok(page)
+        };
         let addr = self.resolve(host, scheme)?;
         let url = match self.pinned {
             Some((_, port)) => format!("{scheme}://{host}:{port}{target}"),
@@ -599,26 +618,13 @@ impl PageFetcher {
 
         let status = response.status();
         if status.is_redirection() {
-            if hops >= MAX_REDIRECTS {
-                return Err("too many redirects".to_string());
-            }
             let location = response
                 .headers()
                 .get(LOCATION)
                 .and_then(|v| v.to_str().ok())
                 .ok_or_else(|| "redirect without a location".to_string())?
                 .to_string();
-            let (next_scheme, next_host, next_target) = redirect_target(scheme, host, &location)?;
-            let mut page = self.fetch_url(
-                &next_host,
-                &next_scheme,
-                &next_target,
-                hops + 1,
-                inspect_forms,
-            )?;
-            page.redirects
-                .record(host, scheme, &next_host, &next_scheme);
-            return Ok(page);
+            return follow(&location, false);
         }
         if !status.is_success() {
             return Err(format!("HTTP {status}"));
@@ -651,8 +657,11 @@ impl PageFetcher {
             .read_to_end(&mut body)
             .map_err(|e| format!("read failed: {e}"))?;
         let html = String::from_utf8_lossy(&body);
-        let (title, text, has_password_form, has_sensitive_form) =
+        let (title, text, has_password_form, has_sensitive_form, refresh) =
             extract_page(&html, inspect_forms && content_type != "text/plain");
+        if let Some(location) = refresh.filter(|_| body.len() < self.max_bytes) {
+            return follow(&location, true);
+        }
         if text.chars().count() < MIN_TEXT_CHARS {
             return Err("page had no readable text".to_string());
         }
@@ -796,11 +805,11 @@ fn without_fragment(value: &str) -> String {
 /// Readable title and text out of an HTML document: scripts, styles,
 /// comments and tags dropped, entities decoded, whitespace collapsed.
 pub fn extract(html: &str) -> (String, String) {
-    let (title, text, _, _) = extract_page(html, false);
+    let (title, text, _, _, _) = extract_page(html, false);
     (title, text)
 }
 
-fn extract_page(html: &str, inspect_forms: bool) -> (String, String, bool, bool) {
+fn extract_page(html: &str, inspect_forms: bool) -> (String, String, bool, bool, Option<String>) {
     let lower = html.to_ascii_lowercase();
     let mut title = String::new();
     let mut text = String::new();
@@ -808,6 +817,7 @@ fn extract_page(html: &str, inspect_forms: bool) -> (String, String, bool, bool)
     let mut in_form = false;
     let mut has_password_form = false;
     let mut has_sensitive_form = false;
+    let mut refresh = None;
     while i < html.len() {
         match lower[i..].find('<') {
             Some(offset) => {
@@ -884,6 +894,9 @@ fn extract_page(html: &str, inspect_forms: bool) -> (String, String, bool, bool)
                                 in_form = false;
                             } else if name == "form" {
                                 in_form = true;
+                            } else if name == "meta" && refresh.is_none() {
+                                refresh =
+                                    meta_refresh(&html[open + 1 + name.len()..open + 1 + end]);
                             } else if name == "input" && in_form {
                                 let (password, sensitive) = form_input(&tag[name.len()..]);
                                 has_password_form |= password;
@@ -906,6 +919,7 @@ fn extract_page(html: &str, inspect_forms: bool) -> (String, String, bool, bool)
         collapse(&decode(&text)),
         has_password_form,
         has_sensitive_form,
+        refresh,
     )
 }
 
@@ -923,11 +937,12 @@ fn tag_end(tag: &str) -> Option<usize> {
     None
 }
 
-fn form_input(mut rest: &str) -> (bool, bool) {
-    let mut input_type = None;
-    let mut sensitive = false;
-    while !rest.trim_start().is_empty() {
+fn attributes(mut rest: &str) -> impl Iterator<Item = (&str, &str)> {
+    std::iter::from_fn(move || loop {
         rest = rest.trim_start();
+        if rest.is_empty() {
+            return None;
+        }
         let end = rest
             .find(|c: char| c.is_ascii_whitespace() || c == '=')
             .unwrap_or(rest.len());
@@ -941,12 +956,67 @@ fn form_input(mut rest: &str) -> (bool, bool) {
             Some(b'\'' | b'"') => {
                 let Some((actual, tail)) = value[1..].split_once(value.as_bytes()[0] as char)
                 else {
-                    return (false, false);
+                    rest = "";
+                    return None;
                 };
                 (actual, tail)
             }
             _ => value.split_at(value.find(char::is_whitespace).unwrap_or(value.len())),
         };
+        rest = tail;
+        return Some((name, actual));
+    })
+}
+
+fn meta_refresh(tag: &str) -> Option<String> {
+    let mut header = None;
+    let mut content = None;
+    for (name, value) in attributes(tag) {
+        if name.eq_ignore_ascii_case("http-equiv") && header.is_none() {
+            header = Some(value);
+        } else if name.eq_ignore_ascii_case("content") && content.is_none() {
+            content = Some(value);
+        }
+    }
+    if !header?.trim().eq_ignore_ascii_case("refresh") {
+        return None;
+    }
+    let content = decode(content?);
+    let (delay, destination) = content.split_once(';')?;
+    if delay.trim().parse::<u32>().ok()? > 5 {
+        return None;
+    }
+    let (key, value) = destination.split_once('=')?;
+    if !key.trim().eq_ignore_ascii_case("url") {
+        return None;
+    }
+    let value = value.trim();
+    let value = value
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+        .unwrap_or(value);
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+#[test]
+fn discovery_reads_meta_refresh_without_interpreting_script_or_comments() {
+    let html = r#"<!-- <meta http-equiv=refresh content='0;URL=/comment'> -->
+        <script>var value = "<meta http-equiv=refresh content='0;URL=/script'>";</script>
+        <meta CONTENT="0; URL='/Account/Verify?A=1&amp;B=2'" HTTP-EQUIV=Refresh>"#;
+    assert_eq!(
+        extract_page(html, true).4.as_deref(),
+        Some("/Account/Verify?A=1&B=2")
+    );
+    assert!(extract_page(html, false).4.is_none());
+    let blocked = meta_refresh(" http-equiv=refresh content='0;url=file:///tmp/x'").unwrap();
+    assert!(redirect_target("https", "public.example", &blocked).is_err());
+}
+
+fn form_input(rest: &str) -> (bool, bool) {
+    let mut input_type = None;
+    let mut sensitive = false;
+    for (name, actual) in attributes(rest) {
         match name {
             "type" if input_type.is_none() => input_type = Some(actual),
             "autocomplete" => {
@@ -978,7 +1048,6 @@ fn form_input(mut rest: &str) -> (bool, bool) {
             }
             _ => {}
         }
-        rest = tail;
     }
     (
         input_type == Some("password"),
@@ -1103,12 +1172,17 @@ fn discovery_reading(domain: &str, page: &PageContent, floor: f32) -> DiscoveryR
     let crosses_sites =
         Some(registered) != psl::domain_str(domain) || page.redirects.cross_site_hops > 0;
     let mut reading = discovery_destination(page, registered, final_host.clone(), floor);
-    if crosses_sites || page.redirects.downgraded {
+    if crosses_sites || page.redirects.downgraded || page.redirects.meta_refresh {
         let chain = format!(
-            "redirect chain: {} cross-site hop(s){}",
+            "redirect chain: {} cross-site hop(s){}{}",
             page.redirects.cross_site_hops,
             if page.redirects.downgraded {
                 ", HTTPS downgraded to HTTP"
+            } else {
+                ""
+            },
+            if page.redirects.meta_refresh {
+                ", HTML meta refresh"
             } else {
                 ""
             }
@@ -1278,7 +1352,7 @@ fn discovery_requires_multiple_threat_cues_and_a_complete_response() {
 fn discovery_checks_password_forms_and_brand_claims() {
     let signed_in = r#"<form><input title="a > b" TYPE = 'Password'></form>"#;
     let html = format!("<title>PayPal sign in</title>{signed_in}");
-    let (title, text, has_password_form, has_sensitive_form) = extract_page(&html, true);
+    let (title, text, has_password_form, has_sensitive_form, _) = extract_page(&html, true);
     assert!(has_password_form);
     let mut page = PageContent {
         url: "https://accounts.example/".to_owned(),
@@ -1404,7 +1478,7 @@ fn discovery_distinguishes_sensitive_form_scams_from_ordinary_pages() {
         ),
     ] {
         let html = format!("<title>{title}</title>{text}<form><input {input}></form>");
-        let (title, text, has_password_form, has_sensitive_form) = extract_page(&html, true);
+        let (title, text, has_password_form, has_sensitive_form, _) = extract_page(&html, true);
         let reading = discovery_reading(
             "ordinary.example",
             &PageContent {
