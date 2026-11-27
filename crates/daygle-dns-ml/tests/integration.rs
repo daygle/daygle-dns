@@ -4633,3 +4633,184 @@ fn the_language_model_never_lowers_a_threat() {
         threat.evidence
     );
 }
+
+// ── Calibration changes reach the verdicts already stored ───────────────────
+
+/// Activating a calibration map re-scores the verdicts stored before it, so the
+/// gate never compares a mixture of calibrated and uncalibrated scores; turning
+/// it off re-scores them back to the uncalibrated assessment.
+#[test]
+fn activating_a_calibration_map_rescores_the_stored_verdicts() {
+    let dir = TempDir::new().unwrap();
+    let ai = AiEngine::new(
+        &settings(AiMode::Enforce),
+        &dir.path().join("zones.db").to_string_lossy(),
+        Arc::new(daygle_dns_authoritative::ZoneStore::open(":memory:").unwrap()),
+        Arc::new(LogStore::new(200)),
+    )
+    .unwrap();
+    for (domain, confidence) in [("high.example", 0.9_f32), ("low.example", 0.4_f32)] {
+        ai.store.observe(domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Threat,
+                domain,
+                "phishing",
+                "threat",
+                "classified",
+                confidence,
+                "fasttext",
+                &format!("model, phishing at {confidence}"),
+                3_600,
+            )
+            .unwrap();
+    }
+    let fusion = ai.settings.load_full().fusion;
+
+    let sample = |score: f32, threat: bool| daygle_dns_ml::calibration::Labelled { score, threat };
+    let tuning: Vec<_> = (0..40)
+        .map(|i| sample(if i % 2 == 0 { 0.9 } else { 0.15 }, i % 2 == 0))
+        .collect();
+    let holdout: Vec<_> = (0..40)
+        .map(|i| sample(if i % 2 == 0 { 0.85 } else { 0.2 }, i % 2 == 0))
+        .collect();
+    let live = daygle_dns_ml::threshold::model_version(&ai.live_model_path());
+    let map = daygle_dns_ml::calibration::fit(&tuning, &live, 1_700_000_000).unwrap();
+    let metrics = daygle_dns_ml::calibration::evaluate(&holdout, &map);
+    assert!(ai.store.save_calibration(&map, Some(&metrics)).unwrap());
+
+    // Before the map is in force the gate reads the confidence.
+    assert_eq!(
+        ai.store
+            .gate_score("high.example", "threat", fusion)
+            .unwrap(),
+        Some(0.9)
+    );
+
+    ai.apply_calibration(&map.version).unwrap();
+    let calibrated = map.apply(0.9);
+    let (stored, version, _) = ai
+        .store
+        .verdict_scores("high.example", "threat")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        version, map.version,
+        "the verdict stored before the map was applied carries it now"
+    );
+    assert!(
+        (stored - calibrated).abs() < 1e-5,
+        "the stored calibrated score is the map's: {stored} vs {calibrated}"
+    );
+    assert_eq!(
+        ai.store
+            .gate_score("high.example", "threat", fusion)
+            .unwrap(),
+        Some(calibrated),
+        "the gate compares the re-scored value, not a stale one"
+    );
+    let (low, low_version, _) = ai
+        .store
+        .verdict_scores("low.example", "threat")
+        .unwrap()
+        .unwrap();
+    assert_eq!(low_version, map.version);
+    assert!((low - map.apply(0.4)).abs() < 1e-5);
+
+    // Turning the map off applies the other direction to the same rows.
+    ai.disable_calibration().unwrap();
+    let (_, version, _) = ai
+        .store
+        .verdict_scores("high.example", "threat")
+        .unwrap()
+        .unwrap();
+    assert!(
+        version.is_empty(),
+        "no map is recorded on the verdict once calibration is off"
+    );
+    assert_eq!(
+        ai.store
+            .gate_score("high.example", "threat", fusion)
+            .unwrap(),
+        Some(0.9)
+    );
+}
+
+// ── A failed promotion leaves the previous version in force ─────────────────
+
+/// The bundled starter model: a real artifact that loads.
+const PROMOTION_MODEL: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../models/daygle-starter.bin"
+);
+
+/// A candidate whose artifact cannot be loaded must leave the version that was
+/// in force intact: the store still lists it active, its bytes are back on disk
+/// and the runtime keeps running it. The failed candidate's bytes must not be
+/// what the next restart loads.
+#[test]
+fn a_candidate_that_cannot_load_leaves_the_previous_version_in_force() {
+    let dir = TempDir::new().unwrap();
+    let model = dir.path().join("model.bin");
+    std::fs::copy(PROMOTION_MODEL, &model).unwrap();
+    let settings = AiSettings {
+        model_path: model.to_string_lossy().into_owned(),
+        ..settings(AiMode::Enforce)
+    };
+    let ai = AiEngine::new(
+        &settings,
+        &dir.path().join("zones.db").to_string_lossy(),
+        Arc::new(daygle_dns_authoritative::ZoneStore::open(":memory:").unwrap()),
+        Arc::new(LogStore::new(200)),
+    )
+    .unwrap();
+    let good = ai.snapshot_candidate().unwrap();
+    ai.promote_candidate(good.id).unwrap();
+    let good_bytes = ai
+        .store
+        .model_artifact(&good.model_sha256)
+        .unwrap()
+        .expect("the promoted candidate keeps its bytes");
+
+    // A candidate whose stored bytes are not a model: promoting it writes them
+    // over the live path, the load fails, and the previous version has to come
+    // back rather than leave the failed bytes on disk.
+    std::fs::write(&model, b"not-a-model").unwrap();
+    let bad = daygle_dns_ml::candidate::build(
+        &ai.store,
+        &daygle_dns_ml::candidate::CandidateSpec {
+            model_path: model.to_string_lossy().into_owned(),
+            block_threshold: 0.9,
+            calibration: None,
+            signal_weights: daygle_dns_ml::fusion::SignalWeights::default(),
+            scoring_config: serde_json::json!({ "fusion": "monitor" }),
+            validation_report: serde_json::Value::Null,
+            metrics: None,
+        },
+    )
+    .unwrap();
+
+    let failed = ai.promote_candidate(bad.id).unwrap_err();
+    assert!(
+        failed
+            .to_string()
+            .contains("could not load the candidate's model"),
+        "{failed}"
+    );
+    assert_eq!(
+        ai.store.active_candidate().unwrap().unwrap().id,
+        good.id,
+        "the version in force is still the one that loaded"
+    );
+    assert_eq!(
+        ai.store.candidate(bad.id).unwrap().unwrap().status,
+        "candidate",
+        "the failed candidate never became the active version"
+    );
+    assert_eq!(
+        std::fs::read(&model).unwrap(),
+        good_bytes,
+        "the working artifact is back on disk, not the failed one's"
+    );
+    assert_eq!(ai.live_model_path(), model.to_string_lossy());
+}

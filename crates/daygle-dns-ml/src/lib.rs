@@ -1029,8 +1029,30 @@ impl AiEngine {
         if !acceptance.accepted {
             return Err(DaygleError::Config(acceptance.reason));
         }
+        let previous = self.store.active_calibration()?;
         self.store.activate_calibration(Some(version))?;
         self.scanner.set_calibration(Some(record.map.clone()));
+        // The scores stored beside each verdict were produced with whatever map
+        // was in force when it was classified. Apply the new map to all of them
+        // before the snapshot is rebuilt, so enforcement never compares a
+        // mixture of calibrated and uncalibrated scores. The re-score is one
+        // transaction, so a failure leaves every row as it was and the previous
+        // map can go back.
+        if let Err(e) = self.rescore_stored_verdicts("the calibration map changed") {
+            let mut failures = Vec::new();
+            if let Err(undo) = self
+                .store
+                .activate_calibration(previous.as_ref().map(|m| m.version.as_str()))
+            {
+                failures.push(format!("could not put the previous map back: {undo}"));
+            }
+            self.scanner.set_calibration(previous.clone());
+            return Err(failed_change(
+                "could not apply the calibration map to the stored verdicts",
+                e,
+                &failures,
+            ));
+        }
         self.refresh_snapshot_now();
         Ok(serde_json::json!({
             "active": calibration_json(&record.map),
@@ -1042,8 +1064,25 @@ impl AiEngine {
     /// Go back to the uncalibrated score: the confidence the gate compared
     /// before any map existed.
     pub fn disable_calibration(&self) -> Result<serde_json::Value> {
+        let previous = self.store.active_calibration()?;
         self.store.activate_calibration(None)?;
         self.scanner.set_calibration(None);
+        // Turning the map off makes every calibrated score describe a rule that
+        // no longer applies, exactly as activating one does.
+        if let Err(e) = self.rescore_stored_verdicts("calibration was turned off") {
+            let mut failures = Vec::new();
+            if let Some(map) = previous.as_ref() {
+                if let Err(undo) = self.store.activate_calibration(Some(&map.version)) {
+                    failures.push(format!("could not put the previous map back: {undo}"));
+                }
+                self.scanner.set_calibration(Some(map.clone()));
+            }
+            return Err(failed_change(
+                "could not return the stored verdicts to the uncalibrated score",
+                e,
+                &failures,
+            ));
+        }
         self.refresh_snapshot_now();
         Ok(serde_json::json!({
             "active": null,
@@ -1106,19 +1145,56 @@ impl AiEngine {
         let Some(candidate) = self.store.candidate(id)? else {
             return Err(DaygleError::NotFound(format!("no candidate version {id}")));
         };
+        // The version in force now, so a promotion that cannot be completed
+        // puts exactly that back instead of leaving the candidate half applied.
+        let previous = self.store.active_candidate()?;
+        let live_model = self.live_model_path();
+        // Write the artifact and load it *before* the store says the version is
+        // in force: a model that does not load is not a version, and while it is
+        // tried the store still describes the previous one.
         candidate::restore_artifact(&self.store, &candidate)?;
-        let promoted = self.store.promote_candidate(id)?;
-        if let Err(e) = (self.install_model)(Path::new(&promoted.model_path)) {
-            // Put the candidate state back: an artifact that did not load is
-            // not a version in force.
-            let _ = self.store.rollback_active_candidate();
-            let _ = candidate::restore_artifact(&self.store, &candidate);
-            return Err(e);
+        if let Err(e) = (self.install_model)(Path::new(&candidate.model_path)) {
+            return Err(self.undo_promotion(
+                previous.as_ref(),
+                &live_model,
+                "could not load the candidate's model",
+                e,
+            ));
         }
+        let promoted = match self.store.promote_candidate(id) {
+            Ok(promoted) => promoted,
+            Err(e) => {
+                return Err(self.undo_promotion(
+                    previous.as_ref(),
+                    &live_model,
+                    "could not record the promotion",
+                    e,
+                ));
+            }
+        };
         self.scanner
             .set_signal_weights(promoted.signal_weights.clone());
         let calibration = self.store.active_calibration()?;
         self.scanner.set_calibration(calibration);
+        // A version is its whole scoring system, calibration included: the
+        // stored scores describe the previous one until they are re-scored.
+        if let Err(e) = self.rescore_stored_verdicts("a candidate was promoted") {
+            let mut failures = Vec::new();
+            match self.store.rollback_active_candidate() {
+                Ok(Some(restored)) => failures.extend(self.restore_version(&restored)),
+                Ok(None) => {
+                    failures.push("there was no previous version to restore".to_string());
+                }
+                Err(e) => {
+                    failures.push(format!("could not restore the previous version: {e}"));
+                }
+            }
+            return Err(failed_change(
+                "could not apply the new version's scores to the stored verdicts",
+                e,
+                &failures,
+            ));
+        }
         self.refresh_snapshot_now();
         self.trigger_rescan();
         Ok(promoted)
@@ -1127,6 +1203,9 @@ impl AiEngine {
     /// Restore the complete previous version: artifact bytes, threshold (the
     /// caller publishes it), calibration and signal weights together.
     pub fn rollback_candidate(&self) -> Result<Option<store::CandidateVersion>> {
+        let Some(active) = self.store.active_candidate()? else {
+            return Ok(None);
+        };
         let Some(restored) = self.store.rollback_active_candidate()? else {
             return Ok(None);
         };
@@ -1136,9 +1215,101 @@ impl AiEngine {
             .set_signal_weights(restored.signal_weights.clone());
         let calibration = self.store.active_calibration()?;
         self.scanner.set_calibration(calibration);
+        if let Err(e) = self.rescore_stored_verdicts("a candidate was rolled back") {
+            // The restored version is only in force once the stored scores
+            // describe it: put the version that was rolled back from back.
+            let mut failures = Vec::new();
+            match self.store.promote_candidate(active.id) {
+                Ok(_) => failures.extend(self.restore_version(&active)),
+                Err(e) => failures.push(format!(
+                    "could not put candidate {} back: {e}",
+                    active.version
+                )),
+            }
+            return Err(failed_change(
+                "could not apply the restored version's scores to the stored verdicts",
+                e,
+                &failures,
+            ));
+        }
         self.refresh_snapshot_now();
         self.trigger_rescan();
         Ok(Some(restored))
+    }
+
+    /// Re-score every stored threat verdict from the observations kept beside it
+    /// under the calibration map and fusion mode in force now. A score is a
+    /// function of both, so rows scored before either changed would otherwise be
+    /// compared - and fitted - under a rule that no longer applies.
+    fn rescore_stored_verdicts(&self, what: &str) -> Result<usize> {
+        let rescored = self
+            .scanner
+            .rescore_assessments(&self.settings.load_full())?;
+        if rescored > 0 {
+            tracing::info!(rescored, "re-scored stored verdicts: {what}");
+        }
+        Ok(rescored)
+    }
+
+    /// Undo a promotion that failed before the store changed: the file the
+    /// candidate's artifact was written to takes the previous version's bytes
+    /// back, and the channels load the model that was in force again. Returns
+    /// the original failure, naming anything that could not be undone.
+    ///
+    /// With no previous candidate there is no earlier artifact in the store to
+    /// write back; the configured model is reloaded from disk so the runtime
+    /// keeps running, and the error says which file was left holding the failed
+    /// version's bytes.
+    fn undo_promotion(
+        &self,
+        previous: Option<&store::CandidateVersion>,
+        live_model: &str,
+        what: &str,
+        cause: DaygleError,
+    ) -> DaygleError {
+        let mut failures = Vec::new();
+        match previous {
+            Some(previous) => {
+                if let Err(e) = candidate::restore_artifact(&self.store, previous) {
+                    failures.push(format!(
+                        "could not write candidate {}'s artifact back: {e}",
+                        previous.version
+                    ));
+                }
+            }
+            None => failures.push(format!(
+                "no candidate was active, so the file holding the failed version's bytes ({live_model}) has no stored artifact to restore"
+            )),
+        }
+        if let Err(e) = (self.install_model)(Path::new(live_model)) {
+            failures.push(format!(
+                "could not load the model that was in force again: {e}"
+            ));
+        }
+        failed_change(what, cause, &failures)
+    }
+
+    /// Put one recorded version back into force: its artifact bytes, the loaded
+    /// model, its signal weights and the calibration map the store holds for it.
+    /// Returns what failed, so the caller can report it rather than drop it.
+    fn restore_version(&self, version: &store::CandidateVersion) -> Vec<String> {
+        let mut failures = Vec::new();
+        if let Err(e) = candidate::restore_artifact(&self.store, version) {
+            failures.push(format!(
+                "could not write candidate {}'s artifact: {e}",
+                version.version
+            ));
+        }
+        if let Err(e) = (self.install_model)(Path::new(&version.model_path)) {
+            failures.push(format!("could not load candidate {}: {e}", version.version));
+        }
+        self.scanner
+            .set_signal_weights(version.signal_weights.clone());
+        match self.store.active_calibration() {
+            Ok(map) => self.scanner.set_calibration(map),
+            Err(e) => failures.push(format!("could not read the calibration map in force: {e}")),
+        }
+        failures
     }
 
     /// Each source's graduated authority, its measured performance and the
@@ -1308,6 +1479,19 @@ fn model_fingerprint(path: &str) -> String {
 }
 
 /// Record the model now live; when it differs from the one before, bring
+/// An error for a scoring change that could not be applied everywhere: the
+/// original failure, plus whatever also failed while putting the previous
+/// version back. Both are named, so a half-applied change is never silent.
+fn failed_change(what: &str, cause: DaygleError, restorations: &[String]) -> DaygleError {
+    let mut message = format!("{what}: {cause}");
+    if !restorations.is_empty() {
+        message.push_str("; putting the previous version back did not fully succeed: ");
+        message.push_str(&restorations.join("; "));
+    }
+    tracing::error!(error = %message, "a scoring change could not be applied");
+    DaygleError::Internal(message)
+}
+
 /// forward the re-check of the verdicts the old model made (see
 /// [`AiStore::stagger_rechecks`]). Never fails the caller.
 fn note_live_model(store: &AiStore, path: &str, logs: &LogStore) {

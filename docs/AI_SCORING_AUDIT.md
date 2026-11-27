@@ -242,14 +242,23 @@ one version, including the model artifact bytes.
   `snapshot_candidate`, `promote_candidate`, `rollback_candidate`,
   `candidates_status`, `candidate_json`.
 
-**Promotion** restores and loads the artifact, marks the candidate active with
-the previous one recorded (`superseded_id`), publishes its calibration
-(identity when it has none) and signal weights, then the API publishes its
-whole scoring configuration - threshold, fusion mode, confidence floor, FPR
-target, threat-label policy and authority setting - through the existing
-config path, validating the merged configuration first. If loading fails the
-candidate state is rolled back. **Rollback** restores the previous version's
-bytes, threshold, calibration, weights and scoring configuration together.
+**Promotion** writes and loads the artifact *before* the store records the
+version: only then does the candidate become active with the previous one
+recorded (`superseded_id`), the engine publish its calibration (identity when
+it has none) and signal weights, and every stored threat verdict get re-scored
+under that whole scoring system. The API then publishes its scoring
+configuration - threshold, fusion mode, confidence floor, FPR target,
+threat-label policy and authority setting - through the existing config path,
+validating the merged configuration first. A failure at any of those steps puts
+the previous version back in full: the store still lists it active, its
+artifact bytes are on disk again, its model is loaded, and the scanner uses its
+weights and calibration. A restoration step that also fails is named in the
+returned error instead of being dropped. **Rollback** restores the previous
+version's bytes, threshold, calibration, weights and scoring configuration
+together, and re-scores the stored verdicts the same way. Activating or
+disabling a calibration map re-scores them too: a stored score describes the
+map that produced it, so enforcement never compares a mixture of calibrated and
+uncalibrated scores.
 
 **Migration:** `ai_candidates`, `ai_model_artifacts`.
 
@@ -260,8 +269,10 @@ bytes, threshold, calibration, weights and scoring configuration together.
 actual bytes restored, builtin has no artifact, missing artifact refused),
 `store::assessment::tests::a_candidate_promotion_supersedes_the_previous_one`,
 `a_rollback_restores_the_previous_candidate_and_its_artifact`,
-`a_candidate_carries_its_calibration_map_through_promotion_and_rollback`, and
-`a_candidate_is_snapshotted_promoted_and_restored_as_one_version` over HTTP.
+`a_candidate_carries_its_calibration_map_through_promotion_and_rollback`,
+`a_candidate_is_snapshotted_promoted_and_restored_as_one_version` over HTTP,
+`activating_a_calibration_map_rescores_the_stored_verdicts` and
+`a_candidate_that_cannot_load_leaves_the_previous_version_in_force`.
 
 **Limitations:** the config threshold is published after the engine promotion,
 with compensating rollback on failure, not in one distributed transaction
