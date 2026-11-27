@@ -71,6 +71,23 @@ fn proof_label(proof: Proof) -> &'static str {
     }
 }
 
+fn failure_summary(message: String, trace: &[TraceStep]) -> String {
+    // The pool can report exhausted connections after deliberately treating
+    // an upstream error reply as retryable. Only use the final trace step so
+    // an earlier error does not hide a later timeout or DNSSEC failure.
+    if message.trim_end().ends_with("no connections available") {
+        if let Some(step) = trace.last() {
+            if let Some(code @ ("SERVFAIL" | "REFUSED")) = step.rcode.as_deref() {
+                return format!(
+                    "Upstream name server {} replied {code} to the {} query for {}. The resolver exhausted its available candidates.",
+                    step.server, step.record_type, step.name
+                );
+            }
+        }
+    }
+    message
+}
+
 impl RecursiveResolver {
     /// Resolve `name`/`record_type` for the diagnostics page and report
     /// how it went. Filtering does not apply, and neither do client
@@ -82,6 +99,13 @@ impl RecursiveResolver {
     /// are flushed from the cache first. Without it, cached answers are
     /// used as for a client query, but the separate failure cache is not,
     /// so a failure is retried and its reason reported.
+    ///
+    /// The lookup runs under the client answer budget
+    /// (`server.client_timeout_ms`), the same limit the dispatcher gives a
+    /// client query. A lookup still running when it expires is stopped and
+    /// reported as SERVFAIL with the queries that were still out; without
+    /// this a diagnostic waited out every retry (several times the budget
+    /// when an upstream is silent).
     pub async fn diagnose(&self, name: &str, record_type: &str, fresh: bool) -> Result<Diagnosis> {
         let mut qname = crate::name_text::parse_name(name.trim())
             .map_err(|e| DaygleError::InvalidRecord(format!("invalid name '{name}': {e}")))?;
@@ -113,15 +137,26 @@ impl RecursiveResolver {
             route => route,
         };
 
-        let started = Instant::now();
-        let ((result, negative), trace) =
-            recursor::trace_queries(track_negative_soa(route.lookup(qname.clone(), rtype))).await;
-        let elapsed = started.elapsed();
-        let result = reject_bogus(&inner.settings, result);
+        // 0 means no client budget is known (a resolver built directly, as
+        // in unit tests), which leaves the lookup unbounded as before.
+        let limit = (inner.settings.client_timeout_ms > 0)
+            .then(|| Duration::from_millis(inner.settings.client_timeout_ms));
 
+        let started = Instant::now();
+        let (output, trace) = recursor::trace_queries_within(
+            track_negative_soa(route.lookup(qname.clone(), rtype)),
+            limit,
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        let (result, negative) = match output {
+            Some((result, negative)) => (Some(reject_bogus(&inner.settings, result)), negative),
+            None => (None, None),
+        };
         let negative_zone = negative.map(|n| n.soa.name.to_string());
         let (rcode, answers, error, negative_zone) = match result {
-            Ok(lookup) => {
+            Some(Ok(lookup)) => {
                 let answers = lookup
                     .answers()
                     .iter()
@@ -135,20 +170,29 @@ impl RecursiveResolver {
                     .collect();
                 ("NOERROR".to_string(), answers, None, None)
             }
-            Err(DaygleError::Resolution {
+            Some(Err(DaygleError::Resolution {
                 message,
                 response_code: Some(code),
-            }) => {
+            })) => {
                 let code = <ResponseCode as From<u16>>::from(code);
                 // NXDOMAIN and NODATA are answers, not failures.
                 let error = (!matches!(code, ResponseCode::NoError | ResponseCode::NXDomain))
-                    .then_some(message);
+                    .then(|| failure_summary(message, &trace));
                 (rcode_name(code), Vec::new(), error, negative_zone)
             }
-            Err(e) => (
+            Some(Err(e)) => (
                 "SERVFAIL".to_string(),
                 Vec::new(),
-                Some(e.to_string()),
+                Some(failure_summary(e.to_string(), &trace)),
+                None,
+            ),
+            None => (
+                "SERVFAIL".to_string(),
+                Vec::new(),
+                Some(format!(
+                    "the lookup was still running when the client timeout of {} ms expired, so it was stopped; the trace shows the queries it had sent",
+                    inner.settings.client_timeout_ms
+                )),
                 None,
             ),
         };
@@ -166,5 +210,41 @@ impl RecursiveResolver {
             dnssec_validation: inner.settings.dnssec_validate,
             trace,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diagnostic_summary_reports_final_upstream_failure_reply() {
+        let step = |code: Option<&str>| TraceStep {
+            server: "192.0.2.53".parse().unwrap(),
+            name: "test.example.".to_string(),
+            record_type: "AAAA".to_string(),
+            rcode: code.map(str::to_owned),
+            outcome: String::new(),
+            elapsed: Duration::ZERO,
+        };
+        let exhausted = "resolution failed: net error: no connections available";
+        for code in ["SERVFAIL", "REFUSED"] {
+            let summary = failure_summary(exhausted.to_string(), &[step(Some(code))]);
+            assert!(
+                summary.contains(&format!("192.0.2.53 replied {code}")),
+                "{summary}"
+            );
+        }
+        assert_eq!(
+            failure_summary(exhausted.to_string(), &[step(Some("SERVFAIL")), step(None)]),
+            exhausted
+        );
+        assert_eq!(
+            failure_summary(
+                "DNSSEC validation failed".to_string(),
+                &[step(Some("SERVFAIL"))]
+            ),
+            "DNSSEC validation failed"
+        );
     }
 }

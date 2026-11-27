@@ -232,12 +232,22 @@ struct TraceLog {
     sent: Vec<(Instant, Option<Duration>)>,
 }
 
+/// Why a traced lookup ended with queries still unanswered.
+#[derive(Clone, Copy)]
+enum TraceEnd {
+    /// The lookup itself finished while those queries were still out.
+    LookupEnded,
+    /// A diagnostic stopped the lookup at its answer budget.
+    Stopped,
+}
+
 impl TraceLog {
     /// The trace as reported. A query that was never answered - the
-    /// resolver's timeout elapsed, or the lookup ended while it was still
-    /// out - is marked here, when the lookup is done, so its row stays in
-    /// the list with no response code instead of reading as still waiting.
-    fn finish(self) -> Vec<TraceStep> {
+    /// resolver's timeout elapsed, the lookup ended while it was still out,
+    /// or a diagnostic stopped the lookup at its budget - is marked here,
+    /// when the lookup is done, so its row stays in the list with no
+    /// response code instead of reading as still waiting.
+    fn finish(self, end: TraceEnd) -> Vec<TraceStep> {
         let mut steps = self.steps;
         for (step, (sent, timeout)) in steps.iter_mut().zip(self.sent) {
             if step.outcome != AWAITING_REPLY {
@@ -250,10 +260,16 @@ impl TraceLog {
                 waited = waited.min(timeout);
             }
             step.elapsed = waited;
-            step.outcome = format!(
-                "no reply after {:.1}s, the resolver gave up on it",
-                waited.as_secs_f64()
-            );
+            step.outcome = match end {
+                TraceEnd::LookupEnded => format!(
+                    "no reply after {:.1}s, the resolver gave up on it",
+                    waited.as_secs_f64()
+                ),
+                TraceEnd::Stopped => format!(
+                    "no reply after {:.1}s, when the lookup was stopped at the client timeout",
+                    waited.as_secs_f64()
+                ),
+            };
         }
         steps
     }
@@ -268,7 +284,35 @@ pub async fn trace_queries<F: Future>(lookup: F) -> (F::Output, Vec<TraceStep>) 
         .scope(std::cell::RefCell::new(TraceLog::default()), async {
             let output = lookup.await;
             let log = QUERY_TRACE.with(|log| std::mem::take(&mut *log.borrow_mut()));
-            (output, log.finish())
+            (output, log.finish(TraceEnd::LookupEnded))
+        })
+        .await
+}
+
+/// Like [`trace_queries`], but stop waiting at `limit` when there is one
+/// (the client's answer budget, for a diagnostic). The output is `None` when
+/// the limit expired; the trace still lists every query that was sent,
+/// marking the ones that were still out when the lookup was stopped.
+///
+/// Only diagnostics use this: client lookups keep their own deadline in the
+/// dispatcher, and must not be cancelled here.
+pub async fn trace_queries_within<F: Future>(
+    lookup: F,
+    limit: Option<Duration>,
+) -> (Option<F::Output>, Vec<TraceStep>) {
+    QUERY_TRACE
+        .scope(std::cell::RefCell::new(TraceLog::default()), async {
+            let output = match limit {
+                Some(limit) => tokio::time::timeout(limit, lookup).await.ok(),
+                None => Some(lookup.await),
+            };
+            let log = QUERY_TRACE.with(|log| std::mem::take(&mut *log.borrow_mut()));
+            let end = if output.is_none() {
+                TraceEnd::Stopped
+            } else {
+                TraceEnd::LookupEnded
+            };
+            (output, log.finish(end))
         })
         .await
 }
