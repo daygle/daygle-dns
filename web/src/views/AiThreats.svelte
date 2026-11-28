@@ -858,7 +858,7 @@
               <td class="signals-cell">
                 {#each r.signals || [] as s (s.signal)}
                   <span class="pill tag" class:ok={s.direction === 'benign'} class:err={s.direction === 'threat'} title={`${signalLabel(s.signal)} (${s.direction}): ${s.detail}`}>
-                    {signalLabel(s.signal)}{#if s.value != null} {percent(s.value)}{/if}
+                    {signalLabel(s.signal)}
                   </span>
                 {:else}
                   <span class="muted">-</span>
