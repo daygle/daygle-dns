@@ -943,7 +943,7 @@ mod tests {
             store
                 .page_discovery_candidates(now, 0.5, 4, FusionMode::Decide)
                 .unwrap(),
-            [(domain.to_string(), None)]
+            [domain]
         );
         assert!(store
             .page_discovery_candidates(now, 0.5, 4, FusionMode::Monitor)
@@ -1033,7 +1033,7 @@ mod tests {
         assert_eq!(store.page_discovery_blocks(now, 0.95).unwrap()[0].0, domain);
         assert_eq!(
             store.directly_corroborated_discoveries(now).unwrap(),
-            [domain]
+            [(domain.to_string(), None)]
         );
         assert!(store
             .directly_corroborated_discoveries(now + 8 * 86_400)
