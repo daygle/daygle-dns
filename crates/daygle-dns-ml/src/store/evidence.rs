@@ -256,6 +256,32 @@ impl AiStore {
         Ok(rows)
     }
 
+    /// Recently first-seen DNS names, independent of classifier confidence.
+    pub(crate) fn new_dns_discovery_candidates(
+        &self,
+        now: i64,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        const NEW_NAME_WINDOW: i64 = 7 * 86_400;
+        let since = now.saturating_sub(NEW_NAME_WINDOW);
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT s.domain FROM ai_seen s JOIN ai_verdicts v
+               ON v.domain = s.domain AND v.channel = 'threat'
+             WHERE s.last_seen BETWEEN ?1 AND ?2 AND s.first_seen BETWEEN ?1 AND ?2
+               AND v.severity != 'disputed'
+               AND NOT EXISTS (SELECT 1 FROM ai_page_discovery p
+                               WHERE p.domain = s.domain AND p.retry_at > ?2)
+               AND NOT EXISTS (SELECT 1 FROM ai_overrides o WHERE o.domain = s.domain)
+               AND NOT EXISTS (SELECT 1 FROM ai_category_overrides o WHERE o.domain = s.domain)
+             ORDER BY s.first_seen, s.domain LIMIT ?3",
+        )?;
+        let rows = stmt
+            .query_map(params![since, now, limit as i64], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
     pub(crate) fn save_page_discovery(
         &self,
         domain: &str,

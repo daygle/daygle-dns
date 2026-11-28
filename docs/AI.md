@@ -490,13 +490,19 @@ the result with the verdict. `ai.page_rule` decides what that reading may do:
 The page is written by the site being judged, so a site that shows a fetcher
 harmless text can game `decide`. That is why it is opt-in.
 
-Set `ai.monitor_page_discovery = true` to inspect uncertain threat results for
-review when `ai.fetch_pages` is on. Discovery uses up to four workers and the
-time remaining after the existing page stages. It records outcomes under
+Set `ai.monitor_page_discovery = true` to investigate unfamiliar DNS names
+and uncertain threat results when `ai.fetch_pages` is on. Discovery runs
+after threat-page checks and before content categorization. It uses up to
+four workers in the shared page budget. The scanner reserves roughly half
+of each discovery batch for names first observed in DNS traffic in the last
+seven days, even when the classifier is confident. This route skips
+popular and feed-listed names and samples at most one host per registrable
+domain per batch. Hosted, local, exempt and disputed names are excluded.
+It records outcomes under
 `page_discovery` in `GET /api/ai/signals?domain=…` for a day after a readable
-response, or an hour after a failed fetch. The scanner considers a skipped
-verdict or one whose raw confidence or current assessment is below the
-confidence floor. A missing threat reading is unknown.
+response, or an hour after a failed fetch. The remaining slots consider
+skipped verdicts or results whose raw confidence or current assessment is
+below the confidence floor. A missing threat reading is unknown.
 Discovery recognises suspicious password forms, brand sign-in impersonation,
 and payment, identity, or verification-code forms paired with coercive
 verification demands. It records cross-site hops and HTTPS downgrades and
