@@ -4592,9 +4592,13 @@ fn insert_record_in_tx(
         let rr_type = rtype
             .parse::<RecordType>()
             .map_err(|e| DaygleError::InvalidRecord(format!("record type '{rtype}': {e}")))?;
-        RData::try_from_str(rr_type, &content).map_err(|e| {
+        let rdata = RData::try_from_str(rr_type, &content).map_err(|e| {
             DaygleError::InvalidRecord(format!("invalid {rtype} record '{content}': {e}"))
         })?;
+        // A record too large for one DNS message would be stored and then fail
+        // every transfer that reached it, so it is refused where it is written.
+        crate::model::check_record_fits_a_message(&name, input.ttl, &rdata)
+            .map_err(DaygleError::InvalidRecord)?;
         if !input.disabled {
             if let Some(existing) = identical_record(tx, zone_id, &name, &rtype, &content)? {
                 return Ok(Added::Exists(existing));

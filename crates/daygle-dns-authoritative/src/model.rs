@@ -139,6 +139,45 @@ pub const KNOWN_RECORD_TYPES: &[&str] = &[
     "TLSA", "SSHFP", "NAPTR", "ALIAS", "AUTOPTR",
 ];
 
+/// The largest a single record may be once encoded for the wire.
+///
+/// A DNS message is at most 65,535 bytes, and its header, question section and
+/// (on a signed transfer) TSIG signature share that with the record. A record
+/// above this could never travel in any response, so storing one would only
+/// break the transfers and lookups that reached it later.
+pub const MAX_RECORD_WIRE_BYTES: usize = 64_000;
+
+/// Refuse a record that does not fit in one DNS message.
+///
+/// Zone transfers answer with what they are given, so a record that cannot be
+/// encoded into a message fails the whole transfer when it is reached. This
+/// runs when a record is written, where it is still a `400` naming the record
+/// rather than a SERVFAIL on an unrelated transfer.
+pub fn check_record_fits_a_message(
+    name: &str,
+    ttl: u32,
+    rdata: &hickory_proto::rr::RData,
+) -> std::result::Result<(), String> {
+    use hickory_proto::rr::{Name, Record};
+    use hickory_proto::serialize::binary::BinEncodable;
+
+    let owner = Name::from_utf8(format!("{}.", name.trim().trim_end_matches('.')))
+        .map_err(|e| format!("name '{name}': {e}"))?;
+    let record = Record::from_rdata(owner, ttl, rdata.clone());
+    // The encoder itself refuses anything past 65,535 bytes, so both a refused
+    // encode and an oversized encoding are the same problem to the caller.
+    let len = record
+        .to_bytes()
+        .map_err(|e| format!("the record cannot be encoded into one DNS message: {e}"))?
+        .len();
+    if len > MAX_RECORD_WIRE_BYTES {
+        return Err(format!(
+            "the record is {len} bytes on the wire, and only {MAX_RECORD_WIRE_BYTES} fit in one DNS message"
+        ));
+    }
+    Ok(())
+}
+
 /// Another name a zone is served under: every query for a name in `name`
 /// is answered from the zone's records, as if asked for the same name in
 /// the zone (`www.example.net` answers like `www.example.com`).

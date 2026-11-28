@@ -1036,7 +1036,9 @@ Supported `rtype` values: `A`, `AAAA`, `CNAME`, `MX`, `TXT`, `NS`, `SOA`,
 `SRV`, `PTR`, `CAA`, `HTTPS`, `SVCB`, `DS`, `TLSA`, `SSHFP`, `NAPTR`, `ALIAS`,
 `AUTOPTR`.
 `content` must parse as that type's RDATA, otherwise the request fails with
-400. `priority` is not served: MX and SRV take their priority from `content`.
+400, as does a record too large for one DNS message (about 64 KB on the
+wire). `priority` is not served: MX and SRV take their priority from
+`content`.
 For A and AAAA records with health checks it is the failover priority (see
 below).
 
@@ -2747,7 +2749,8 @@ hashes.
 (zones, records, DNSSEC keys, settings, console users, certificates,
 blocking groups, split horizon, secondary and stub zones) plus the AI
 scanner's operator overrides. AI verdicts are a cache and are not included.
-Query logs are left out unless `query_logs=true`.
+Query logs are left out unless `query_logs=true`. The body is streamed from
+a scratch copy of the file and carries its `Content-Length`.
 
 `POST /api/backup/restore` takes a backup file as the request body (up to
 1 GiB). It checks the file is an intact backup made by this or an earlier

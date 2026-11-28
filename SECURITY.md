@@ -131,9 +131,6 @@ the channel above.
   / `raw.githubusercontent.com`, becomes root code execution on every host
   that applies an update. Fixing this needs release-signing and key-rotation
   infrastructure.
-- **`GET /api/backup` reads the finished backup into memory** before sending
-  it. Streaming it needs the scratch file kept alive for the response's
-  lifetime.
 - **Most console handlers still call SQLite on async workers.** Of the 153
   async handlers in `crates/daygle-dns-api/src/handlers.rs`, 60 still call
   the store directly on the async worker; the rest either move that work to
@@ -144,10 +141,6 @@ the channel above.
 
 ### Accepted risks
 
-- **A single oversized record can fail an AXFR.** Zone transfers pack
-  records into 16 KiB groups, but a record too large for one DNS message is
-  emitted alone and fails to encode, returning SERVFAIL for that transfer.
-  Not reachable with ordinary A/AAAA/TXT data.
 - **Console build-time advisories.** `npm audit` reports two low-severity
   advisories in the `deepmerge` chain of `@sveltejs/vite-plugin-svelte`,
   with no upstream fix available; they are not shipped in the bundle.

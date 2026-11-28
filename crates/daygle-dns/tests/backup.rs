@@ -124,3 +124,47 @@ async fn backup_and_restore_through_the_api() {
     assert!(kept_aside);
     shutdown(server).await;
 }
+
+/// A downloaded backup is streamed from its scratch file: the response
+/// carries the file's size, and reading the body to the end removes the file.
+#[tokio::test]
+async fn a_backup_download_streams_from_its_scratch_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("daygle-dns.db");
+    let server = spawn(base_config(&db)).await;
+    let api = format!("http://{}/api", server.api_addr);
+    server
+        .catalog
+        .store()
+        .create_zone(&ZoneInput {
+            name: "streamed.test".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let resp = reqwest::get(format!("{api}/backup")).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let declared: u64 = resp.headers()["content-length"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let backup = resp.bytes().await.unwrap();
+    assert_eq!(backup.len() as u64, declared);
+    assert_eq!(&backup[..16], b"SQLite format 3\0");
+
+    // The body streamed from a scratch file, and it is gone once the download
+    // has been read to the end.
+    let left: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("daygle-dns-backup-"))
+        .collect();
+    assert!(
+        left.is_empty(),
+        "scratch backup files left behind: {left:?}"
+    );
+
+    shutdown(server).await;
+}

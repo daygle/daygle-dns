@@ -5122,7 +5122,12 @@ pub async fn export_zone(State(state): State<AppState>, Path(id): Path<String>) 
 /// created later by SQLite or `fs::write` would get the process umask
 /// (typically world-readable) until narrowed. SQLite's `VACUUM INTO`
 /// accepts an existing empty file.
-struct ScratchFile(std::path::PathBuf);
+struct ScratchFile {
+    path: std::path::PathBuf,
+    /// Set when the file is handed to something else that removes it, such as
+    /// a response body streaming it to a client.
+    keep: bool,
+}
 
 impl ScratchFile {
     fn new(database: &str, purpose: &str) -> std::io::Result<Self> {
@@ -5143,13 +5148,54 @@ impl ScratchFile {
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
         options.open(&path)?;
-        Ok(Self(path))
+        Ok(Self { path, keep: false })
+    }
+
+    /// Hand the file to the caller, which becomes responsible for removing it.
+    fn into_path(mut self) -> std::path::PathBuf {
+        self.keep = true;
+        std::mem::take(&mut self.path)
     }
 }
 
 impl Drop for ScratchFile {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        if !self.keep {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// A scratch file streamed as a response body.
+///
+/// The file is removed when the body is dropped: after the last chunk is
+/// sent, or immediately when the client disconnects mid-download. Both happen
+/// on the response's own task, so no separate cleanup is needed, and closing
+/// the file first keeps the removal working on Windows.
+struct ScratchReader {
+    file: Option<tokio::fs::File>,
+    path: std::path::PathBuf,
+}
+
+impl tokio::io::AsyncRead for ScratchReader {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.file.as_mut() {
+            Some(file) => std::pin::Pin::new(file).poll_read(cx, buf),
+            // Already closed: the body ends here.
+            None => std::task::Poll::Ready(Ok(())),
+        }
+    }
+}
+
+impl Drop for ScratchReader {
+    fn drop(&mut self) {
+        // Close first: Windows refuses to remove an open file.
+        drop(self.file.take());
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -5171,27 +5217,36 @@ pub async fn download_backup(
     let store = state.catalog.store().clone();
     let made = tokio::task::spawn_blocking(move || {
         let scratch = ScratchFile::new(&database, "backup")?;
-        store.backup_to(&scratch.0, query.query_logs, Some(&ai_database))?;
-        Ok::<_, daygle_dns_core::error::DaygleError>(std::fs::read(&scratch.0)?)
+        store.backup_to(&scratch.path, query.query_logs, Some(&ai_database))?;
+        let file = std::fs::File::open(&scratch.path)?;
+        let size = file.metadata()?.len();
+        Ok::<_, daygle_dns_core::error::DaygleError>((file, scratch.into_path(), size))
     })
     .await;
     match made {
-        Ok(Ok(bytes)) => {
+        // The backup is streamed from its scratch file rather than read into
+        // memory, so a large database does not sit in the server's heap while
+        // it is sent: the file's guard travels with the body.
+        Ok(Ok((file, path, size))) => {
             let filename = format!(
                 "attachment; filename=\"daygle-dns-backup-{}.db\"",
                 chrono::Local::now().format("%Y%m%d-%H%M")
             );
-            state.logs.info(
-                "backup",
-                format!("backup downloaded ({} bytes)", bytes.len()),
-            );
+            state
+                .logs
+                .info("backup", format!("backup download started ({size} bytes)"));
+            let body = tokio_util::io::ReaderStream::new(ScratchReader {
+                file: Some(tokio::fs::File::from_std(file)),
+                path,
+            });
             (
                 [
-                    (header::CONTENT_TYPE, "application/vnd.sqlite3"),
-                    (header::CONTENT_DISPOSITION, filename.as_str()),
-                    (header::CACHE_CONTROL, "no-store"),
+                    (header::CONTENT_TYPE, "application/vnd.sqlite3".to_string()),
+                    (header::CONTENT_DISPOSITION, filename),
+                    (header::CACHE_CONTROL, "no-store".to_string()),
+                    (header::CONTENT_LENGTH, size.to_string()),
                 ],
-                bytes,
+                axum::body::Body::from_stream(body),
             )
                 .into_response()
         }
@@ -5221,8 +5276,8 @@ pub async fn stage_restore(State(state): State<AppState>, body: axum::body::Byte
     }
     let staged = tokio::task::spawn_blocking(move || {
         let scratch = ScratchFile::new(&database, "upload")?;
-        std::fs::write(&scratch.0, &body)?;
-        daygle_dns_authoritative::backup::stage_restore(&database, &scratch.0)
+        std::fs::write(&scratch.path, &body)?;
+        daygle_dns_authoritative::backup::stage_restore(&database, &scratch.path)
     })
     .await;
     match staged {
