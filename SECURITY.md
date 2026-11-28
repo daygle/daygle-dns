@@ -114,9 +114,12 @@ the pieces enforce these controls.
 
 ## Known limitations
 
-Accepted risks and unfixed follow-ups from the 2026-11 code audit. These are
-documented choices, not open reports: if you think one is exploitable in a
-way not described here, report it privately using the channel above.
+From the 2026-11 code audit. The open work below is not yet fixed; the
+accepted risks are documented choices rather than open reports. If you think
+one is exploitable in a way not described here, report it privately using
+the channel above.
+
+### Open work
 
 - **Updates are authenticated by HTTPS only.** The self-updater
   (`crates/daygle-dns-api/src/update.rs`, `update-apply.sh`) verifies staged
@@ -128,18 +131,23 @@ way not described here, report it privately using the channel above.
   / `raw.githubusercontent.com`, becomes root code execution on every host
   that applies an update. Fixing this needs release-signing and key-rotation
   infrastructure.
+- **`GET /api/backup` reads the finished backup into memory** before sending
+  it. Streaming it needs the scratch file kept alive for the response's
+  lifetime.
+- **Most console handlers still call SQLite on async workers.** Of the 153
+  async handlers in `crates/daygle-dns-api/src/handlers.rs`, 60 still call
+  the store directly on the async worker; the rest either move that work to
+  a blocking thread (`run_blocking`/`spawn_blocking`) or do no database work.
+  The per-request authentication path is converted; the remaining handlers
+  are being converted one at a time, and under load they can queue behind the
+  store's single connection mutex.
+
+### Accepted risks
+
 - **A single oversized record can fail an AXFR.** Zone transfers pack
   records into 16 KiB groups, but a record too large for one DNS message is
   emitted alone and fails to encode, returning SERVFAIL for that transfer.
   Not reachable with ordinary A/AAAA/TXT data.
-- **`GET /api/backup` reads the finished backup into memory** before sending
-  it. Streaming it needs the scratch file kept alive for the response's
-  lifetime.
-- **Most console handlers still call SQLite on async workers.** The
-  per-request authentication path runs its database work in
-  `spawn_blocking`, but the remaining handlers are being converted one at a
-  time; under load they can queue behind the store's single connection
-  mutex.
 - **Console build-time advisories.** `npm audit` reports two low-severity
   advisories in the `deepmerge` chain of `@sveltejs/vite-plugin-svelte`,
   with no upstream fix available; they are not shipped in the bundle.
