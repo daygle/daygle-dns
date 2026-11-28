@@ -1237,6 +1237,7 @@ impl Scanner {
         };
         // The label list is what separates a threat from an ordinary
         // category, so it gates blocking too.
+        let binary_model = crate::backend::is_binary_backend(&self.threat.name());
         for candidate in self
             .store
             .fresh_blocked(now, cfg.block_threshold, cfg.fusion)?
@@ -1249,9 +1250,15 @@ impl Scanner {
                     continue;
                 }
             }
-            if cfg.is_auto_block_category(&candidate.category)
-                && !exempt(&candidate.domain, overrides)
-            {
+            let included = if candidate.category == crate::backend::BINARY_THREAT_LABEL {
+                binary_model
+                    && crate::backend::is_binary_backend(&candidate.backend)
+                    && cfg.label_role(&candidate.category)
+                        != daygle_dns_core::config::LabelRole::Suppressed
+            } else {
+                cfg.is_auto_block_category(&candidate.category)
+            };
+            if included && !exempt(&candidate.domain, overrides) {
                 eligible.insert(
                     candidate.domain,
                     ActiveBlock {
@@ -1404,7 +1411,10 @@ impl Scanner {
             );
         }
         for (domain, block) in blocks {
-            if block.exact_host || relabels.contains_key(domain) {
+            if block.exact_host
+                || block.category == crate::backend::BINARY_THREAT_LABEL
+                || relabels.contains_key(domain)
+            {
                 continue;
             }
             snapshot.insert(

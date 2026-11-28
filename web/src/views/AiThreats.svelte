@@ -743,9 +743,9 @@
     {/if}
   </div>
 
-  <div class="card">
+  <div class="card detected-threats">
     <div class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap">
-      <h3 style="margin: 0">Detected Threats ({fmt(total)})</h3>
+      <h3 id="detected-threats-heading" style="margin: 0">Detected Threats ({fmt(total)})</h3>
       <div class="row" style="gap: 8px; flex-wrap: wrap">
         <input type="search" placeholder="Search Domains" aria-label="Search domains" bind:value={search} style="min-width: min(100%, 200px)" />
         <select bind:value={categoryFilter} aria-label="Filter by category" style="min-width: 150px">
@@ -777,8 +777,9 @@
         <ColumnPicker table="ai-threats" columns={COLUMNS} />
       </div>
     </div>
-    <div class="table-wrap">
-    <table>
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex (Make horizontal scrolling available to keyboard users.) -->
+    <div class="table-wrap detected-threats-scroll" role="region" aria-labelledby="detected-threats-heading" tabindex="0">
+    <table class="detected-threats-table">
       <thead>
         <tr>
           <th>Domain</th>
@@ -786,7 +787,7 @@
           {#if show('state')}<th>State</th>{/if}
           {#if show('decision')}<th title="What DNS does about the domain: block, override (your decision wins), monitor (reported, not blocking) or allow">Decision</th>{/if}
           {#if show('confidence')}<th class="num">Confidence</th>{/if}
-          {#if show('score')}<th class="num" title="The model's own probability for the threat families, before evidence and the block threshold">Threat Score</th>{/if}
+          {#if show('score')}<th class="num" title="The model's threat score before evidence and the block threshold">Threat Score</th>{/if}
           {#if show('signals')}<th title="Each input scored on its own, for inspection only: none of them decides">Signals</th>{/if}
           {#if show('reason')}<th title="Why the domain was judged a threat">Why</th>{/if}
           {#if show('seen')}<th class="num" title="In how many scans the domain showed up in your DNS traffic">Seen</th>{/if}
@@ -798,7 +799,7 @@
       <tbody>
         {#each rows as r (r.domain)}
           <tr>
-            <td>
+            <td class="threat-domain">
               <code>{r.domain}</code>
             </td>
             {#if show('category')}
@@ -949,9 +950,17 @@
   .tag { margin-left: 6px; }
   /* Wide enough for two or three chips a line: left to the table's own
      layout the column collapsed and every chip took a row of its own. */
-  .signals-cell { min-width: 210px; max-width: 260px; }
+  .detected-threats, .detected-threats-scroll { min-inline-size: 0; max-inline-size: 100%; }
+  .detected-threats-table { inline-size: 100%; }
+  .detected-threats-table th, .detected-threats-table td { padding-inline: 7px; }
+  .detected-threats-table th { white-space: normal; }
+  .detected-threats-table td { overflow-wrap: anywhere; }
+  .threat-domain { min-inline-size: 7rem; max-inline-size: 16rem; }
+  .threat-domain code { white-space: normal; overflow-wrap: anywhere; }
+  .signals-cell { min-width: 7rem; max-width: 14rem; }
   .signals-cell .tag { margin: 1px 3px 1px 0; }
   dl.signals { display: grid; grid-template-columns: max-content 1fr; gap: 3px 10px; align-items: baseline; margin: 6px 0 8px; }
   dl.signals dt, dl.signals dd { margin: 0; }
   .evidence { max-width: 200px; font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .detected-threats-table .evidence { min-inline-size: 5rem; max-inline-size: 11rem; white-space: normal; }
 </style>

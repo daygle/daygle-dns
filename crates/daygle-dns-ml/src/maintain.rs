@@ -453,6 +453,7 @@ pub struct Retrainer {
     /// One build, promotion or rollback at a time: they share the temp file
     /// and rotate the same model files.
     running: Mutex<()>,
+    binary_name_model: std::sync::atomic::AtomicBool,
     installer: OnceLock<Installer>,
     installed: OnceLock<InstalledHook>,
     shadow_scoring: OnceLock<ShadowScoring>,
@@ -478,6 +479,7 @@ impl Retrainer {
             current_model,
             last_attempt: Mutex::new(None),
             running: Mutex::new(()),
+            binary_name_model: std::sync::atomic::AtomicBool::new(false),
             installer: OnceLock::new(),
             installed: OnceLock::new(),
             shadow_scoring: OnceLock::new(),
@@ -498,6 +500,16 @@ impl Retrainer {
     /// written to disk.
     pub fn set_installer(&self, installer: Installer) {
         let _ = self.installer.set(installer);
+    }
+
+    pub(crate) fn set_binary_name_model(&self, active: bool) {
+        self.binary_name_model
+            .store(active, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn uses_binary_name_model(&self) -> bool {
+        self.binary_name_model
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Hand the retrainer a step that runs once a model it installed is live.
@@ -809,6 +821,9 @@ impl Retrainer {
     /// choice, so no shadow trial. A candidate on trial is discarded.
     pub fn retrain(&self) -> Result<TrainingStats> {
         let _running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        if self.uses_binary_name_model() {
+            return Err(DaygleError::Config("train binary name models from explicit binary outcomes with train-binary-name-model".to_string()));
+        }
         let settings = self.settings.load_full();
         let built = self.build(&settings)?;
         if self.discard_candidate() {
@@ -993,6 +1008,9 @@ impl Retrainer {
         }
         let now = chrono::Utc::now().timestamp();
         if self.check_watch(&settings, now) {
+            return None;
+        }
+        if self.uses_binary_name_model() {
             return None;
         }
         let trial = self.trial();

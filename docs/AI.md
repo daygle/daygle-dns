@@ -100,6 +100,31 @@ disputed it.
 Enforcement is unchanged: `ai.block_threshold`, the verifier, disputes,
 exemptions and expiry still decide what blocks, and only in enforce mode.
 
+### Binary name model
+
+Point `ai.model_path` at a supervised fastText artifact containing exactly
+`binary-threat` and `benign` to score the hostname independently of the
+enabled threat families. The content channel uses the built-in categorizer
+in this mode. A binary finding appears as **Binary Threat** in Detected
+Threats. It uses the regular block score, authority, exemptions, verifier
+disputes and refresh cap. An explicit suppression of `binary-threat` also
+applies. Binary findings never become filtering-group content categories.
+
+Train the artifact with independently labelled training and evaluation
+files, one `threat DOMAIN` or `benign DOMAIN` per line. The two files must
+have disjoint registrable domains. For example, to measure a 1% target:
+
+```text
+cargo run --release -p daygle-dns-ml --bin train-binary-name-model -- training.txt evaluation.txt binary.bin 0.01
+```
+
+The command reports the candidate threshold and writes the artifact only
+after the validation split meets the target and both evaluation partitions
+contain detections. Its result measures hostname scores. Verify the operating
+threshold with the live evidence pipeline in Train mode before using
+Enforce. Retrain binary artifacts through this tool. The existing scheduled
+family-model trainer does not replace an active binary artifact.
+
 Existing blocks stay: the stored `ai.auto_block_categories` list is read as
 the threat role, so no domain that blocks today stops blocking.
 

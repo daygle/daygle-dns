@@ -533,6 +533,14 @@ pub fn model_labels(model: &Path) -> Option<HashSet<String>> {
     )
 }
 
+pub(crate) fn is_binary_model(model: &Path) -> bool {
+    model_labels(model).is_some_and(|labels| {
+        labels.len() == 2
+            && labels.contains(BENIGN_LABEL)
+            && labels.contains(crate::backend::BINARY_THREAT_LABEL)
+    })
+}
+
 /// Refuse a candidate that cannot emit a threat label the model in use can:
 /// a detector that has forgotten `malware` will never report it again, and
 /// no held-out score notices a label that never comes up.
@@ -566,7 +574,9 @@ fn push(
     label: &str,
     domain: &str,
 ) -> bool {
-    if labels.get(label).copied().unwrap_or(0) >= MAX_PER_LABEL {
+    if label == crate::backend::BINARY_THREAT_LABEL
+        || labels.get(label).copied().unwrap_or(0) >= MAX_PER_LABEL
+    {
         return false;
     }
     if !seen.insert((label.to_string(), domain.to_string())) {

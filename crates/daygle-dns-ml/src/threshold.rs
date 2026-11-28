@@ -644,6 +644,9 @@ fn collect_rows(
             let (group, label, threat) = if let Some((action, category)) = corrections.get(&key) {
                 let threat = if action == "category" {
                     settings.is_auto_block_category(category)
+                        || (category == crate::backend::BINARY_THREAT_LABEL
+                            && settings.label_role(category)
+                                != daygle_dns_core::config::LabelRole::Suppressed)
                 } else {
                     // `allow` and `not_threat` both mean "not a threat".
                     false

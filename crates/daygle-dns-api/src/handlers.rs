@@ -1784,7 +1784,16 @@ pub async fn ai_threats(
     // The list shows the labels treated as threats right now, read from the
     // live settings: the operator's edit applies to the list immediately.
     let settings = ai.settings.load_full();
-    let threat_labels = Some(settings.threat_labels());
+    let mut labels = settings.threat_labels();
+    let binary_label = daygle_dns_ml::backend::BINARY_THREAT_LABEL;
+    if ai.binary_name_model_active()
+        && ai.automatic_threat_label_role(binary_label)
+            == daygle_dns_core::config::LabelRole::Threat
+        && !labels.iter().any(|label| label == binary_label)
+    {
+        labels.push(binary_label.to_string());
+    }
+    let threat_labels = Some(labels);
     let listed = run_blocking({
         let ai = ai.clone();
         move || {
@@ -1832,7 +1841,7 @@ pub async fn ai_threats(
             (StatusCode::OK,
                 axum::Json(serde_json::json!({
                     "entries": rows.iter().map(|(r, signals)| {
-                        let role = settings.label_role(&r.category);
+                        let role = ai.automatic_threat_label_role(&r.category);
                         let exempt = daygle_dns_ml::scanner::exempt(&r.domain, &exemptions);
                         let blocked = !exempt && threat_block_entry(&r.domain, &snapshot, now).is_some();
                         let overridden = r.overridden;
@@ -2289,7 +2298,7 @@ pub async fn ai_explain(
                                 explain_pct(settings.block_threshold)
                             ));
                         }
-                        if !settings.is_auto_block_category(&t.category) {
+                        if ai.automatic_threat_label_role(&t.category) != daygle_dns_core::config::LabelRole::Threat {
                             reasons.push(format!(
                                 "The label '{}' is not ticked in AI → Threats, so it cannot block.",
                                 t.category
@@ -2367,7 +2376,7 @@ pub async fn ai_explain(
                 "threat": threat.map(|t| serde_json::json!({
                     "category": t.category,
                     "classification": t.classification,
-                    "label_role": settings.label_role(&t.category).as_str(),
+                    "label_role": ai.automatic_threat_label_role(&t.category).as_str(),
                     "severity": t.severity,
                     "status": t.status,
                     "confidence": t.confidence,
@@ -2379,7 +2388,7 @@ pub async fn ai_explain(
                         .as_ref()
                         .map_or(t.confidence, |report| report.gate_score)
                         >= settings.block_threshold,
-                    "label_treated_as_threat": settings.is_auto_block_category(&t.category),
+                    "label_treated_as_threat": ai.automatic_threat_label_role(&t.category) == daygle_dns_core::config::LabelRole::Threat,
                     "classified_at": stamp(t.classified_at),
                     "expires_at": stamp(t.expires_at),
                 })),

@@ -152,6 +152,7 @@ pub struct BlockCandidate {
     pub category: String,
     pub expires_at: i64,
     pub source: BlockSource,
+    pub backend: String,
 }
 
 /// One classification to store (see [`AiStore::save_verdicts`]).
@@ -861,7 +862,8 @@ impl AiStore {
         // model-only one.
         let mut stmt = conn.prepare(&format!(
             "SELECT domain, category, expires_at,
-                    CASE WHEN instr(evidence, ', listed by ') > 0 THEN 'feed' ELSE 'model' END
+                    CASE WHEN instr(evidence, ', listed by ') > 0 THEN 'feed' ELSE 'model' END,
+                    backend
              FROM ai_verdicts
              WHERE channel = 'threat' AND status = 'classified'
                AND severity != 'disputed'
@@ -890,6 +892,7 @@ impl AiStore {
                         domain: r.get(0)?,
                         category: r.get(1)?,
                         expires_at: r.get(2)?,
+                        backend: r.get(4)?,
                         source: match r.get::<_, String>(3)?.as_str() {
                             "feed" => BlockSource::Feed,
                             _ => BlockSource::Model,

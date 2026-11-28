@@ -236,6 +236,10 @@ impl<'a> ReplayContext<'a> {
             self.calibration,
         );
         let threat = severity == Severity::Threat;
+        let eligible_label = self.settings.is_auto_block_category(&category)
+            || (category == crate::backend::BINARY_THREAT_LABEL
+                && self.settings.label_role(&category)
+                    != daygle_dns_core::config::LabelRole::Suppressed);
         let mut blocked = None;
         if severity == Severity::Disputed {
             blocked = Some("a dispute blocks the finding".to_string());
@@ -260,7 +264,7 @@ impl<'a> ReplayContext<'a> {
             ));
         } else if !reviewed && self.category_overrides.contains_key(domain) {
             blocked = Some("operator category override".to_string());
-        } else if !self.settings.is_auto_block_category(&category) {
+        } else if !eligible_label {
             blocked = Some(format!(
                 "category '{category}' is not an enabled threat family"
             ));

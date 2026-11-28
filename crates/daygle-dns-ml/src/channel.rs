@@ -41,6 +41,7 @@ pub struct ChannelBackend {
     /// The threat channel's live settings (its category list). `None` for
     /// the content channel, which needs no configuration.
     settings: Option<Arc<ArcSwap<AiSettings>>>,
+    binary: bool,
 }
 
 impl ChannelBackend {
@@ -51,6 +52,7 @@ impl ChannelBackend {
             inner,
             channel: Channel::Content,
             settings: None,
+            binary: false,
         }
     }
 
@@ -60,10 +62,12 @@ impl ChannelBackend {
         inner: Box<dyn DomainClassifier + Send + Sync>,
         settings: Arc<ArcSwap<AiSettings>>,
     ) -> Self {
+        let binary = crate::backend::is_binary_backend(&inner.name());
         Self {
             inner,
             channel: Channel::Threat,
             settings: Some(settings),
+            binary,
         }
     }
 
@@ -103,6 +107,22 @@ impl DomainClassifier for ChannelBackend {
                 // means no declared threats, which is the safe reading.
                 let settings = self.settings.as_ref()?.load();
                 let mut role = settings.label_role(&verdict.category);
+                if self.binary {
+                    if verdict.category != crate::backend::BINARY_THREAT_LABEL
+                        || role == LabelRole::Suppressed
+                    {
+                        return None;
+                    }
+                    let verdict = Verdict {
+                        severity: Severity::Threat,
+                        threat_score: Some(verdict.confidence),
+                        ..verdict
+                    };
+                    return Some(match self.cleared_parent(input, &settings) {
+                        Some(parent) => parent_disputes(verdict, &parent),
+                        None => verdict,
+                    });
+                }
                 if verdict.category == BENIGN_LABEL {
                     // The learned negative is never itself a finding, even if
                     // an old list named it: a correction must not become a
@@ -236,8 +256,11 @@ impl ChannelBackend {
             .inner
             .classify(&ClassificationInput::domain_only(parent.to_string()))?;
         // Any label outside the block list is an ordinary site.
-        let ordinary =
-            reading.category == BENIGN_LABEL || !settings.is_auto_block_category(&reading.category);
+        let ordinary = if self.binary {
+            reading.category == BENIGN_LABEL
+        } else {
+            reading.category == BENIGN_LABEL || !settings.is_auto_block_category(&reading.category)
+        };
         (ordinary && reading.confidence >= PARENT_CLEAR_FLOOR).then(|| ParentReading {
             domain: parent.to_string(),
             category: reading.category,

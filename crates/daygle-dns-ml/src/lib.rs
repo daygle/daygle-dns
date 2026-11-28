@@ -293,7 +293,8 @@ impl AiEngine {
             true
         };
         let shared_learned = recovered_scheduled_activation.is_some()
-            || pick(&learned_shared, &settings.model_path, "classifier");
+            || (!learn::is_binary_model(Path::new(settings.model_path.trim()))
+                && pick(&learned_shared, &settings.model_path, "classifier"));
         let shared_path = if shared_learned {
             learned_shared.to_string_lossy().into_owned()
         } else {
@@ -319,6 +320,7 @@ impl AiEngine {
 
         // The channels sit behind reloadable handles, so a new model goes
         // live without a restart.
+        let binary_name_model = backend::is_binary_backend(&threat.name());
         let content_swap = backend::Reloadable::new(content);
         let threat_swap = backend::Reloadable::new(threat);
         let snapshot = Arc::new(ArcSwap::from_pointee(BlockSnapshot::new()));
@@ -340,10 +342,12 @@ impl AiEngine {
             }
         };
         shared.retrainer.set_evidence(network.clone());
+        shared.retrainer.set_binary_name_model(binary_name_model);
 
         // Every model that goes live - a promotion, a manual retrain or a
         // rollback - goes through these.
         let install_model: ModelInstaller = {
+            let retrainer = Arc::downgrade(&shared.retrainer);
             let classifier_digest = classifier_digest.clone();
             let settings = settings_swap.clone();
             let logs = logs.clone();
@@ -363,6 +367,9 @@ impl AiEngine {
                 let content = content_channel(&file, &logs)?;
                 let threat =
                     threat_channel(&file, &current, &settings, &logs, &reference, &network)?;
+                if let Some(retrainer) = retrainer.upgrade() {
+                    retrainer.set_binary_name_model(backend::is_binary_backend(&threat.name()));
+                }
                 content_swap.replace(content);
                 threat_swap.replace(threat);
                 announce(&logs, path == learned, "classifier", &file);
@@ -1078,6 +1085,26 @@ impl AiEngine {
     /// The threat-detection pipeline actually running (verifier included).
     pub fn threat_backend_name(&self) -> String {
         self.scanner.threat_backend_name()
+    }
+
+    pub fn binary_name_model_active(&self) -> bool {
+        backend::is_binary_backend(&self.threat_backend_name())
+    }
+
+    pub fn automatic_threat_label_role(
+        &self,
+        category: &str,
+    ) -> daygle_dns_core::config::LabelRole {
+        use daygle_dns_core::config::LabelRole;
+        let role = self.settings.load().label_role(category);
+        if category == backend::BINARY_THREAT_LABEL
+            && self.binary_name_model_active()
+            && role != LabelRole::Suppressed
+        {
+            LabelRole::Threat
+        } else {
+            role
+        }
     }
 
     /// Domains that qualify for auto-blocking now, counted by category:
@@ -2157,11 +2184,13 @@ fn content_channel(
     model: &str,
     logs: &Arc<LogStore>,
 ) -> Result<Box<dyn DomainClassifier + Send + Sync>> {
-    Ok(Box::new(channel::ChannelBackend::content(load_primary(
-        model,
-        Channel::Content,
-        logs,
-    )?)))
+    let primary = load_primary(model, Channel::Content, logs)?;
+    let content = if backend::is_binary_backend(&primary.name()) {
+        Box::new(heuristic::HeuristicBackend)
+    } else {
+        primary
+    };
+    Ok(Box::new(channel::ChannelBackend::content(content)))
 }
 
 #[cfg_attr(not(feature = "verifier-onnx"), allow(unused_variables))]
@@ -2183,7 +2212,7 @@ fn threat_channel(
     // failure degrades to the primary classifier - it never disables the
     // AI subsystem.
     #[cfg(feature = "verifier-onnx")]
-    let threat = wrap_verifier(threat, settings, logs, learned_reference);
+    let threat = wrap_verifier(threat, settings, settings_swap, logs, learned_reference);
     // Network evidence sits outside the verifier: a feed listing outranks a
     // MiniLM dispute, and it is the second opinion an install without ONNX
     // has. It reads `ai.network_evidence` live, so it is always in place.
@@ -2543,6 +2572,7 @@ fn load_primary(
 fn wrap_verifier(
     inner: Box<dyn DomainClassifier + Send + Sync>,
     settings: &AiSettings,
+    settings_swap: &Arc<ArcSwap<AiSettings>>,
     logs: &Arc<LogStore>,
     learned_reference: &Path,
 ) -> Box<dyn DomainClassifier + Send + Sync> {
@@ -2573,11 +2603,10 @@ fn wrap_verifier(
                     settings.verifier_model_path
                 ),
             );
-            Box::new(verify::VerifyingBackend::new(
-                inner,
-                verifier,
-                settings.verifier_threshold,
-            ))
+            Box::new(
+                verify::VerifyingBackend::new(inner, verifier, settings.verifier_threshold)
+                    .with_binary_policy(settings_swap.clone()),
+            )
         }
         Err(e) => {
             logs.push(

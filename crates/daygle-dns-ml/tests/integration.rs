@@ -941,6 +941,77 @@ fn engine(dir: &TempDir, settings: AiSettings) -> Arc<AiEngine> {
 }
 
 #[test]
+fn binary_name_model_blocks_without_enabled_families_and_respects_policy() {
+    let _training = training_guard();
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("binary.bin");
+    let threat_label = daygle_dns_ml::backend::BINARY_THREAT_LABEL;
+    let pairs: Vec<_> = (0..70)
+        .flat_map(|i| {
+            [
+                (
+                    threat_label.to_string(),
+                    format!("credentialgrabber-{i}.example"),
+                ),
+                (
+                    "benign".to_string(),
+                    format!("communitylibrary-{i}.example"),
+                ),
+            ]
+        })
+        .collect();
+    daygle_dns_ml::learn::train(&pairs, &path).unwrap();
+    let mut config = AiSettings {
+        model_path: path.to_string_lossy().into_owned(),
+        network_evidence: false,
+        auto_block_categories: Vec::new(),
+        auto_block_removals: daygle_dns_core::config::THREAT_FAMILIES
+            .iter()
+            .map(|family| family.to_string())
+            .collect(),
+        block_threshold: 0.75,
+        ..settings(AiMode::Enforce)
+    };
+    assert!(config.threat_labels().is_empty());
+    config.authority.enabled = true;
+    config.authority.model_stage = AuthorityStage::Monitor;
+    let ai = engine(&dir, config.clone());
+    assert!(ai.binary_name_model_active());
+    let suspicious = "credentialgrabber-12.example";
+    let ordinary = "communitylibrary-12.example";
+    ai.store.observe(suspicious).unwrap();
+    ai.store.observe(ordinary).unwrap();
+    ai.scanner.run_cycle(0, zone_store(&dir).as_ref()).unwrap();
+    let finding = ai.store.verdict(suspicious, "threat").unwrap().unwrap();
+    assert_eq!(finding.category, threat_label);
+    assert!(finding.threat_score >= config.block_threshold);
+    assert!(!ai.snapshot().load().contains_key(suspicious));
+    assert_ne!(
+        ai.store
+            .verdict(ordinary, "threat")
+            .unwrap()
+            .unwrap()
+            .severity,
+        "threat"
+    );
+    assert_ne!(
+        ai.store
+            .verdict(suspicious, "content")
+            .unwrap()
+            .unwrap()
+            .category,
+        threat_label
+    );
+
+    config.authority.model_stage = AuthorityStage::Enforce;
+    ai.apply_settings(&config);
+    assert!(ai.snapshot().load().contains_key(suspicious));
+    config.auto_block_removals.push(threat_label.to_string());
+    ai.apply_settings(&config);
+    assert!(!ai.snapshot().load().contains_key(suspicious));
+}
+
+#[test]
 fn dropping_the_engine_releases_the_scanner_and_activation_hook() {
     let dir = TempDir::new().unwrap();
     let ai = engine(&dir, settings(AiMode::Train));

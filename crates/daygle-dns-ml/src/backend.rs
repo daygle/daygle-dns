@@ -101,6 +101,17 @@ pub struct Verdict {
     pub threat_score: Option<f32>,
 }
 
+/// Reserved output of a classifier trained on explicit binary outcomes.
+pub const BINARY_THREAT_LABEL: &str = "binary-threat";
+pub(crate) const BINARY_BACKEND_NAME: &str = "fasttext-binary";
+
+pub(crate) fn is_binary_backend(name: &str) -> bool {
+    name == BINARY_BACKEND_NAME
+        || name
+            .strip_prefix(BINARY_BACKEND_NAME)
+            .is_some_and(|suffix| suffix.starts_with('+'))
+}
+
 /// Input delivered to a backend for one domain.
 #[derive(Debug, Clone, Default)]
 pub struct ClassificationInput {

@@ -20,6 +20,9 @@
 //! still outranks anything derived here.
 
 use crate::backend::{ClassificationInput, DomainClassifier, Severity, Verdict};
+use arc_swap::ArcSwap;
+use daygle_dns_core::config::AiSettings;
+use std::sync::Arc;
 
 /// Any primary + verifier pair. `threshold` (`ai.verifier_threshold`,
 /// default 0.35 cosine for MiniLM) is where the verifier's answer starts to
@@ -38,6 +41,7 @@ pub struct VerifyingBackend<B, V> {
     /// scan's worker threads, and asking the verifier for an owned name on
     /// every unverified verdict was a needless allocation there.
     verifier_name: String,
+    binary_policy: Option<Arc<ArcSwap<AiSettings>>>,
 }
 
 impl<B, V> VerifyingBackend<B, V>
@@ -54,7 +58,16 @@ where
             threshold,
             name,
             verifier_name,
+            binary_policy: None,
         }
+    }
+
+    #[cfg(any(feature = "verifier-onnx", test))]
+    pub(crate) fn with_binary_policy(mut self, settings: Arc<ArcSwap<AiSettings>>) -> Self {
+        if crate::backend::is_binary_backend(&self.name) {
+            self.binary_policy = Some(settings);
+        }
+        self
     }
 }
 
@@ -119,6 +132,14 @@ where
             Some(v) if v.category.eq_ignore_ascii_case(&base.category) => {
                 Some(corroborated(v, base))
             }
+            Some(v)
+                if base.category == crate::backend::BINARY_THREAT_LABEL
+                    && self.binary_policy.as_ref().is_some_and(|settings| {
+                        settings.load().is_auto_block_category(&v.category)
+                    }) =>
+            {
+                Some(corroborated(v, base))
+            }
             Some(v) => {
                 // A confident disagreement on the category destroys the
                 // threat's plausibility even if the verifier is itself just
@@ -149,7 +170,15 @@ mod tests {
     struct Fixed(Option<Verdict>);
     impl DomainClassifier for Fixed {
         fn name(&self) -> String {
-            "fixed".to_string()
+            if self
+                .0
+                .as_ref()
+                .is_some_and(|v| v.category == crate::backend::BINARY_THREAT_LABEL)
+            {
+                crate::backend::BINARY_BACKEND_NAME.to_string()
+            } else {
+                "fixed".to_string()
+            }
         }
         fn classify(&self, _input: &ClassificationInput) -> Option<Verdict> {
             self.0.clone()
@@ -187,6 +216,32 @@ mod tests {
         assert_eq!(v.severity, Severity::Threat);
         assert_eq!(v.confidence, 0.9);
         assert!(v.evidence.contains("corroborated"));
+    }
+
+    #[test]
+    fn binary_finding_keeps_the_verifiers_ordinary_and_suppressed_vetoes() {
+        let settings = Arc::new(ArcSwap::from_pointee(AiSettings::default()));
+        let check = |label| {
+            VerifyingBackend::new(
+                Fixed(Some(verdict(
+                    crate::backend::BINARY_THREAT_LABEL,
+                    0.8,
+                    Severity::Threat,
+                ))),
+                Fixed(Some(verdict(label, 0.9, Severity::Info))),
+                0.35,
+            )
+            .with_binary_policy(settings.clone())
+            .classify(&threat_input())
+            .unwrap()
+            .severity
+        };
+        assert_eq!(check("phishing"), Severity::Threat);
+        assert_eq!(check("news"), Severity::Disputed);
+        let mut suppressed = (*settings.load_full()).clone();
+        suppressed.auto_block_removals.push("phishing".to_string());
+        settings.store(Arc::new(suppressed));
+        assert_eq!(check("phishing"), Severity::Disputed);
     }
 
     #[test]
