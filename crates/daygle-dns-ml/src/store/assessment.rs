@@ -342,11 +342,23 @@ impl AiStore {
         fusion: FusionMode,
         score: &AssessmentScore,
     ) -> Result<()> {
+        self.save_assessment_for_identity(domain, channel, fusion, score, None)
+    }
+
+    pub(crate) fn save_assessment_for_identity(
+        &self,
+        domain: &str,
+        channel: &str,
+        fusion: FusionMode,
+        score: &AssessmentScore,
+        identity: Option<&str>,
+    ) -> Result<()> {
         let conn = self.lock()?;
         conn.execute(
             "UPDATE ai_verdicts
              SET calibrated_score = ?3, calibration_version = ?4, fusion_score = ?5,
-                 assessment_score = ?6, assessment_mode = ?7
+                 assessment_score = ?6, assessment_mode = ?7,
+                 finding_version = COALESCE(?8, finding_version)
              WHERE domain = ?1 AND channel = ?2",
             params![
                 domain,
@@ -356,6 +368,7 @@ impl AiStore {
                 score.fused.unwrap_or(0.0),
                 score.assessment,
                 fusion.as_str(),
+                identity,
             ],
         )?;
         Ok(())
@@ -1008,20 +1021,26 @@ impl AiStore {
     /// Explicit reviews of current findings. An allow exemption is a policy
     /// decision and does not by itself establish that the finding was wrong.
     pub(crate) fn authority_reviews(&self, now: i64) -> Result<Vec<(String, i64, i64, i64)>> {
-        self.authority_review_rows(now, None, None)
+        self.authority_review_rows(now, None, None, None)
     }
 
     /// [`Self::authority_reviews`] restricted to findings produced under the
     /// scoring version in force: the calibration map and fusion mode recorded
     /// on the verdict. A review of an older version's finding is provenance,
     /// not evidence for advancing the version now deciding.
-    pub(crate) fn authority_reviews_for_scoring(
+    pub(crate) fn authority_reviews_for_identity(
         &self,
         now: i64,
         calibration_version: &str,
         assessment_mode: &str,
+        identity: Option<&str>,
     ) -> Result<Vec<(String, i64, i64, i64)>> {
-        self.authority_review_rows(now, Some(calibration_version), Some(assessment_mode))
+        self.authority_review_rows(
+            now,
+            Some(calibration_version),
+            Some(assessment_mode),
+            identity,
+        )
     }
 
     /// The review counts, optionally restricted to the scoring version. `None`
@@ -1031,6 +1050,7 @@ impl AiStore {
         now: i64,
         calibration_version: Option<&str>,
         assessment_mode: Option<&str>,
+        identity: Option<&str>,
     ) -> Result<Vec<(String, i64, i64, i64)>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
@@ -1048,12 +1068,14 @@ impl AiStore {
                AND v.severity = 'threat' AND v.expires_at > ?1
                AND (?2 IS NULL OR v.calibration_version = ?2)
                AND (?3 IS NULL OR v.assessment_mode = ?3)
+                 AND (?4 IS NULL OR v.finding_version = ?4)
              GROUP BY source",
         )?;
         let rows = stmt
-            .query_map(params![now, calibration_version, assessment_mode], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-            })?
+            .query_map(
+                params![now, calibration_version, assessment_mode, identity],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }

@@ -27,6 +27,8 @@ const DEFAULT_THREAT_CATEGORIES: &[&str] = &["malware", "phishing"];
 pub struct FastTextBackend {
     model: fasttext::FastText,
     threat_categories: Vec<String>,
+    binary: bool,
+    starter: bool,
 }
 
 impl FastTextBackend {
@@ -44,6 +46,18 @@ impl FastTextBackend {
         // the rest is info. (The exact threat label set is config's job -
         // `AiSettings::threat_labels`.)
         let labels = model.get_labels().0;
+        let binary = labels.len() == 2
+            && labels.iter().any(|label| label == "__label__binary-threat")
+            && labels.iter().any(|label| label == "__label__benign");
+        if labels
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case("__label__binary-threat"))
+            && !binary
+        {
+            return Err(DaygleError::Config(
+                "binary-threat is reserved for a model with exactly binary-threat and benign labels".to_string(),
+            ));
+        }
         let threat_categories = labels
             .into_iter()
             .filter_map(|l| {
@@ -58,13 +72,26 @@ impl FastTextBackend {
         Ok(Self {
             model,
             threat_categories,
+            binary,
+            starter: binary
+                && model_path
+                    .as_ref()
+                    .file_name()
+                    .is_some_and(|name| name == crate::learn::BINARY_STARTER_FILE),
         })
     }
 }
 
 impl DomainClassifier for FastTextBackend {
     fn name(&self) -> String {
-        "fasttext".to_string()
+        if self.starter {
+            crate::backend::BINARY_STARTER_BACKEND_NAME
+        } else if self.binary {
+            crate::backend::BINARY_BACKEND_NAME
+        } else {
+            "fasttext"
+        }
+        .to_string()
     }
 
     fn categories(&self) -> Vec<String> {

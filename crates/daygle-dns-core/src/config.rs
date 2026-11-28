@@ -4654,6 +4654,16 @@ impl DaygleConfig {
                 "ai.authority.demote_min_samples must be >= 1".to_string(),
             ));
         }
+        if ai.authority.advance_min_reviews < 1 {
+            return Err(DaygleError::Config(
+                "ai.authority.advance_min_reviews must be >= 1".to_string(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&ai.authority.advance_fp_rate) {
+            return Err(DaygleError::Config(
+                "ai.authority.advance_fp_rate must be in 0.0..=1.0".to_string(),
+            ));
+        }
         if !(0.0..=1.0).contains(&ai.category_confidence_floor) {
             return Err(DaygleError::Config(
                 "ai.category_confidence_floor must be in 0.0..=1.0".to_string(),

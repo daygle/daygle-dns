@@ -292,12 +292,43 @@ impl AiEngine {
             );
             true
         };
+        let configured = if settings.model_path.trim() == learn::BUILTIN_BINARY_MODEL {
+            let starter = database_path.with_file_name(learn::BINARY_STARTER_FILE);
+            learn::prepare_binary_starter(&starter)?;
+            starter.to_string_lossy().into_owned()
+        } else {
+            settings.model_path.clone()
+        };
+        let learned_binary = learn::is_binary_model(&learned_shared);
+        let configured_binary = learn::is_binary_model(Path::new(configured.trim()));
+        let recorded_binary_reference = learn::binary_training_record(&learned_shared)
+            .as_ref()
+            .and_then(|record| record["reference"].as_str())
+            == Some(settings.model_path.trim());
+        let recovered_binary_reference =
+            if configured_binary && learned_binary && !recorded_binary_reference {
+                store.active_candidate()?.is_some_and(|active| {
+                    active.validation_report["binary_reference"].as_str()
+                        == Some(settings.model_path.trim())
+                        && threshold::model_version(&learned_shared.to_string_lossy())
+                            == format!("sha256:{}", active.model_sha256)
+                })
+            } else {
+                false
+            };
         let shared_learned = recovered_scheduled_activation.is_some()
-            || pick(&learned_shared, &settings.model_path, "classifier");
+            || if configured_binary {
+                learned_binary
+                    && (recorded_binary_reference || recovered_binary_reference)
+                    && (settings.model_path.trim() == learn::BUILTIN_BINARY_MODEL
+                        || pick(&learned_shared, &configured, "classifier"))
+            } else {
+                !learned_binary && pick(&learned_shared, &configured, "classifier")
+            };
         let shared_path = if shared_learned {
             learned_shared.to_string_lossy().into_owned()
         } else {
-            settings.model_path.clone()
+            configured
         };
         // Both channels run the one model.
         let content = content_channel(&shared_path, &logs)?;
@@ -313,9 +344,13 @@ impl AiEngine {
         // A model file that changed while the server was down (a release
         // bundle, a new configured path) re-checks verdicts like a promotion.
         note_live_model(&store, &shared_path, &logs);
+        let classifier_digest = Arc::new(ArcSwap::from_pointee(threshold::model_version(
+            &shared_path,
+        )));
 
         // The channels sit behind reloadable handles, so a new model goes
         // live without a restart.
+        let binary_name_model = backend::is_binary_backend(&threat.name());
         let content_swap = backend::Reloadable::new(content);
         let threat_swap = backend::Reloadable::new(threat);
         let snapshot = Arc::new(ArcSwap::from_pointee(BlockSnapshot::new()));
@@ -337,10 +372,13 @@ impl AiEngine {
             }
         };
         shared.retrainer.set_evidence(network.clone());
+        shared.retrainer.set_binary_name_model(binary_name_model);
 
         // Every model that goes live - a promotion, a manual retrain or a
         // rollback - goes through these.
         let install_model: ModelInstaller = {
+            let retrainer = Arc::downgrade(&shared.retrainer);
+            let classifier_digest = classifier_digest.clone();
             let settings = settings_swap.clone();
             let logs = logs.clone();
             let content_swap = content_swap.clone();
@@ -359,10 +397,14 @@ impl AiEngine {
                 let content = content_channel(&file, &logs)?;
                 let threat =
                     threat_channel(&file, &current, &settings, &logs, &reference, &network)?;
+                if let Some(retrainer) = retrainer.upgrade() {
+                    retrainer.set_binary_name_model(backend::is_binary_backend(&threat.name()));
+                }
                 content_swap.replace(content);
                 threat_swap.replace(threat);
                 announce(&logs, path == learned, "classifier", &file);
                 note_live_model(&store, &file, &logs);
+                classifier_digest.store(Arc::new(threshold::model_version(&file)));
                 model.store(Arc::new(file));
                 active.store(path == learned, std::sync::atomic::Ordering::Relaxed);
                 Ok(())
@@ -435,9 +477,10 @@ impl AiEngine {
             categories.clone(),
             logs.clone(),
         );
-        scanner.set_maintenance(maintenance.clone());
+        scanner.set_maintenance(&maintenance);
         scanner.set_page_model(page_model.clone());
         scanner.set_intel(intel.clone());
+        scanner.set_classifier_digest(classifier_digest);
         // A promoted candidate is already in force at startup: its calibration
         // map and signal weights are what the scanner applies from the first
         // cycle. With no active candidate (every existing install) these stay
@@ -450,6 +493,7 @@ impl AiEngine {
         // again: fit and apply it to the model this start loaded, or it stays
         // off.
         let startup_model = shared.model.load_full();
+        restore_binary_rollback_scoring(&store, &scanner, &settings_swap, &startup_model)?;
         let mismatched_candidate = if let Some(active) = store.active_candidate()? {
             let expected = if active.model_sha256 == "builtin" {
                 "builtin".to_string()
@@ -522,10 +566,16 @@ impl AiEngine {
                 }
                 let mut seen = std::collections::HashSet::new();
                 let mut reviewed = Vec::new();
-                for correction in store.corrections()? {
-                    if !(started..ends).contains(&correction.created_at) {
-                        continue;
-                    }
+                let binary = learn::is_binary_model(path);
+                let index = intel.index();
+                if binary {
+                    reviewed = learn::binary_outcomes(&store, settings, &index, true, ends)?;
+                }
+                for correction in if binary {
+                    Vec::new()
+                } else {
+                    store.corrections_between(started, ends)?
+                } {
                     let domain = correction
                         .domain
                         .trim()
@@ -539,7 +589,7 @@ impl AiEngine {
                         "not_threat" => false,
                         _ => continue,
                     };
-                    reviewed.push((domain, threat));
+                    reviewed.push((domain, threat, threshold::LabelSource::OperatorCorrection));
                     if reviewed.len() == 512 {
                         break;
                     }
@@ -548,14 +598,22 @@ impl AiEngine {
                     return Ok(serde_json::json!({
                         "scope": "hostname_and_network",
                         "passed": false,
-                        "reason": "insufficient explicit reviews during the shadow trial",
+                        "reason": if binary { "insufficient independent held-out binary outcomes" }
+                            else { "insufficient explicit reviews during the shadow trial" },
                         "reviews": reviewed.len(),
                     }));
                 }
                 let frozen = Arc::new(ArcSwap::from_pointee(settings.clone()));
                 let backend =
                     threat_channel(&model_path, settings, &frozen, &logs, &reference, &network)?;
-                let index = intel.index();
+                // A listing used as the label must not also boost the score
+                // that gets credit for detecting this evaluation name.
+                let withheld_intel = intel::IntelIndex::default();
+                let replay_index = if binary {
+                    &withheld_intel
+                } else {
+                    index.as_ref()
+                };
                 let weights = scanner.signal_weights();
                 // Replay each reviewed domain through the same assessment,
                 // page/LLM evidence and policy rails the live gate uses. The
@@ -572,9 +630,11 @@ impl AiEngine {
                 let mut escalation_blocked = 0usize;
                 let samples = reviewed
                     .into_iter()
-                    .map(|(domain, threat)| {
+                    .map(|(domain, threat, label)| {
+                        let verdict = backend
+                            .classify(&backend::ClassificationInput::domain_only(domain.clone()));
                         let outcome =
-                            replay::replay_with(&context, backend.as_ref(), &domain, &index, ends);
+                            context.replay_review(&domain, verdict.as_ref(), replay_index, ends);
                         if outcome.policy_blocked.is_some() {
                             policy_blocked += 1;
                             if outcome.threat {
@@ -585,15 +645,26 @@ impl AiEngine {
                             registrable: assessment::registrable(&domain),
                             domain,
                             score: outcome.score,
-                            group: threshold::Group::Correction,
-                            label: threshold::LabelSource::OperatorCorrection,
+                            group: match label {
+                                threshold::LabelSource::FeedListing => threshold::Group::Confirmed,
+                                threshold::LabelSource::Popular => threshold::Group::Established,
+                                _ => threshold::Group::Correction,
+                            },
+                            label,
                             threat: Some(threat),
                             scored_at: ends,
                             policy_blocked: outcome.policy_blocked,
                         }
                     })
                     .collect();
-                let mut report = threshold::tune_replayed_scores(samples, &model, settings, ends);
+                let mut report = if binary {
+                    threshold::tune_replayed_scores_for_model(samples, &model, settings, ends, true)
+                } else {
+                    threshold::tune_replayed_scores(samples, &model, settings, ends)
+                };
+                if binary {
+                    report["binary_reference"] = serde_json::json!(settings.model_path.trim());
+                }
                 report["scope"] = serde_json::json!("hostname_page_llm_network_and_policy");
                 report["policy_rails"] = context.rails();
                 report["policy_blocked"] = serde_json::json!(policy_blocked);
@@ -608,6 +679,21 @@ impl AiEngine {
             let settings = settings_swap.clone();
             let logs = logs.clone();
             move |path: &Path| {
+                if let Err(error) = restore_binary_rollback_scoring(
+                    &store,
+                    &installed_scanner,
+                    &settings,
+                    &path.to_string_lossy(),
+                ) {
+                    installed_scanner.stage_scoring(true);
+                    logs.warn(
+                        "ai",
+                        format!(
+                            "could not restore scoring for the rolled-back binary model: {error}"
+                        ),
+                    );
+                    return;
+                }
                 retire_calibration_for_changed_model(
                     &store,
                     &installed_scanner,
@@ -649,8 +735,13 @@ impl AiEngine {
         // once, after the engine exists, so the retrainer can call back into
         // the activation service without owning the configuration.
         engine.shared.retrainer.set_activation(Box::new({
-            let engine = engine.clone();
+            let owner = Arc::downgrade(&engine);
             move |artifact, live, activation| {
+                let engine = owner.upgrade().ok_or_else(|| {
+                    DaygleError::Internal(
+                        "the engine shut down before scheduled activation".to_string(),
+                    )
+                })?;
                 let (promoted, undo) =
                     engine.record_scheduled_activation(artifact, live, activation)?;
                 let engine_for_undo = engine.clone();
@@ -658,6 +749,7 @@ impl AiEngine {
                 Ok(crate::maintain::ActivationUndo::new(
                     move || engine_for_undo.undo_scheduled_activation(undo),
                     move || {
+                        engine_for_complete.publish_scheduled_scoring(&promoted);
                         engine_for_complete
                             .shared
                             .retrainer
@@ -1067,6 +1159,26 @@ impl AiEngine {
     /// The threat-detection pipeline actually running (verifier included).
     pub fn threat_backend_name(&self) -> String {
         self.scanner.threat_backend_name()
+    }
+
+    pub fn binary_name_model_active(&self) -> bool {
+        backend::is_binary_backend(&self.threat_backend_name())
+    }
+
+    pub fn automatic_threat_label_role(
+        &self,
+        category: &str,
+    ) -> daygle_dns_core::config::LabelRole {
+        use daygle_dns_core::config::LabelRole;
+        let role = self.settings.load().label_role(category);
+        if category == backend::BINARY_THREAT_LABEL
+            && self.binary_name_model_active()
+            && role != LabelRole::Suppressed
+        {
+            LabelRole::Threat
+        } else {
+            role
+        }
     }
 
     /// Domains that qualify for auto-blocking now, counted by category:
@@ -1494,6 +1606,12 @@ impl AiEngine {
                 "auto_block_categories": settings.auto_block_categories,
                 "auto_block_removals": settings.auto_block_removals,
                 "threat_labels": settings.threat_labels(),
+                "binary_previous_scoring": activation.report.get("binary_reference").map(|_| serde_json::json!({
+                    "model": threshold::model_version(&self.live_model_path()),
+                    "threshold": previous_threshold,
+                    "calibration": previous_calibration,
+                    "weights": previous_weights,
+                })),
             }),
             validation_report: activation.report.clone(),
             metrics: activation
@@ -1509,18 +1627,13 @@ impl AiEngine {
             previous_weights,
             previous_threshold,
         };
-        self.scanner.set_calibration(promoted.calibration.clone());
-        self.scanner
-            .set_signal_weights(promoted.signal_weights.clone());
-        let mut live = (*settings).clone();
-        live.block_threshold = promoted.block_threshold;
-        self.settings.store(Arc::new(live));
-        match self.rescore_stored_verdicts("a scheduled promotion") {
-            Ok(_) => {
-                self.refresh_snapshot_now();
-                self.trigger_rescan();
-                Ok((promoted, undo))
-            }
+        self.scanner.stage_scoring(true);
+        match self.store.rescore_assessments(
+            settings.fusion,
+            &promoted.signal_weights,
+            promoted.calibration.as_ref(),
+        ) {
+            Ok(_) => Ok((promoted, undo)),
             Err(e) => {
                 let failures = self.undo_scheduled_activation(undo);
                 Err(failed_change(
@@ -1530,6 +1643,18 @@ impl AiEngine {
                 ))
             }
         }
+    }
+
+    fn publish_scheduled_scoring(&self, promoted: &store::CandidateVersion) {
+        self.scanner.set_calibration(promoted.calibration.clone());
+        self.scanner
+            .set_signal_weights(promoted.signal_weights.clone());
+        let mut live = (*self.settings.load_full()).clone();
+        live.block_threshold = promoted.block_threshold;
+        self.settings.store(Arc::new(live));
+        self.scanner.stage_scoring(false);
+        self.refresh_snapshot_now();
+        self.trigger_rescan();
     }
 
     /// Take a passed trial's scoring back out of force after the model it was
@@ -1598,6 +1723,7 @@ impl AiEngine {
             ));
         }
         if failures.is_empty() {
+            self.scanner.stage_scoring(false);
             self.refresh_snapshot_now();
             self.trigger_rescan();
         }
@@ -1996,17 +2122,7 @@ impl AiEngine {
     /// stage in force.
     pub fn authority_status(&self) -> Result<serde_json::Value> {
         let settings = self.settings.load_full();
-        let calibration_version = self
-            .scanner
-            .calibration_map()
-            .map(|map| map.version)
-            .unwrap_or_default();
-        let decisions = authority::evaluate_for_scoring(
-            &self.store,
-            &settings.authority,
-            &calibration_version,
-            settings.fusion.as_str(),
-        )?;
+        let decisions = self.scanner.authority_decisions(&settings)?;
         let now = chrono::Utc::now().timestamp();
         let reviews = self.store.authority_reviews(now)?;
         let reviewed_sources = [authority::Source::Feed, authority::Source::Model]
@@ -2148,11 +2264,13 @@ fn content_channel(
     model: &str,
     logs: &Arc<LogStore>,
 ) -> Result<Box<dyn DomainClassifier + Send + Sync>> {
-    Ok(Box::new(channel::ChannelBackend::content(load_primary(
-        model,
-        Channel::Content,
-        logs,
-    )?)))
+    let primary = load_primary(model, Channel::Content, logs)?;
+    let content = if backend::is_binary_backend(&primary.name()) {
+        Box::new(heuristic::HeuristicBackend)
+    } else {
+        primary
+    };
+    Ok(Box::new(channel::ChannelBackend::content(content)))
 }
 
 #[cfg_attr(not(feature = "verifier-onnx"), allow(unused_variables))]
@@ -2174,7 +2292,7 @@ fn threat_channel(
     // failure degrades to the primary classifier - it never disables the
     // AI subsystem.
     #[cfg(feature = "verifier-onnx")]
-    let threat = wrap_verifier(threat, settings, logs, learned_reference);
+    let threat = wrap_verifier(threat, settings, settings_swap, logs, learned_reference);
     // Network evidence sits outside the verifier: a feed listing outranks a
     // MiniLM dispute, and it is the second opinion an install without ONNX
     // has. It reads `ai.network_evidence` live, so it is always in place.
@@ -2262,6 +2380,57 @@ fn failed_change(
 /// compare every verdict by a calibration of the previous model's confidence.
 /// Never fails the caller: the model is already live, so a logged, named
 /// failure is better than leaving the map applied silently.
+/// Reconcile a watcher rollback after its file rotation, including a restart
+/// between restoring the predecessor artifact and restoring its scoring.
+fn restore_binary_rollback_scoring(
+    store: &AiStore,
+    scanner: &Scanner,
+    settings: &ArcSwap<AiSettings>,
+    path: &str,
+) -> Result<()> {
+    let Some(active) = store.active_candidate()? else {
+        return Ok(());
+    };
+    let digest = threshold::model_version(path);
+    let previous = &active.scoring_config["binary_previous_scoring"];
+    if previous["model"].as_str() != Some(digest.as_str())
+        || digest == format!("sha256:{}", active.model_sha256)
+    {
+        return Ok(());
+    }
+    let threshold = previous["threshold"].as_f64().ok_or_else(|| {
+        DaygleError::Database("binary rollback has no predecessor threshold".to_string())
+    })? as f32;
+    let calibration: Option<calibration::CalibrationMap> =
+        serde_json::from_value(previous["calibration"].clone()).map_err(|error| {
+            DaygleError::Database(format!("invalid binary rollback calibration: {error}"))
+        })?;
+    let weights: fusion::SignalWeights = serde_json::from_value(previous["weights"].clone())
+        .map_err(|error| {
+            DaygleError::Database(format!("invalid binary rollback signal weights: {error}"))
+        })?;
+    let mut config = (*settings.load_full()).clone();
+    config.block_threshold = threshold;
+    scanner.stage_scoring(true);
+    store.rescore_assessments(config.fusion, &weights, calibration.as_ref())?;
+    let previous_version_matches = active.superseded_id != 0
+        && store
+            .candidate(active.superseded_id)?
+            .is_some_and(|version| digest == format!("sha256:{}", version.model_sha256));
+    if previous_version_matches {
+        store.rollback_active_candidate()?;
+    } else {
+        store.activate_calibration(calibration.as_ref().map(|map| map.version.as_str()))?;
+        store.retire_active_candidate(active.id)?;
+    }
+    scanner.set_calibration(calibration);
+    scanner.set_signal_weights(weights);
+    settings.store(Arc::new(config));
+    scanner.stage_scoring(false);
+    scanner.refresh_snapshot(&settings.load_full(), chrono::Utc::now().timestamp());
+    Ok(())
+}
+
 fn retire_calibration_for_changed_model(
     store: &AiStore,
     scanner: &Scanner,
@@ -2534,6 +2703,7 @@ fn load_primary(
 fn wrap_verifier(
     inner: Box<dyn DomainClassifier + Send + Sync>,
     settings: &AiSettings,
+    settings_swap: &Arc<ArcSwap<AiSettings>>,
     logs: &Arc<LogStore>,
     learned_reference: &Path,
 ) -> Box<dyn DomainClassifier + Send + Sync> {
@@ -2564,11 +2734,10 @@ fn wrap_verifier(
                     settings.verifier_model_path
                 ),
             );
-            Box::new(verify::VerifyingBackend::new(
-                inner,
-                verifier,
-                settings.verifier_threshold,
-            ))
+            Box::new(
+                verify::VerifyingBackend::new(inner, verifier, settings.verifier_threshold)
+                    .with_binary_policy(settings_swap.clone()),
+            )
         }
         Err(e) => {
             logs.push(

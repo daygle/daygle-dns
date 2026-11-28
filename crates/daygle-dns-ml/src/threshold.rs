@@ -39,16 +39,26 @@ use crate::store::AiStore;
 /// held-out names, then select and validate its calibrated threshold.
 /// A zero score means replay found no enforceable verdict for that name.
 pub(crate) fn tune_replayed_scores(
+    samples: Vec<Sample>,
+    model: &str,
+    settings: &AiSettings,
+    now: i64,
+) -> serde_json::Value {
+    tune_replayed_scores_for_model(samples, model, settings, now, false)
+}
+
+pub(crate) fn tune_replayed_scores_for_model(
     mut samples: Vec<Sample>,
     model: &str,
     settings: &AiSettings,
     now: i64,
+    include_no_signal: bool,
 ) -> serde_json::Value {
     use crate::calibration::{self, CalibrationMap, Labelled};
 
     let (holdout, tuning): (Vec<_>, Vec<_>) = samples
         .iter()
-        .filter(|sample| sample.score > 0.0)
+        .filter(|sample| include_no_signal || sample.score > 0.0)
         .filter_map(|sample| {
             Some((
                 held_out(&sample.domain),
@@ -124,6 +134,8 @@ pub enum LabelSource {
     OperatorCorrection,
     /// A maintained threat feed lists it.
     FeedListing,
+    /// Direct, independently corroborated page evidence.
+    DirectPage,
     /// Many clients have used it for weeks: a presumption of benign, not a
     /// guarantee.
     Established,
@@ -138,6 +150,7 @@ impl LabelSource {
         match self {
             Self::OperatorCorrection => "operator_correction",
             Self::FeedListing => "feed_listing",
+            Self::DirectPage => "direct_page",
             Self::Established => "established",
             Self::Popular => "popular",
             Self::Unseen => "unseen",
@@ -148,7 +161,7 @@ impl LabelSource {
     pub fn trust(self) -> &'static str {
         match self {
             Self::OperatorCorrection => "strong",
-            Self::FeedListing => "moderate",
+            Self::FeedListing | Self::DirectPage => "moderate",
             Self::Established | Self::Popular => "weak",
             Self::Unseen => "none",
         }
@@ -161,6 +174,7 @@ impl LabelSource {
             Self::FeedListing => {
                 "a curated list, but feeds miss and over-list; not ground truth on its own"
             }
+            Self::DirectPage => "corroborating signals on the original page; used for training only",
             Self::Established => {
                 "long use on this network presumes benign; a compromised long-used host would be mislabelled"
             }
@@ -644,6 +658,9 @@ fn collect_rows(
             let (group, label, threat) = if let Some((action, category)) = corrections.get(&key) {
                 let threat = if action == "category" {
                     settings.is_auto_block_category(category)
+                        || (category == crate::backend::BINARY_THREAT_LABEL
+                            && settings.label_role(category)
+                                != daygle_dns_core::config::LabelRole::Suppressed)
                 } else {
                     // `allow` and `not_threat` both mean "not a threat".
                     false

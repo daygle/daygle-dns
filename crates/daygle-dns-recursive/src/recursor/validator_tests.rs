@@ -7,6 +7,7 @@
 //! has servers whose replies cannot be read, as `ptsecurity.com`'s are to any
 //! query carrying EDNS, so the parent's DS answer is all there is to go on.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,7 +19,7 @@ use hickory_proto::dnssec::{Algorithm, DigestType, Proof, SigningKey, TrustAncho
 use hickory_proto::op::{
     DnsRequest, DnsRequestOptions, DnsResponse, Message, OpCode, ResponseCode,
 };
-use hickory_proto::rr::rdata::{A, SOA};
+use hickory_proto::rr::rdata::{A, NS, SOA};
 use hickory_proto::rr::{DNSClass, LowerName, Name, RData, Record, RecordType};
 use hickory_resolver::net::dnssec::DnssecDnsHandle;
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
@@ -268,4 +269,100 @@ async fn an_answer_under_a_signed_delegation_with_unreadable_servers_stays_bogus
 #[tokio::test]
 async fn an_answer_under_a_name_that_is_no_delegation_stays_bogus() {
     assert_eq!(proof_of("www.inside.").await, Proof::Bogus);
+}
+
+/// A DS denial can come back with an unsigned SOA owned by the very name
+/// whose DS is being validated. The trusted root can prove the enclosing
+/// delegation unsigned without relying on that denial to prove itself.
+#[tokio::test]
+async fn a_ds_denial_does_not_reenter_its_own_validation() {
+    #[derive(Clone)]
+    struct Nested {
+        root: Fake,
+        intermediate_ds: Arc<AtomicUsize>,
+    }
+
+    impl DnsHandle for Nested {
+        type Response = BoxStream<'static, Result<DnsResponse, NetError>>;
+        type Runtime = TokioRuntimeProvider;
+
+        fn send(&self, request: DnsRequest) -> Self::Response {
+            let query = request.queries.first().unwrap();
+            let owner = query.name().clone();
+            let intermediate = name("middle.unsigned.");
+            let child = name("child.middle.unsigned.");
+            let host = name("www.child.middle.unsigned.");
+            let mut message = Message::response(request.metadata.id, OpCode::Query);
+            message.queries.push(query.clone());
+            message.metadata.authoritative = true;
+            match query.query_type() {
+                RecordType::A if owner == host => {
+                    message.add_answer(Record::from_rdata(
+                        owner,
+                        300,
+                        RData::A(A::new(198, 51, 100, 7)),
+                    ));
+                }
+                RecordType::NS
+                    if owner == child || owner == intermediate || owner == name("unsigned.") =>
+                {
+                    message.add_answer(Record::from_rdata(
+                        owner,
+                        300,
+                        RData::NS(NS(name("ns.example."))),
+                    ));
+                }
+                RecordType::NS if owner == host => {}
+                RecordType::DS if owner == child || owner == intermediate => {
+                    if owner == intermediate
+                        && self.intermediate_ds.fetch_add(1, Ordering::Relaxed) >= 3
+                    {
+                        return stream::once(std::future::ready(Err(NetError::from(
+                            "repeated intermediate DS lookup",
+                        ))))
+                        .boxed();
+                    }
+                    message.add_authority(Record::from_rdata(
+                        owner,
+                        300,
+                        RData::SOA(SOA::new(
+                            name("ns.example."),
+                            name("hostmaster.example."),
+                            1,
+                            1800,
+                            900,
+                            604800,
+                            300,
+                        )),
+                    ));
+                }
+                _ => return self.root.send(request),
+            }
+            stream::once(std::future::ready(
+                DnsResponse::from_message(message).map_err(NetError::from),
+            ))
+            .boxed()
+        }
+    }
+
+    let root = Arc::new(Root::new());
+    let anchor = Arc::new(root.anchor.clone());
+    let intermediate_ds = Arc::new(AtomicUsize::new(0));
+    let validator = DnssecDnsHandle::with_trust_anchor(
+        Nested {
+            root: Fake(root),
+            intermediate_ds: Arc::clone(&intermediate_ds),
+        },
+        anchor,
+    );
+    let response = validator
+        .lookup(
+            hickory_proto::op::Query::query(name("www.child.middle.unsigned."), RecordType::A),
+            DnsRequestOptions::default(),
+        )
+        .first_answer()
+        .await
+        .unwrap();
+    assert_eq!(response.answers[0].proof, Proof::Insecure);
+    assert_eq!(intermediate_ds.load(Ordering::Relaxed), 1);
 }

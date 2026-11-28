@@ -152,6 +152,7 @@ pub struct BlockCandidate {
     pub category: String,
     pub expires_at: i64,
     pub source: BlockSource,
+    pub backend: String,
 }
 
 /// One classification to store (see [`AiStore::save_verdicts`]).
@@ -232,6 +233,8 @@ const VERDICTS_TABLE: &str = "CREATE TABLE IF NOT EXISTS ai_verdicts (
     last_seen     INTEGER NOT NULL DEFAULT 0,
     page_fetched_at INTEGER NOT NULL DEFAULT 0,
     llm_checked_at INTEGER NOT NULL DEFAULT 0,
+    llm_reading   TEXT NOT NULL DEFAULT '',
+    finding_version TEXT NOT NULL DEFAULT '',
     threat_score  REAL NOT NULL DEFAULT 0,
     calibrated_score REAL NOT NULL DEFAULT 0,
     calibration_version TEXT NOT NULL DEFAULT '',
@@ -448,6 +451,18 @@ impl AiStore {
                 [],
             )?;
         }
+        if !has_column("llm_reading")? {
+            conn.execute(
+                "ALTER TABLE ai_verdicts ADD COLUMN llm_reading TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+        if !has_column("finding_version")? {
+            conn.execute(
+                "ALTER TABLE ai_verdicts ADD COLUMN finding_version TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
         // Threats the verifier disputed used to be stored as plain `info`
         // verdicts, which the block snapshot did not tell apart.
         conn.execute(
@@ -633,7 +648,7 @@ impl AiStore {
                 "UPDATE ai_verdicts
                  SET category = ?3, severity = ?4, status = ?5, confidence = ?6,
                      backend = ?7, evidence = ?8, classified_at = ?9, expires_at = ?10,
-                     threat_score = ?11
+                     threat_score = ?11, finding_version = '', llm_reading = '', llm_checked_at = 0
                  WHERE domain = ?1 AND channel = ?2 AND status = 'pending'",
             )?;
             for v in verdicts {
@@ -847,7 +862,8 @@ impl AiStore {
         // model-only one.
         let mut stmt = conn.prepare(&format!(
             "SELECT domain, category, expires_at,
-                    CASE WHEN instr(evidence, ', listed by ') > 0 THEN 'feed' ELSE 'model' END
+                    CASE WHEN instr(evidence, ', listed by ') > 0 THEN 'feed' ELSE 'model' END,
+                    backend
              FROM ai_verdicts
              WHERE channel = 'threat' AND status = 'classified'
                AND severity != 'disputed'
@@ -876,6 +892,7 @@ impl AiStore {
                         domain: r.get(0)?,
                         category: r.get(1)?,
                         expires_at: r.get(2)?,
+                        backend: r.get(4)?,
                         source: match r.get::<_, String>(3)?.as_str() {
                             "feed" => BlockSource::Feed,
                             _ => BlockSource::Model,
@@ -1209,7 +1226,10 @@ impl AiStore {
         note: &str,
         confidence: Option<f32>,
         category: Option<&str>,
+        reading: &crate::llm::LlmReading,
     ) -> Result<bool> {
+        let reading = serde_json::to_string(reading)
+            .map_err(|error| DaygleError::Database(error.to_string()))?;
         let conn = self.lock()?;
         let changed = conn.execute(
             "UPDATE ai_verdicts
@@ -1224,11 +1244,40 @@ impl AiStore {
                  status = CASE WHEN ?5 IS NOT NULL THEN 'classified' ELSE status END,
                  severity = CASE WHEN ?5 IS NOT NULL THEN 'info' ELSE severity END,
                  backend = CASE WHEN ?5 IS NOT NULL THEN 'llm' ELSE backend END,
-                 llm_checked_at = ?6
+                 llm_checked_at = ?6,
+                 llm_reading = ?7
              WHERE domain = ?1 AND channel = ?2",
-            params![domain, channel, note, confidence, category, now_epoch()],
+            params![
+                domain,
+                channel,
+                note,
+                confidence,
+                category,
+                now_epoch(),
+                reading
+            ],
         )?;
         Ok(changed > 0)
+    }
+
+    pub(crate) fn threat_llm_reading(
+        &self,
+        domain: &str,
+    ) -> Result<Option<crate::llm::LlmReading>> {
+        let conn = self.lock()?;
+        let reading: Option<String> = conn
+            .query_row(
+                "SELECT llm_reading FROM ai_verdicts WHERE domain = ?1 AND channel = 'threat'
+             AND llm_reading <> '' AND llm_checked_at >= classified_at",
+                [domain],
+                |row| row.get(0),
+            )
+            .optional()?;
+        reading
+            .map(|raw| {
+                serde_json::from_str(&raw).map_err(|error| DaygleError::Database(error.to_string()))
+            })
+            .transpose()
     }
 
     /// Domains whose category the categorizer is unsure of (below `below`
@@ -1560,17 +1609,21 @@ impl AiStore {
     /// Every operator correction, newest first: exemptions, "not a threat"
     /// marks and category relabels.
     pub fn corrections(&self) -> Result<Vec<CorrectionRow>> {
+        self.corrections_between(i64::MIN, i64::MAX)
+    }
+
+    pub(crate) fn corrections_between(&self, from: i64, to: i64) -> Result<Vec<CorrectionRow>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
             "SELECT domain, action, '' AS category, reason, created_at
-             FROM ai_overrides
+             FROM ai_overrides WHERE created_at >= ?1 AND created_at < ?2
              UNION ALL
              SELECT domain, 'category', category, '', created_at
-             FROM ai_category_overrides
+             FROM ai_category_overrides WHERE created_at >= ?1 AND created_at < ?2
              ORDER BY created_at DESC, domain",
         )?;
         let collected = stmt
-            .query_map([], |r| {
+            .query_map(params![from, to], |r| {
                 Ok(CorrectionRow {
                     domain: r.get(0)?,
                     action: r.get(1)?,

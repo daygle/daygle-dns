@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS ai_page_discovery (
     evidence TEXT NOT NULL,
     inspected_at INTEGER NOT NULL,
     retry_at INTEGER NOT NULL,
-    scoring_version TEXT NOT NULL DEFAULT ''
+    scoring_version TEXT NOT NULL DEFAULT '',
+    enforcement_eligible INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_ai_page_discovery_retry ON ai_page_discovery (retry_at);
 CREATE TABLE IF NOT EXISTS ai_age_attempts (
@@ -184,6 +185,19 @@ pub(super) fn upgrade(conn: &Connection) -> rusqlite::Result<()> {
             [],
         )?;
     }
+    let has_eligibility: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('ai_page_discovery') WHERE name = 'enforcement_eligible')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_eligibility {
+        conn.execute_batch(
+            "BEGIN;
+             ALTER TABLE ai_page_discovery ADD COLUMN enforcement_eligible INTEGER NOT NULL DEFAULT 0;
+             UPDATE ai_page_discovery SET retry_at = 0 WHERE confidence >= 0.95;
+             COMMIT;",
+        )?;
+    }
     Ok(())
 }
 
@@ -257,12 +271,13 @@ impl AiStore {
             };
         self.lock()?.execute(
             "INSERT INTO ai_page_discovery
-                 (domain, final_host, category, confidence, evidence, inspected_at, retry_at, scoring_version)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 (domain, final_host, category, confidence, evidence, inspected_at, retry_at, scoring_version, enforcement_eligible)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(domain) DO UPDATE SET final_host = excluded.final_host,
                  category = excluded.category, confidence = excluded.confidence,
                  evidence = excluded.evidence, inspected_at = excluded.inspected_at,
-                 retry_at = excluded.retry_at, scoring_version = excluded.scoring_version",
+                 retry_at = excluded.retry_at, scoring_version = excluded.scoring_version,
+                 enforcement_eligible = excluded.enforcement_eligible",
             params![
                 domain,
                 reading.final_host,
@@ -271,7 +286,8 @@ impl AiStore {
                 reading.evidence,
                 now,
                 retry_at,
-                scoring_version
+                scoring_version,
+                reading.enforcement_eligible
             ],
         )?;
         Ok(())
@@ -288,7 +304,7 @@ impl AiStore {
             "SELECT p.domain, min(p.retry_at, v.expires_at)
              FROM ai_page_discovery p JOIN ai_verdicts v
                ON v.domain = p.domain AND v.channel = 'threat'
-             WHERE p.category = 'phishing' AND p.confidence >= ?2
+             WHERE p.enforcement_eligible = 1 AND p.confidence >= ?2
                AND p.final_host = p.domain AND p.retry_at > ?1
                AND v.expires_at > ?1 AND v.status IN ('classified', 'skipped')
                AND v.severity != 'disputed'
@@ -406,6 +422,38 @@ impl AiStore {
         Ok(labels)
     }
 
+    /// Direct exact-host observations from the independent page rules.
+    /// Reinspection replaces the row, so a weaker or redirected result
+    /// immediately removes the previous observation from automatic learning.
+    pub(crate) fn directly_corroborated_discoveries(
+        &self,
+        before: i64,
+    ) -> Result<Vec<(String, Option<String>)>> {
+        const EVIDENCE_WINDOW_SECS: i64 = 7 * 86_400;
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT p.domain, p.category FROM ai_page_discovery p
+             WHERE p.enforcement_eligible = 1 AND p.final_host = p.domain
+               AND p.confidence >= ?1 AND p.inspected_at BETWEEN ?2 AND ?3
+               AND NOT EXISTS (SELECT 1 FROM ai_verdicts v WHERE v.domain = p.domain
+                               AND v.channel = 'threat' AND v.severity = 'disputed')
+               AND NOT EXISTS (SELECT 1 FROM ai_overrides o WHERE o.domain = p.domain)
+               AND NOT EXISTS (SELECT 1 FROM ai_category_overrides o WHERE o.domain = p.domain)
+             ORDER BY p.inspected_at DESC, p.domain LIMIT 2048",
+        )?;
+        let rows = stmt
+            .query_map(
+                params![
+                    crate::page::DISCOVERY_ENFORCEMENT_FLOOR,
+                    before.saturating_sub(EVIDENCE_WINDOW_SECS),
+                    before
+                ],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
     pub(crate) fn page_discovery(
         &self,
         domain: &str,
@@ -415,7 +463,7 @@ impl AiStore {
             .lock()?
             .query_row(
                 "SELECT final_host, category, confidence, evidence, inspected_at, retry_at,
-                        scoring_version
+                        scoring_version, enforcement_eligible
              FROM ai_page_discovery WHERE domain = ?1 AND retry_at > ?2",
                 params![domain, now],
                 |r| {
@@ -425,6 +473,7 @@ impl AiStore {
                             category: r.get(1)?,
                             confidence: r.get(2)?,
                             evidence: r.get(3)?,
+                            enforcement_eligible: r.get(7)?,
                         },
                         inspected_at: r.get(4)?,
                         retry_at: r.get(5)?,
@@ -908,6 +957,7 @@ mod tests {
                     final_host: Some(domain.to_string()),
                     category: Some("phishing".to_string()),
                     confidence: Some(0.9),
+                    enforcement_eligible: false,
                     evidence: "two page cues".to_string(),
                 },
                 now,
@@ -943,6 +993,63 @@ mod tests {
     }
 
     #[test]
+    fn direct_discovery_eligibility_does_not_depend_on_the_display_category() {
+        let (_dir, store) = store();
+        let domain = "uncategorized.example";
+        let now = now_epoch();
+        store.observe(domain).unwrap();
+        store
+            .save_verdict(
+                crate::backend::Channel::Threat,
+                domain,
+                "",
+                "",
+                "skipped",
+                0.0,
+                "model",
+                "",
+                3600,
+            )
+            .unwrap();
+        let mut reading = crate::page::DiscoveryReading {
+            final_host: Some(domain.to_string()),
+            category: None,
+            confidence: Some(0.96),
+            enforcement_eligible: false,
+            evidence: String::new(),
+        };
+        store
+            .save_page_discovery(domain, &reading, now, "page")
+            .unwrap();
+        assert!(store.page_discovery_blocks(now, 0.95).unwrap().is_empty());
+        assert!(store
+            .directly_corroborated_discoveries(now)
+            .unwrap()
+            .is_empty());
+        reading.enforcement_eligible = true;
+        store
+            .save_page_discovery(domain, &reading, now, "page")
+            .unwrap();
+        assert_eq!(store.page_discovery_blocks(now, 0.95).unwrap()[0].0, domain);
+        assert_eq!(
+            store.directly_corroborated_discoveries(now).unwrap(),
+            [(domain.to_string(), None)]
+        );
+        assert!(store
+            .directly_corroborated_discoveries(now + 8 * 86_400)
+            .unwrap()
+            .is_empty());
+        reading.final_host = Some("different.example".to_owned());
+        store
+            .save_page_discovery(domain, &reading, now, "page")
+            .unwrap();
+        assert!(store
+            .directly_corroborated_discoveries(now)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn discovery_cache_delays_retry_and_leaves_the_threat_verdict_unchanged() {
         let (_dir, store) = store();
         let domain = "ordinary.example";
@@ -971,6 +1078,7 @@ mod tests {
             final_host: None,
             category: None,
             confidence: None,
+            enforcement_eligible: false,
             evidence: "unavailable".to_owned(),
         };
         store
@@ -993,6 +1101,7 @@ mod tests {
             final_host: Some(domain.to_owned()),
             category: Some("phishing".to_owned()),
             confidence: Some(0.9),
+            enforcement_eligible: false,
             evidence: "two page cues".to_owned(),
         };
         store

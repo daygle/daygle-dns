@@ -29,7 +29,7 @@ use serde_json::{json, Value};
 const PAGE_CHARS: usize = 3_000;
 
 /// What the model said about one page.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LlmReading {
     /// One of the offered labels, or `None` when it answered with another.
     pub category: Option<String>,

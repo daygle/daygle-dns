@@ -941,6 +941,267 @@ fn engine(dir: &TempDir, settings: AiSettings) -> Arc<AiEngine> {
 }
 
 #[test]
+fn binary_name_model_blocks_without_enabled_families_and_respects_policy() {
+    let _training = training_guard();
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("binary.bin");
+    let threat_label = daygle_dns_ml::backend::BINARY_THREAT_LABEL;
+    let pairs: Vec<_> = (0..70)
+        .flat_map(|i| {
+            [
+                (
+                    threat_label.to_string(),
+                    format!("credentialgrabber-{i}.example"),
+                ),
+                (
+                    "benign".to_string(),
+                    format!("communitylibrary-{i}.example"),
+                ),
+            ]
+        })
+        .collect();
+    daygle_dns_ml::learn::train(&pairs, &path).unwrap();
+    let mut config = AiSettings {
+        model_path: path.to_string_lossy().into_owned(),
+        network_evidence: false,
+        auto_block_categories: Vec::new(),
+        auto_block_removals: daygle_dns_core::config::THREAT_FAMILIES
+            .iter()
+            .map(|family| family.to_string())
+            .collect(),
+        block_threshold: 0.75,
+        ..settings(AiMode::Enforce)
+    };
+    assert!(config.threat_labels().is_empty());
+    config.authority.enabled = true;
+    config.authority.model_stage = AuthorityStage::Monitor;
+    let ai = engine(&dir, config.clone());
+    assert!(ai.binary_name_model_active());
+    let suspicious = "credentialgrabber-12.example";
+    let ordinary = "communitylibrary-12.example";
+    ai.store.observe(suspicious).unwrap();
+    ai.store.observe(ordinary).unwrap();
+    ai.scanner.run_cycle(0, zone_store(&dir).as_ref()).unwrap();
+    let finding = ai.store.verdict(suspicious, "threat").unwrap().unwrap();
+    assert_eq!(finding.category, threat_label);
+    assert!(finding.threat_score >= config.block_threshold);
+    assert!(!ai.snapshot().load().contains_key(suspicious));
+    assert_ne!(
+        ai.store
+            .verdict(ordinary, "threat")
+            .unwrap()
+            .unwrap()
+            .severity,
+        "threat"
+    );
+    assert_ne!(
+        ai.store
+            .verdict(suspicious, "content")
+            .unwrap()
+            .unwrap()
+            .category,
+        threat_label
+    );
+
+    config.authority.model_stage = AuthorityStage::Enforce;
+    ai.apply_settings(&config);
+    assert!(ai.snapshot().load().contains_key(suspicious));
+    config.auto_block_removals.push(threat_label.to_string());
+    ai.apply_settings(&config);
+    assert!(!ai.snapshot().load().contains_key(suspicious));
+}
+
+#[test]
+fn builtin_binary_starts_in_monitor_and_promotes_without_operator_reviews() {
+    use daygle_dns_ml::page::{DiscoveryReading, Inspection, PageReader};
+    use sha2::{Digest, Sha256};
+
+    struct DiscoveryFixture(String);
+    impl PageReader for DiscoveryFixture {
+        fn inspect(&self, _domain: &str) -> Inspection {
+            Inspection {
+                note: String::new(),
+                reading: None,
+                page: None,
+            }
+        }
+
+        fn inspect_for_discovery(&self, domain: &str, _floor: f32) -> DiscoveryReading {
+            let direct = domain == self.0;
+            DiscoveryReading {
+                final_host: Some(domain.to_string()),
+                category: Some("phishing".to_string()),
+                confidence: Some(if direct { 0.95 } else { 0.90 }),
+                enforcement_eligible: direct,
+                evidence: "synthetic page observation".to_string(),
+            }
+        }
+    }
+    let _training = training_guard();
+    let dir = TempDir::new().unwrap();
+    let mut config = AiSettings {
+        model_path: daygle_dns_ml::learn::BUILTIN_BINARY_MODEL.to_string(),
+        auto_retrain: true,
+        // Scheduled binary candidates still need validation.
+        trial_new_models: false,
+        network_evidence: true,
+        block_threshold: 0.93,
+        threshold_fpr_target: 0.05,
+        ..settings(AiMode::Enforce)
+    };
+    let ai = engine(&dir, config.clone());
+    assert!(ai.binary_name_model_active());
+    assert!(ai.threat_backend_name().contains("+starter"));
+    let starter = ai.live_model_path();
+    let suspicious = "ransomware-droploader.biz";
+    ai.store.observe(suspicious).unwrap();
+    ai.scanner.run_cycle(0, zone_store(&dir).as_ref()).unwrap();
+    assert_eq!(
+        ai.store
+            .verdict(suspicious, "threat")
+            .unwrap()
+            .unwrap()
+            .severity,
+        "threat",
+    );
+    assert!(!ai.snapshot().load().contains_key(suspicious));
+    assert!(!learned_active(&ai));
+    let skipped = ai
+        .run_due_maintenance()
+        .expect("the first scheduled run is due")
+        .unwrap_err();
+    assert!(skipped
+        .to_string()
+        .contains("independent training names per class"));
+    assert!(!learned_trial(&ai).in_progress());
+    drop(ai);
+
+    let store = daygle_dns_ml::store::AiStore::open(&dir.path().join("ai.db")).unwrap();
+    let threats = (0..450)
+        .map(|i| format!("credentialgrabber-c2-{i}.test"))
+        .collect();
+    let ordinary = (0..300)
+        .map(|i| format!("communitylibrary-{i}.test"))
+        .collect();
+    store
+        .replace_intel(daygle_dns_ml::intel::INTEL_FEEDS[0].id, &threats)
+        .unwrap();
+    store
+        .replace_intel(daygle_dns_ml::intel::POPULAR.id, &ordinary)
+        .unwrap();
+    drop(store);
+
+    config.fetch_pages = true;
+    config.monitor_page_discovery = true;
+    let mut discovered = (0..100)
+        .map(|i| format!("new-workspace-{i}.test"))
+        .filter(|domain| {
+            let root = daygle_dns_ml::assessment::registrable(domain);
+            Sha256::digest(root.as_bytes())[0] >= 128
+        });
+    let direct = discovered.next().unwrap();
+    let weak = discovered.next().unwrap();
+    let ai = engine(&dir, config.clone());
+    assert_eq!(ai.live_model_path(), starter);
+    assert!(ai
+        .scanner
+        .set_page_reader(Box::new(DiscoveryFixture(direct.clone()))));
+    for domain in [&direct, &weak] {
+        assert!(ai.threat_feed_for(domain).is_none());
+        ai.store.observe(domain).unwrap();
+    }
+    ai.scanner.run_cycle(0, zone_store(&dir).as_ref()).unwrap();
+    for domain in [&direct, &weak] {
+        assert!(ai
+            .signal_report(domain)
+            .unwrap()
+            .unwrap()
+            .page_discovery
+            .is_some());
+    }
+    assert!(!ai.snapshot().load().contains_key(&weak));
+    ai.run_due_maintenance()
+        .expect("a scheduled candidate")
+        .unwrap();
+    assert!(learned_trial(&ai).in_progress());
+    let candidate =
+        daygle_dns_ml::maintain::candidate_path(ai.learned_model_path()).with_extension("json");
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(candidate).unwrap()).unwrap();
+    assert_eq!(record["binary_training"]["direct_page_threats"], 1);
+    assert_eq!(ai.live_model_path(), starter);
+    end_trial_soon(&ai);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    assert!(ai.run_due_maintenance().is_none());
+    let status = ai.maintained_status();
+    assert!(learned_active(&ai), "{status}");
+    assert!(!ai.threat_backend_name().contains("+starter"));
+    let threshold = ai.settings.load().block_threshold;
+    assert_ne!(threshold, config.block_threshold);
+    let model = daygle_dns_ml::threshold::model_version(&ai.live_model_path());
+    assert_eq!(
+        ai.store.active_calibration().unwrap().unwrap().source_model,
+        model
+    );
+    drop(ai);
+
+    let restarted = engine(&dir, config.clone());
+    assert!(learned_active(&restarted));
+    assert_eq!(restarted.settings.load().block_threshold, threshold);
+    assert_eq!(
+        restarted
+            .store
+            .active_calibration()
+            .unwrap()
+            .unwrap()
+            .source_model,
+        model
+    );
+
+    for i in 0..3 {
+        let domain = format!("mistaken-{i}.test");
+        restarted.store.observe(&domain).unwrap();
+        restarted
+            .store
+            .save_verdict(
+                Channel::Threat,
+                &domain,
+                "binary-threat",
+                "threat",
+                "classified",
+                0.99,
+                "fasttext-binary",
+                "test finding",
+                3600,
+            )
+            .unwrap();
+        restarted
+            .store
+            .set_override(&domain, "not_threat", "watch fixture")
+            .unwrap();
+    }
+    assert!(restarted.run_due_maintenance().is_none());
+    assert_eq!(restarted.live_model_path(), starter);
+    assert_eq!(
+        restarted.settings.load().block_threshold,
+        config.block_threshold
+    );
+    assert!(restarted.store.active_calibration().unwrap().is_none());
+    assert!(restarted.store.active_candidate().unwrap().is_none());
+}
+
+#[test]
+fn dropping_the_engine_releases_the_scanner_and_activation_hook() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(&dir, settings(AiMode::Train));
+    let engine = Arc::downgrade(&ai);
+    let scanner = Arc::downgrade(&ai.scanner);
+    drop(ai);
+    assert!(engine.upgrade().is_none());
+    assert!(scanner.upgrade().is_none());
+}
+
+#[test]
 fn expired_verdicts_are_reclassified_by_the_next_cycle() {
     let dir = TempDir::new().unwrap();
     let zones = zone_store(&dir);
@@ -1600,6 +1861,7 @@ impl daygle_dns_ml::page::PageReader for FixedReader {
             final_host: Some(domain.to_owned()),
             category: Some("phishing".to_owned()),
             confidence: Some(0.95),
+            enforcement_eligible: true,
             evidence: "verify your account, confirm your password".to_owned(),
         }
     }
@@ -3498,8 +3760,6 @@ fn undoing_a_scheduled_activation_restores_the_scoring_it_replaced() {
         "the-candidate-model",
         chrono::Utc::now().timestamp(),
     );
-    let trial_version = trial_map.version.clone();
-
     let (_promoted, undo) = ai
         .record_scheduled_activation(
             &artifact,
@@ -3512,11 +3772,11 @@ fn undoing_a_scheduled_activation_restores_the_scoring_it_replaced() {
             },
         )
         .expect("one recoverable activation");
-    assert!((ai.settings.load().block_threshold - 0.9).abs() < f32::EPSILON);
+    assert!((ai.settings.load().block_threshold - threshold).abs() < f32::EPSILON);
     assert!(ai.store.active_candidate().unwrap().is_some());
     assert_eq!(
         ai.scanner.calibration_map().map(|map| map.version),
-        Some(trial_version)
+        Some(incumbent_map.version.clone())
     );
     assert_eq!(
         ai.live_model_path(),
@@ -3963,7 +4223,7 @@ fn a_scheduled_activation_is_one_recoverable_version() {
         },
     )
     .expect("one recoverable activation");
-    assert!((ai.settings.load().block_threshold - threshold).abs() < f32::EPSILON);
+    assert!((ai.settings.load().block_threshold - before).abs() < f32::EPSILON);
     let active = ai
         .store
         .active_candidate()
