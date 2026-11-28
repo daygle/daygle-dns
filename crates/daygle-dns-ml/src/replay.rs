@@ -204,7 +204,7 @@ impl<'a> ReplayContext<'a> {
                 threat_score,
                 confidence,
                 severity: severity.as_str(),
-                evidence: &evidence,
+                evidence,
                 page,
                 now,
             },
