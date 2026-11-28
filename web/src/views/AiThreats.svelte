@@ -851,7 +851,7 @@
             {/if}
             {#if show('score')}
               <td class="num" title={r.threat_score == null ? 'Not scored: this backend reports no per-label probability' : 'The model\'s own threat score'}>
-                {r.threat_score == null ? '—' : percent(r.threat_score)}
+                {r.threat_score == null ? 'N/A' : percent(r.threat_score)}
               </td>
             {/if}
             {#if show('signals')}
