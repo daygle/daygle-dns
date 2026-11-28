@@ -2,6 +2,7 @@
 //! real (temp-file-backed) authoritative `ZoneStore`, plus engine-level
 //! override behavior.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use daygle_dns_core::config::{AiMode, AiSettings, AuthorityStage, FusionMode, PageRule};
@@ -3317,9 +3318,10 @@ fn seed_content_verdicts(ai: &AiEngine, range: std::ops::Range<usize>) {
 }
 
 /// A scheduled retrain builds a candidate that runs in the shadow of the
-/// live model: nothing changes until its trial ends and it is promoted.
+/// live model: nothing changes until its trial ends. Without a passed replay
+/// of the held-out evidence the incumbent stays in force.
 #[test]
-fn a_scheduled_retrain_runs_in_the_shadow_until_promoted() {
+fn a_scheduled_retrain_needs_a_passed_replay_to_promote() {
     let _train = training_guard();
     let dir = TempDir::new().unwrap();
     let ai = engine(
@@ -3369,15 +3371,81 @@ fn a_scheduled_retrain_runs_in_the_shadow_until_promoted() {
         trial
             .last_outcome
             .as_deref()
-            .is_some_and(|o| o.starts_with("promoted")),
-        "{trial:?}"
+            .is_some_and(|o| o.starts_with("rejected")),
+        "no reviewed held-out evidence means no promotion: {trial:?}"
     );
-    assert!(learned_active(&ai), "promoted without a restart");
-    assert_eq!(ai.content_backend_name(), "fasttext");
+    assert!(
+        !learned_active(&ai),
+        "the incumbent stays in force when the replay does not validate"
+    );
+    assert_eq!(
+        ai.content_backend_name(),
+        "fasttext",
+        "the configured model is still the one answering"
+    );
     assert_eq!(trial.history.len(), 1, "the trial is in the history");
     assert_eq!(
-        ai.maintained_status()["last"]["shadow_scoring"]["passed"],
-        false
+        ai.maintained_status()["trial"]["shadow_scoring"]["passed"],
+        false,
+        "the rejected trial keeps the replay's diagnostic result"
+    );
+}
+
+/// A scheduled promotion records its validated threshold in the same
+/// candidate version a manual promotion uses, and a restart puts that number
+/// back instead of leaving the candidate's scores compared against the old
+/// threshold.
+#[test]
+fn a_scheduled_activation_is_one_recoverable_version() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(&dir, settings(AiMode::Enforce));
+    let model = ai.live_model_path();
+    let before = ai.settings.load().block_threshold;
+    let threshold = if (before - 0.7).abs() < f32::EPSILON {
+        0.8
+    } else {
+        0.7
+    };
+    ai.record_scheduled_activation(
+        Path::new(&model),
+        &daygle_dns_ml::maintain::TrialActivation {
+            calibration: None,
+            threshold,
+            signal_weights: Default::default(),
+            report: serde_json::json!({"passed": true, "reason": "held-out replay"}),
+        },
+    )
+    .expect("one recoverable activation");
+    assert!((ai.settings.load().block_threshold - threshold).abs() < f32::EPSILON);
+    let active = ai
+        .store
+        .active_candidate()
+        .unwrap()
+        .expect("active version");
+    assert!((active.block_threshold - threshold).abs() < f32::EPSILON);
+    assert_eq!(active.model_path, model);
+    drop(ai);
+
+    let restarted = engine(&dir, settings(AiMode::Enforce));
+    assert!(
+        (restarted.settings.load().block_threshold - threshold).abs() < f32::EPSILON,
+        "a restart applies the recorded version's threshold"
+    );
+
+    // A threshold the operator sets after the promotion is newer policy, not
+    // a stale copy the version should overwrite.
+    drop(restarted);
+    let operator = (threshold + 0.015).min(0.99);
+    let changed = engine(
+        &dir,
+        AiSettings {
+            block_threshold: operator,
+            ..settings(AiMode::Enforce)
+        },
+    );
+    assert!(
+        (changed.settings.load().block_threshold - operator).abs() < f32::EPSILON,
+        "a newer operator threshold survives a restart"
     );
 }
 

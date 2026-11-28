@@ -99,16 +99,17 @@ impl DomainClassifier for ChannelBackend {
                 ..verdict
             }),
             Channel::Threat => {
-                // "Not a threat" is the one negative the model can carry: a
-                // learned label, never a finding - not even from an
-                // auto-block list that names it.
-                if verdict.category == BENIGN_LABEL {
-                    return None;
-                }
                 // Settings are always present for this channel; no settings
                 // means no declared threats, which is the safe reading.
                 let settings = self.settings.as_ref()?.load();
-                let role = settings.label_role(&verdict.category);
+                let mut role = settings.label_role(&verdict.category);
+                if verdict.category == BENIGN_LABEL {
+                    // The learned negative is never itself a finding, even if
+                    // an old list named it: a correction must not become a
+                    // block. A different threat family the model scored can
+                    // still carry an independent reading below.
+                    role = LabelRole::Classification;
+                }
                 // Never a threat: the operator's removal suppresses the
                 // model's own verdict on that label, so nothing is reported.
                 if role == LabelRole::Suppressed {
@@ -188,7 +189,14 @@ impl ChannelBackend {
         self.inner
             .label_scores(input)
             .into_iter()
-            .filter(|(label, _)| labels.iter().any(|t| t.eq_ignore_ascii_case(label)))
+            .filter(|(label, _)| {
+                // `threat_labels()` already includes every built-in family the
+                // operator has not removed, so this scans all of them and not
+                // just the ones an older list happened to name. The learned
+                // negative is still never a threat label.
+                !label.eq_ignore_ascii_case(BENIGN_LABEL)
+                    && labels.iter().any(|t| t.eq_ignore_ascii_case(label))
+            })
             .reduce(|best, candidate| {
                 if candidate.1 > best.1 {
                     candidate

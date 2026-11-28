@@ -96,10 +96,55 @@ pub fn stage_for(settings: &AuthoritySettings, source: Source) -> AuthorityStage
 /// sources stay at `Enforce`, which is the pre-authority behaviour: the
 /// global `ai.mode` alone decides, and no block is filtered here.
 pub fn evaluate(store: &AiStore, settings: &AuthoritySettings) -> Result<Vec<AuthorityDecision>> {
+    evaluate_for_scoring(store, settings, "", "")
+}
+
+/// The stage `steps` steps closer to enforcing: advancement never skips a
+/// step and never goes past the ceiling.
+fn advance(stage: AuthorityStage, steps: i64) -> AuthorityStage {
+    let mut stage = stage;
+    for _ in 0..steps {
+        stage = match stage {
+            AuthorityStage::Monitor => AuthorityStage::Propose,
+            AuthorityStage::Propose => AuthorityStage::Enforce,
+            AuthorityStage::Enforce => AuthorityStage::Enforce,
+        };
+    }
+    stage
+}
+
+/// The configured stage as a numbered rung, so a partial advance can be
+/// capped at the operator's ceiling without naming every pair.
+fn rung(stage: AuthorityStage) -> u8 {
+    match stage {
+        AuthorityStage::Monitor => 0,
+        AuthorityStage::Propose => 1,
+        AuthorityStage::Enforce => 2,
+    }
+}
+
+/// Evaluate the sources under the scoring version in force. Advancement is
+/// opt-in: with `settings.advancement` off each source runs at its configured
+/// stage exactly as before. With it on, a source starts at `monitor` and moves
+/// toward its configured ceiling one step for each
+/// `advance_min_reviews` findings under this scoring version that were
+/// explicitly reviewed, provided at least one review confirmed the finding and
+/// corrections stay within `advance_fp_rate`. Unreviewed findings (including an
+/// `allow` exemption) are not reviews and supply no credit. The configured
+/// stage is the ceiling, so advancement never exceeds it, and demotion still
+/// applies to measured false positives afterwards.
+pub fn evaluate_for_scoring(
+    store: &AiStore,
+    settings: &AuthoritySettings,
+    calibration_version: &str,
+    assessment_mode: &str,
+) -> Result<Vec<AuthorityDecision>> {
     if !settings.enabled {
         return Ok(vec![]);
     }
     let measurements = store.authority_measurements()?;
+    let now = chrono::Utc::now().timestamp();
+    let reviews = store.authority_reviews_for_scoring(now, calibration_version, assessment_mode)?;
     let mut decisions = Vec::new();
     for source in [Source::Feed, Source::Model] {
         let (false_positives, true_positives) = measurements
@@ -107,6 +152,11 @@ pub fn evaluate(store: &AiStore, settings: &AuthoritySettings) -> Result<Vec<Aut
             .find(|(name, _, _)| name == source.as_str())
             .map(|(_, fp, tp)| (*fp, *tp))
             .unwrap_or((0, 0));
+        let (reviewed_findings, corrected_reviews, confirmed_reviews) = reviews
+            .iter()
+            .find(|(name, _, _, _)| name == source.as_str())
+            .map(|(_, total, corrected, confirmed)| (*total, *corrected, *confirmed))
+            .unwrap_or((0, 0, 0));
         let configured = stage_for(settings, source);
         let total = false_positives + true_positives;
         let rate = if total > 0 {
@@ -114,12 +164,41 @@ pub fn evaluate(store: &AiStore, settings: &AuthoritySettings) -> Result<Vec<Aut
         } else {
             0.0
         };
+        let reviewed = corrected_reviews + confirmed_reviews;
+        let reviewed_rate = if reviewed > 0 {
+            corrected_reviews as f32 / reviewed as f32
+        } else {
+            0.0
+        };
+        let start = if settings.advancement && configured != AuthorityStage::Monitor {
+            AuthorityStage::Monitor
+        } else {
+            configured
+        };
+        let minimum = i64::from(settings.advance_min_reviews.max(1));
+        let steps = if settings.advancement
+            && configured != AuthorityStage::Monitor
+            && confirmed_reviews > 0
+            && reviewed_rate <= settings.advance_fp_rate
+        {
+            reviewed / minimum
+        } else {
+            0
+        };
+        let may_advance = steps > 0;
+        let ceiling = rung(configured);
+        let advanced = advance(start, steps);
+        let advanced = if rung(advanced) > ceiling {
+            configured
+        } else {
+            advanced
+        };
         let demote = total >= i64::from(settings.demote_min_samples.max(1))
             && rate > settings.demote_fp_rate;
         let effective = if demote {
             AuthorityStage::Monitor
         } else {
-            configured
+            advanced
         };
         let reason = if demote {
             format!(
@@ -127,6 +206,34 @@ pub fn evaluate(store: &AiStore, settings: &AuthoritySettings) -> Result<Vec<Aut
                 rate * 100.0,
                 settings.demote_fp_rate * 100.0
             )
+        } else if settings.advancement && configured != AuthorityStage::Monitor {
+            let reviewed_note = format!(
+                "{confirmed_reviews} confirmed and {corrected_reviews} corrected of {reviewed_findings} findings reviewed under this scoring version"
+            );
+            if may_advance && advanced == configured {
+                format!(
+                    "advanced to the configured ceiling {}: {reviewed_note}",
+                    configured.as_str()
+                )
+            } else if advanced == configured {
+                format!(
+                    "at the configured ceiling {}: {reviewed_note}",
+                    configured.as_str()
+                )
+            } else if may_advance {
+                format!(
+                    "advanced to {} of the configured {}: {reviewed_note}",
+                    advanced.as_str(),
+                    configured.as_str()
+                )
+            } else {
+                format!(
+                    "staying at {}: each step needs {} independently reviewed findings with at most {:.0}% corrected: {reviewed_note}",
+                    advanced.as_str(),
+                    settings.advance_min_reviews.max(1),
+                    settings.advance_fp_rate * 100.0
+                )
+            }
         } else if total == 0 {
             format!(
                 "no measured findings yet; stage is the configured {}",
@@ -287,6 +394,121 @@ mod tests {
         assert!(!model.demoted);
         assert_eq!(model.effective, AuthorityStage::Propose);
         assert!(model.is_proposal());
+        assert!(!model.may_block());
+    }
+
+    #[test]
+    fn advancement_starts_at_monitor_without_reviewed_evidence() {
+        let (_dir, store) = store();
+        for i in 0..10 {
+            verdict(&store, &format!("u{i}.example"), "model, malware", 0.99);
+        }
+        let settings = AuthoritySettings {
+            enabled: true,
+            model_stage: AuthorityStage::Propose,
+            advancement: true,
+            advance_min_reviews: 5,
+            ..AuthoritySettings::default()
+        };
+        let decisions = evaluate_for_scoring(&store, &settings, "", "").unwrap();
+        let model = decision_for(&decisions, Source::Model).unwrap();
+        // The configured stage is the ceiling, not the starting point.
+        assert_eq!(model.configured, AuthorityStage::Propose);
+        assert_eq!(model.effective, AuthorityStage::Monitor);
+        assert!(
+            model.reason.contains("staying at monitor"),
+            "{}",
+            model.reason
+        );
+
+        // An allow exemption is a policy decision, not a review: it supplies
+        // no advancement credit.
+        store.set_override("u0.example", "allow", "exempt").unwrap();
+        let decisions = evaluate_for_scoring(&store, &settings, "", "").unwrap();
+        assert_eq!(
+            decision_for(&decisions, Source::Model).unwrap().effective,
+            AuthorityStage::Monitor
+        );
+    }
+
+    #[test]
+    fn confirmed_reviews_advance_one_step_under_the_scoring_version() {
+        let (_dir, store) = store();
+        for i in 0..10 {
+            verdict(&store, &format!("r{i}.example"), "model, malware", 0.99);
+        }
+        for i in 0..5 {
+            store
+                .set_category_override(&format!("r{i}.example"), "malware")
+                .unwrap();
+        }
+        let settings = AuthoritySettings {
+            enabled: true,
+            model_stage: AuthorityStage::Propose,
+            advancement: true,
+            advance_min_reviews: 5,
+            ..AuthoritySettings::default()
+        };
+        let decisions = evaluate_for_scoring(&store, &settings, "", "").unwrap();
+        let model = decision_for(&decisions, Source::Model).unwrap();
+        assert_eq!(model.effective, AuthorityStage::Propose);
+        assert!(model.is_proposal());
+        assert!(!model.may_block(), "advancement never skips to enforce");
+        assert!(
+            model
+                .reason
+                .contains("advanced to the configured ceiling propose"),
+            "{}",
+            model.reason
+        );
+
+        // The same reviews say nothing about another scoring version's
+        // findings, so that version stays at the floor.
+        let decisions = evaluate_for_scoring(&store, &settings, "newer", "decide").unwrap();
+        assert_eq!(
+            decision_for(&decisions, Source::Model).unwrap().effective,
+            AuthorityStage::Monitor
+        );
+    }
+
+    #[test]
+    fn advancement_never_passes_the_operator_ceiling() {
+        let (_dir, store) = store();
+        for i in 0..20 {
+            verdict(&store, &format!("e{i}.example"), "model, malware", 0.99);
+        }
+        for i in 0..10 {
+            store
+                .set_category_override(&format!("e{i}.example"), "malware")
+                .unwrap();
+        }
+        let settings = AuthoritySettings {
+            enabled: true,
+            model_stage: AuthorityStage::Enforce,
+            advancement: true,
+            advance_min_reviews: 5,
+            demote_min_samples: 100,
+            ..AuthoritySettings::default()
+        };
+        // Five reviews is one step: propose, not enforce.
+        let mut trimmed = settings.clone();
+        trimmed.advance_min_reviews = 10;
+        let decisions = evaluate_for_scoring(&store, &trimmed, "", "").unwrap();
+        assert_eq!(
+            decision_for(&decisions, Source::Model).unwrap().effective,
+            AuthorityStage::Propose
+        );
+        // Ten reviews is two steps, which is the ceiling, never past it.
+        let decisions = evaluate_for_scoring(&store, &settings, "", "").unwrap();
+        let model = decision_for(&decisions, Source::Model).unwrap();
+        assert_eq!(model.effective, AuthorityStage::Enforce);
+        assert!(model.may_block());
+        // A proposal ceiling is never exceeded however much evidence arrives.
+        let mut proposal_ceiling = settings.clone();
+        proposal_ceiling.model_stage = AuthorityStage::Propose;
+        let decisions = evaluate_for_scoring(&store, &proposal_ceiling, "", "").unwrap();
+        let model = decision_for(&decisions, Source::Model).unwrap();
+        assert_eq!(model.effective, AuthorityStage::Propose);
         assert!(!model.may_block());
     }
 }

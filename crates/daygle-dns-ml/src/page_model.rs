@@ -130,6 +130,21 @@ impl PageModel {
         })
     }
 
+    /// The reader in force, as a stable identity for provenance: the trained
+    /// model's training time, or `phrases` while the phrase table still reads
+    /// pages. A review is only comparable with a finding made by the same
+    /// reader.
+    pub fn version(&self) -> String {
+        if self.model.load().is_none() {
+            return "phrases".to_string();
+        }
+        std::fs::read(self.record_path())
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
+            .and_then(|record| record.get("trained_at").and_then(|v| v.as_i64()))
+            .map_or_else(|| "model".to_string(), |trained| format!("model:{trained}"))
+    }
+
     /// What the model says about a page: a threat label and its probability,
     /// or `None` (no model, an ordinary page, or not sure enough).
     pub fn predict(&self, title: &str, text: &str) -> Option<(&'static str, f32)> {

@@ -242,11 +242,23 @@ pub struct Sample {
     pub threat: Option<bool>,
     /// When the verdict was classified, for the time-based evaluation.
     pub scored_at: i64,
+    /// The live policy rail that would stop this finding from blocking even
+    /// when its score clears the threshold: an operator exemption, a
+    /// category override, a dispute, or an authority stage below enforce.
+    /// The replay records the rail so a trial measures the decision the gate
+    /// would make, not just the number it would compare.
+    pub policy_blocked: Option<String>,
 }
 
 impl Sample {
     pub fn benign(&self) -> Option<bool> {
         self.threat.map(|threat| !threat)
+    }
+
+    /// Whether the gate would block this name at `threshold`: the score has
+    /// to clear the threshold *and* no policy rail may deny it.
+    fn blocks_at(&self, threshold: f32) -> bool {
+        self.policy_blocked.is_none() && self.score >= threshold
     }
 }
 
@@ -479,7 +491,7 @@ fn choose(tuning: &[&Sample], fpr_target: f32) -> Option<f32> {
         let threshold = MIN_THRESHOLD + step as f32 * GRID_STEP;
         let false_positives = tuning
             .iter()
-            .filter(|s| s.benign() == Some(true) && s.score >= threshold)
+            .filter(|s| s.benign() == Some(true) && s.blocks_at(threshold))
             .count();
         if false_positives as f32 / benign as f32 <= fpr_target {
             return Some((threshold * 1000.0).round() / 1000.0);
@@ -495,15 +507,16 @@ fn side(samples: &[&Sample], candidate: Option<f32>) -> Side {
     let benign = samples.iter().filter(|s| s.benign() == Some(true)).count();
     let false_positives = samples
         .iter()
-        .filter(|s| s.benign() == Some(true) && s.score >= threshold)
+        .filter(|s| s.benign() == Some(true) && s.blocks_at(threshold))
         .count();
+
     let threats = samples.iter().filter(|s| s.benign() == Some(false)).count();
     let caught = samples
         .iter()
-        .filter(|s| s.benign() == Some(false) && s.score >= threshold)
+        .filter(|s| s.benign() == Some(false) && s.blocks_at(threshold))
         .count();
     let unseen: Vec<&&Sample> = samples.iter().filter(|s| s.benign().is_none()).collect();
-    let unseen_blocked = unseen.iter().filter(|s| s.score >= threshold).count();
+    let unseen_blocked = unseen.iter().filter(|s| s.blocks_at(threshold)).count();
     Side {
         benign,
         false_positives,
@@ -542,7 +555,7 @@ fn group_row(samples: &[Sample], group: Group, candidate: Option<f32>) -> GroupR
         max_score: scores.last().copied(),
         at_candidate: samples
             .iter()
-            .filter(|s| s.group == group && s.score >= threshold)
+            .filter(|s| s.group == group && s.blocks_at(threshold))
             .count(),
     }
 }
@@ -657,6 +670,7 @@ fn collect_rows(
                 label,
                 threat,
                 scored_at,
+                policy_blocked: None,
             }
         })
         .collect())
@@ -734,6 +748,7 @@ mod tests {
             label,
             threat,
             scored_at: 1_700_000_000,
+            policy_blocked: None,
         }
     }
 

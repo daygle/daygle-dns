@@ -1484,6 +1484,18 @@ pub struct AuthoritySettings {
     pub demote_fp_rate: f32,
     /// Measured findings needed before a demotion is considered.
     pub demote_min_samples: u32,
+    /// Whether a source may advance from `monitor` toward its configured
+    /// stage on independently reviewed evidence. Off by default: the
+    /// configured stage is then in force exactly as before. The configured
+    /// stage is the ceiling; advancement never goes past it.
+    pub advancement: bool,
+    /// Independently reviewed findings needed before one advancement step.
+    /// Unreviewed findings, and outcomes that are only a policy `allow`
+    /// exemption, supply no credit.
+    pub advance_min_reviews: u32,
+    /// Highest false-positive share among the reviewed findings that may
+    /// still advance. Enough negative evidence has to bound the source.
+    pub advance_fp_rate: f32,
 }
 
 impl Default for AuthoritySettings {
@@ -1498,6 +1510,9 @@ impl Default for AuthoritySettings {
             max_new_blocks_per_refresh: 500,
             demote_fp_rate: 0.05,
             demote_min_samples: 20,
+            advancement: false,
+            advance_min_reviews: 20,
+            advance_fp_rate: 0.05,
         }
     }
 }

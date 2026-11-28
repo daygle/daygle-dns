@@ -924,6 +924,30 @@ impl AiStore {
     /// Explicit reviews of current findings. An allow exemption is a policy
     /// decision and does not by itself establish that the finding was wrong.
     pub(crate) fn authority_reviews(&self, now: i64) -> Result<Vec<(String, i64, i64, i64)>> {
+        self.authority_review_rows(now, None, None)
+    }
+
+    /// [`Self::authority_reviews`] restricted to findings produced under the
+    /// scoring version in force: the calibration map and fusion mode recorded
+    /// on the verdict. A review of an older version's finding is provenance,
+    /// not evidence for advancing the version now deciding.
+    pub(crate) fn authority_reviews_for_scoring(
+        &self,
+        now: i64,
+        calibration_version: &str,
+        assessment_mode: &str,
+    ) -> Result<Vec<(String, i64, i64, i64)>> {
+        self.authority_review_rows(now, Some(calibration_version), Some(assessment_mode))
+    }
+
+    /// The review counts, optionally restricted to the scoring version. `None`
+    /// keeps every version, which is what the diagnostic status reports.
+    fn authority_review_rows(
+        &self,
+        now: i64,
+        calibration_version: Option<&str>,
+        assessment_mode: Option<&str>,
+    ) -> Result<Vec<(String, i64, i64, i64)>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
             "SELECT CASE WHEN instr(v.evidence, ', listed by ') > 0
@@ -938,10 +962,14 @@ impl AiStore {
                ON c.domain = v.domain AND c.created_at >= v.classified_at
              WHERE v.channel = 'threat' AND v.status = 'classified'
                AND v.severity = 'threat' AND v.expires_at > ?1
+               AND (?2 IS NULL OR v.calibration_version = ?2)
+               AND (?3 IS NULL OR v.assessment_mode = ?3)
              GROUP BY source",
         )?;
         let rows = stmt
-            .query_map([now], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .query_map(params![now, calibration_version, assessment_mode], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }

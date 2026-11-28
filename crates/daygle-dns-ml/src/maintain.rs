@@ -133,6 +133,21 @@ pub type InstalledHook = Box<dyn Fn(&Path) + Send + Sync>;
 pub(crate) type ShadowScoring =
     Box<dyn Fn(&Path, &AiSettings, i64, i64) -> Result<serde_json::Value> + Send + Sync>;
 
+/// What a passed replay says to put in force with the model: the calibration
+/// map fitted on the tuning half and the threshold it validated. The engine
+/// applies all of it through the candidate ledger, so a scheduled promotion is
+/// the same recoverable record a manual promotion uses.
+#[derive(Debug, Clone)]
+pub struct TrialActivation {
+    pub calibration: Option<crate::calibration::CalibrationMap>,
+    pub threshold: f32,
+    pub signal_weights: crate::fusion::SignalWeights,
+    pub report: serde_json::Value,
+}
+
+/// Applies the validated scoring after the model itself is live.
+pub type Activation = Box<dyn Fn(&Path, &TrialActivation) -> Result<()> + Send + Sync>;
+
 /// A maintenance step with nothing to report (the verifier refresh).
 pub type Step = Box<dyn Fn() + Send + Sync>;
 
@@ -232,6 +247,10 @@ pub struct Trial {
     pub last_outcome: Option<String>,
     /// Newest first, at most [`TRIAL_HISTORY`].
     pub history: Vec<TrialEntry>,
+    /// The held-out replay's report for the last concluded trial, as JSON
+    /// text, kept even when the candidate was rejected: it is the diagnostic
+    /// result the operator can read.
+    pub shadow_scoring: Option<String>,
 }
 
 impl Trial {
@@ -247,6 +266,11 @@ impl Trial {
                 .get("last_outcome")
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
+            shadow_scoring: value.get("shadow_scoring").map(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| v.to_string())
+            }),
             history: value
                 .get("history")
                 .and_then(|v| v.as_array())
@@ -272,6 +296,10 @@ impl Trial {
             "ends_at": self.ends_at,
             "retry_after": self.retry_after,
             "last_outcome": self.last_outcome,
+            "shadow_scoring": self
+                .shadow_scoring
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()),
             "history": self
                 .history
                 .iter()
@@ -302,7 +330,14 @@ impl Trial {
             retry_after,
             last_outcome: Some(outcome),
             history,
+            shadow_scoring: None,
         }
+    }
+
+    /// Attach the replay report to the record the status API reports.
+    fn with_scoring(mut self, scoring: Option<&serde_json::Value>) -> Self {
+        self.shadow_scoring = scoring.map(|value| value.to_string());
+        self
     }
 }
 
@@ -388,6 +423,7 @@ pub struct Retrainer {
     installer: OnceLock<Installer>,
     installed: OnceLock<InstalledHook>,
     shadow_scoring: OnceLock<ShadowScoring>,
+    activation: OnceLock<Activation>,
     /// Threat feeds and this network's usage: confirmation, probes and trial
     /// truths that do not depend on the operator.
     evidence: OnceLock<Arc<NetworkEvidence>>,
@@ -412,6 +448,7 @@ impl Retrainer {
             installer: OnceLock::new(),
             installed: OnceLock::new(),
             shadow_scoring: OnceLock::new(),
+            activation: OnceLock::new(),
             evidence: OnceLock::new(),
         }
     }
@@ -437,6 +474,12 @@ impl Retrainer {
 
     pub(crate) fn set_shadow_scoring(&self, scoring: ShadowScoring) {
         let _ = self.shadow_scoring.set(scoring);
+    }
+
+    /// Hand the retrainer the step that puts a passed replay's calibration and
+    /// threshold in force with the model, as one recorded version.
+    pub fn set_activation(&self, activation: Activation) {
+        let _ = self.activation.set(activation);
     }
 
     /// The model file this retrainer maintains.
@@ -942,6 +985,7 @@ impl Retrainer {
             retry_after: None,
             last_outcome: trial.last_outcome.clone(),
             history: trial.history.clone(),
+            shadow_scoring: trial.shadow_scoring.clone(),
         });
         self.log(
             LogLevel::Info,
@@ -1002,17 +1046,89 @@ impl Retrainer {
                     .ok()
                     .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
                     .unwrap_or_else(|| serde_json::json!({}));
-                if let Some(replay) = self.shadow_scoring.get() {
-                    let scoring = replay(&candidate, settings, started, ends).unwrap_or_else(
-                        |error| serde_json::json!({ "passed": false, "reason": error.to_string() }),
-                    );
-                    if let Some(record) = record.as_object_mut() {
-                        record.insert("shadow_scoring".to_string(), scoring);
-                    }
+                // The held-out replay decides, not the trial's automatic
+                // signals alone. Without a replay there is no held-out
+                // evidence, and the incumbent stays in force.
+                let scoring = self
+                    .shadow_scoring
+                    .get()
+                    .map(|replay| {
+                        replay(&candidate, settings, started, ends).unwrap_or_else(|error| {
+                            serde_json::json!({ "passed": false, "reason": error.to_string() })
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        serde_json::json!({
+                            "passed": false,
+                            "reason": "no candidate replay is configured, so the held-out results were not validated"
+                        })
+                    });
+                if let Some(record) = record.as_object_mut() {
+                    record.insert("shadow_scoring".to_string(), scoring.clone());
                 }
+                if !scoring
+                    .get("passed")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    let reason = scoring
+                        .get("reason")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("the candidate replay did not validate the held-out results")
+                        .to_string();
+                    self.reject(
+                        settings,
+                        trial,
+                        format!("candidate replay did not validate: {reason}"),
+                        now,
+                        Some(&scoring),
+                    );
+                    return;
+                }
+                // A passed replay carries the calibration map it fitted and
+                // the threshold it validated on the held-out half. Promoting
+                // without either would leave the old scoring in force.
+                let calibration = scoring.get("calibration").and_then(|value| {
+                    serde_json::from_value::<crate::calibration::CalibrationMap>(value.clone()).ok()
+                });
+                let threshold = scoring
+                    .pointer("/threshold/candidate")
+                    .and_then(serde_json::Value::as_f64)
+                    .map(|value| value as f32);
+                let signal_weights = scoring
+                    .get("signal_weights")
+                    .and_then(|value| serde_json::from_value(value.clone()).ok())
+                    .unwrap_or_default();
+                let (Some(calibration), Some(threshold)) = (calibration, threshold) else {
+                    self.reject(
+                        settings,
+                        trial,
+                        "candidate replay passed without a validated calibration map and threshold"
+                            .to_string(),
+                        now,
+                        Some(&scoring),
+                    );
+                    return;
+                };
                 let _ = std::fs::remove_file(candidate.with_extension("json"));
                 match self.promote(&candidate, &record) {
                     Ok(()) => {
+                        if let Some(activate) = self.activation.get() {
+                            let activation = TrialActivation {
+                                calibration: Some(calibration),
+                                threshold,
+                                signal_weights,
+                                report: scoring.clone(),
+                            };
+                            if let Err(e) = activate(&self.learned, &activation) {
+                                self.log(
+                                    LogLevel::Warn,
+                                    format!(
+                                        "AI promoted its candidate classifier but could not record the validated calibration and threshold as one version: {e}"
+                                    ),
+                                );
+                            }
+                        }
                         self.start_watch(chrono::Utc::now().timestamp());
                         self.log(
                             LogLevel::Info,
@@ -1021,7 +1137,11 @@ impl Retrainer {
                                 WATCH_SECS / 86_400
                             ),
                         );
-                        self.write_trial(&trial.concluded(format!("promoted: {why}"), None));
+                        self.write_trial(
+                            &trial
+                                .concluded(format!("promoted: {why}"), None)
+                                .with_scoring(Some(&scoring)),
+                        );
                     }
                     Err(e) => {
                         self.reject(
@@ -1029,17 +1149,25 @@ impl Retrainer {
                             trial,
                             format!("it passed its trial but could not be loaded: {e}"),
                             now,
+                            Some(&scoring),
                         );
                     }
                 }
             }
-            Err(why) => self.reject(settings, trial, why, now),
+            Err(why) => self.reject(settings, trial, why, now, None),
         }
     }
 
     /// Set a candidate aside, pause retraining and tell the operator. The
     /// live model was never touched.
-    fn reject(&self, settings: &AiSettings, trial: &Trial, why: String, now: i64) {
+    fn reject(
+        &self,
+        settings: &AiSettings,
+        trial: &Trial,
+        why: String,
+        now: i64,
+        scoring: Option<&serde_json::Value>,
+    ) {
         let candidate = candidate_path(&self.learned);
         let _ = std::fs::rename(&candidate, self.learned.with_extension("rejected.bin"));
         let _ = std::fs::remove_file(candidate.with_extension("json"));
@@ -1081,7 +1209,11 @@ impl Retrainer {
                 "The model the AI retrained did worse than the live model during its shadow trial ({why}), so it was set aside. Nothing changed for your clients.{detail}",
             ),
         );
-        self.write_trial(&trial.concluded(format!("rejected: {why}"), Some(now + pause)));
+        self.write_trial(
+            &trial
+                .concluded(format!("rejected: {why}"), Some(now + pause))
+                .with_scoring(scoring),
+        );
     }
 
     // ── The watch after an automatic promotion ──────────────────────────

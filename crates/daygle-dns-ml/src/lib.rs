@@ -58,6 +58,7 @@ pub mod page_model;
 pub mod plugin;
 #[cfg(feature = "verifier-onnx")]
 pub mod reference;
+pub mod replay;
 pub mod scanner;
 pub mod signals;
 pub mod store;
@@ -194,6 +195,10 @@ pub struct PageDiscoveryReport {
     pub reading: page::DiscoveryReading,
     pub inspected_at: i64,
     pub retry_at: i64,
+    /// The page reader, calibration map and fusion mode that produced the
+    /// finding. A review counts only under the scoring version that made the
+    /// finding it reviewed.
+    pub scoring_version: String,
 }
 
 impl PageDiscoveryReport {
@@ -444,6 +449,27 @@ impl AiEngine {
                 format!("sha256:{}", active.model_sha256)
             };
             if expected == threshold::model_version(&startup_model) {
+                // A scheduled promotion records its validated threshold in the
+                // candidate version; a manual one publishes it through the
+                // config path. On restart the recorded number is what the gate
+                // must compare again, but only while the persisted threshold
+                // is still the one the version replaced: an operator who has
+                // since set a newer threshold keeps it.
+                let current = settings_swap.load_full();
+                let replaced = active
+                    .scoring_config
+                    .get("replaces_threshold")
+                    .and_then(serde_json::Value::as_f64)
+                    .map(|value| value as f32);
+                let stale = (current.block_threshold - active.block_threshold).abs() > f32::EPSILON
+                    && replaced.is_some_and(|prior| {
+                        (current.block_threshold - prior).abs() <= f32::EPSILON
+                    });
+                if stale {
+                    let mut live = (*current).clone();
+                    live.block_threshold = active.block_threshold;
+                    settings_swap.store(Arc::new(live));
+                }
                 scanner.set_signal_weights(active.signal_weights);
                 false
             } else {
@@ -519,53 +545,49 @@ impl AiEngine {
                     threat_channel(&model_path, settings, &frozen, &logs, &reference, &network)?;
                 let index = intel.index();
                 let weights = scanner.signal_weights();
+                // Replay each reviewed domain through the same assessment,
+                // page/LLM evidence and policy rails the live gate uses. The
+                // active calibration is the one in force; the trial's own map
+                // is fitted below on these replayed scores.
+                let calibration = store.active_calibration()?;
+                let context = replay::ReplayContext::new(
+                    &store,
+                    settings,
+                    calibration.as_ref(),
+                    weights.clone(),
+                )?;
+                let mut policy_blocked = 0usize;
+                let mut escalation_blocked = 0usize;
                 let samples = reviewed
                     .into_iter()
                     .map(|(domain, threat)| {
-                        let score = backend
-                            .classify(&backend::ClassificationInput::domain_only(domain.clone()))
-                            .filter(|verdict| {
-                                verdict.severity == backend::Severity::Threat
-                                    && verdict.confidence >= settings.confidence_floor
-                            })
-                            .map_or(0.0, |verdict| {
-                                let observations = assessment::observe(
-                                    &assessment::Context {
-                                        store: &store,
-                                        intel: &index,
-                                    },
-                                    &assessment::AssessmentInput {
-                                        domain: &domain,
-                                        threat_score: verdict.threat_score.unwrap_or_default(),
-                                        confidence: verdict.confidence,
-                                        severity: verdict.severity.as_str(),
-                                        evidence: &verdict.evidence,
-                                        page: None,
-                                        now: ends,
-                                    },
-                                );
-                                let fused = fusion::fuse(&observations, &weights);
-                                assessment::score_of_record(
-                                    settings.fusion,
-                                    verdict.confidence,
-                                    Some(&fused),
-                                    None,
-                                )
-                                .assessment
-                            });
+                        let outcome =
+                            replay::replay_with(&context, backend.as_ref(), &domain, &index, ends);
+                        if outcome.policy_blocked.is_some() {
+                            policy_blocked += 1;
+                            if outcome.threat {
+                                escalation_blocked += 1;
+                            }
+                        }
                         threshold::Sample {
                             registrable: assessment::registrable(&domain),
                             domain,
-                            score,
+                            score: outcome.score,
                             group: threshold::Group::Correction,
                             label: threshold::LabelSource::OperatorCorrection,
                             threat: Some(threat),
                             scored_at: ends,
+                            policy_blocked: outcome.policy_blocked,
                         }
                     })
                     .collect();
                 let mut report = threshold::tune_replayed_scores(samples, &model, settings, ends);
-                report["scope"] = serde_json::json!("hostname_and_network");
+                report["scope"] = serde_json::json!("hostname_page_llm_network_and_policy");
+                report["policy_rails"] = context.rails();
+                report["policy_blocked"] = serde_json::json!(policy_blocked);
+                report["escalation_blocked"] = serde_json::json!(escalation_blocked);
+                report["signal_weights"] =
+                    serde_json::to_value(&weights).unwrap_or(serde_json::Value::Null);
                 Ok(report)
             }
         }));
@@ -593,7 +615,7 @@ impl AiEngine {
             scanner.exemptions(),
             settings_swap.clone(),
         );
-        Ok(Arc::new(Self {
+        let engine = Arc::new(Self {
             store,
             scanner,
             settings: settings_swap,
@@ -609,7 +631,20 @@ impl AiEngine {
             domain_age,
             llm: llm::LlmManager::new(),
             install_model,
-        }))
+        });
+        // A scheduled promotion records what it validated through the same
+        // candidate ledger a manual promotion uses. The hook is installed
+        // once, after the engine exists, so the retrainer can call back into
+        // the activation service without owning the configuration.
+        engine.shared.retrainer.set_activation(Box::new({
+            let engine = engine.clone();
+            move |path, activation| {
+                engine
+                    .record_scheduled_activation(path, activation)
+                    .map(|_| ())
+            }
+        }));
+        Ok(engine)
     }
 
     /// Keep the threat feeds downloaded and fresh until `shutdown`. `mirror`
@@ -1375,6 +1410,76 @@ impl AiEngine {
         )
     }
 
+    /// Put a passed trial's validated scoring in force as one candidate
+    /// version: the model is already live (the retrainer installed it), and
+    /// this records the calibration map, threshold, signal weights and
+    /// validation report together, activates the map, sets the threshold and
+    /// re-scores the stored verdicts. A restart reads the same active version,
+    /// so a scheduled promotion is as recoverable as a manual one.
+    pub fn record_scheduled_activation(
+        &self,
+        path: &Path,
+        activation: &maintain::TrialActivation,
+    ) -> Result<store::CandidateVersion> {
+        let settings = self.settings.load_full();
+        // What the persisted configuration still says, so a restart can tell
+        // this promotion from a newer operator threshold. A second scheduled
+        // promotion keeps the root of the chain unless the operator changed
+        // the threshold in between.
+        let replaces_threshold = match self.store.active_candidate()? {
+            Some(prior)
+                if prior.scoring_config.get("replaces_threshold").is_some()
+                    && (settings.block_threshold - prior.block_threshold).abs() <= f32::EPSILON =>
+            {
+                prior
+                    .scoring_config
+                    .get("replaces_threshold")
+                    .and_then(serde_json::Value::as_f64)
+                    .map(|value| value as f32)
+                    .unwrap_or(settings.block_threshold)
+            }
+            _ => settings.block_threshold,
+        };
+        let spec = candidate::CandidateSpec {
+            model_path: path.to_string_lossy().into_owned(),
+            block_threshold: activation.threshold,
+            calibration: activation.calibration.clone(),
+            signal_weights: activation.signal_weights.clone(),
+            scoring_config: serde_json::json!({
+                "block_threshold": activation.threshold,
+                "replaces_threshold": replaces_threshold,
+                "fusion": settings.fusion,
+                "threshold_fpr_target": settings.threshold_fpr_target,
+                "confidence_floor": settings.confidence_floor,
+                "authority": settings.authority,
+                "auto_block_categories": settings.auto_block_categories,
+                "auto_block_removals": settings.auto_block_removals,
+                "threat_labels": settings.threat_labels(),
+            }),
+            validation_report: activation.report.clone(),
+            metrics: activation
+                .calibration
+                .as_ref()
+                .and_then(|map| map.metrics.clone()),
+        };
+        let candidate = candidate::build(&self.store, &spec)?;
+        let promoted = self.store.promote_candidate(candidate.id)?;
+        let calibration = self.store.active_calibration()?;
+        self.scanner.set_calibration(calibration);
+        self.scanner
+            .set_signal_weights(promoted.signal_weights.clone());
+        let mut live = (*settings).clone();
+        live.block_threshold = promoted.block_threshold;
+        self.settings.store(Arc::new(live));
+        if let Err(e) = self.rescore_stored_verdicts("a scheduled promotion") {
+            self.store.rollback_active_candidate()?;
+            return Err(e);
+        }
+        self.refresh_snapshot_now();
+        self.trigger_rescan();
+        Ok(promoted)
+    }
+
     /// Every recorded candidate version, newest first.
     pub fn candidates_status(&self) -> Result<serde_json::Value> {
         let candidates = self.store.candidates(50)?;
@@ -1767,7 +1872,17 @@ impl AiEngine {
     /// stage in force.
     pub fn authority_status(&self) -> Result<serde_json::Value> {
         let settings = self.settings.load_full();
-        let decisions = authority::evaluate(&self.store, &settings.authority)?;
+        let calibration_version = self
+            .scanner
+            .calibration_map()
+            .map(|map| map.version)
+            .unwrap_or_default();
+        let decisions = authority::evaluate_for_scoring(
+            &self.store,
+            &settings.authority,
+            &calibration_version,
+            settings.fusion.as_str(),
+        )?;
         let now = chrono::Utc::now().timestamp();
         let reviews = self.store.authority_reviews(now)?;
         let reviewed_sources = [authority::Source::Feed, authority::Source::Model]
@@ -1786,14 +1901,21 @@ impl AiEngine {
                 })
             })
             .collect::<Vec<_>>();
+        let scoring_version = self.scanner.scoring_version();
         let page_discovery_review = if settings.monitor_page_discovery {
-            let (findings, corrected, confirmed) = self.store.page_discovery_reviews(now)?;
+            // The status reports every finding and the review that attaches
+            // to it; each row carries the scoring version that made it. Only
+            // advancement restricts credit to the version in force.
+            let (findings, corrected, confirmed) = self.store.page_discovery_reviews(now, None)?;
             let reviewed = corrected + confirmed;
             Some(serde_json::json!({
+                "scoring_version": scoring_version,
+                "findings": findings,
                 "unreviewed": findings.saturating_sub(reviewed),
                 "corrected": corrected,
                 "confirmed": confirmed,
                 "reviewed_correction_share": (reviewed > 0).then(|| corrected as f64 / reviewed as f64),
+                "reviews": self.store.page_discovery_review_rows(now, None)?,
             }))
         } else {
             None
@@ -1810,6 +1932,9 @@ impl AiEngine {
                 "safety_limit": crate::scanner::MAX_NEW_BLOCKS_PER_REFRESH,
                 "demote_fp_rate": settings.authority.demote_fp_rate,
                 "demote_min_samples": settings.authority.demote_min_samples,
+                "advancement": settings.authority.advancement,
+                "advance_min_reviews": settings.authority.advance_min_reviews,
+                "advance_fp_rate": settings.authority.advance_fp_rate,
             },
             "sources": decisions
                 .iter()
