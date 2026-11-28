@@ -391,6 +391,20 @@ it. The per-refresh limit on new blocks can be tightened here, never raised
 above its 500-domain ceiling. Turn it on under AI -> Settings (Scoring) ->
 Enforcement Authority, or with `ai.authority` in the config file.
 
+Enable advancement to start automated sources at Monitor and let them earn
+Propose and Enforce from current, independently reviewed findings. Page
+discovery earns its own reviews and shares the configured model ceiling.
+Unreviewed findings and exemptions supply no advancement credit. Cached
+findings from older scoring versions cannot use authority earned by the
+active version. Changing scoring can temporarily return a source to Monitor
+while it collects current reviews. Operator decisions still take effect
+through the existing override rules.
+
+AI Status shows why training is waiting, validating or paused, and shows
+each source's current authority, configured ceiling and review progress.
+The last scheduled training outcome survives restart. Passing model
+validation and earning production enforcement authority are separate steps.
+
 The audit and the exact migration, endpoint, test and limitation of each
 stage are in [AI_SCORING_AUDIT.md](AI_SCORING_AUDIT.md).
 

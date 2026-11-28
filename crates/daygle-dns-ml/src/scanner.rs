@@ -252,6 +252,14 @@ impl Scanner {
             "calibration": calibration.as_ref().as_ref().map(|map| &map.version),
             "threshold": settings.block_threshold,
             "confidence_floor": settings.confidence_floor,
+            "backend": self.threat.name(),
+            "verifier_threshold": settings.verifier_threshold,
+            "threat_feeds": settings.threat_feeds,
+            "network_evidence": settings.network_evidence,
+            "domain_age": settings.domain_age,
+            "llm_model": settings.llm_enabled.then_some(&settings.llm_model),
+            "llm_url": settings.llm_enabled.then_some(&settings.llm_url),
+            "page_confidence_floor": settings.page_confidence_floor,
             "threat_labels": settings.threat_labels(),
             "page_rule": settings.page_rule,
         });
@@ -1004,6 +1012,7 @@ impl Scanner {
             .map_or(&live as &dyn crate::page::PageReader, |reader| {
                 reader.as_ref()
             });
+        let scoring_version = self.page_scoring_version(cfg);
         let readings = std::thread::scope(|scope| {
             let handles: Vec<_> = candidates
                 .into_iter()
@@ -1021,7 +1030,6 @@ impl Scanner {
                 .filter_map(|handle| handle.join().ok())
                 .collect::<Vec<_>>()
         });
-        let scoring_version = self.scoring_version();
         for (domain, reading) in readings {
             self.store.save_page_discovery(
                 &domain,
@@ -1272,6 +1280,8 @@ impl Scanner {
         // The label list is what separates a threat from an ordinary
         // category, so it gates blocking too.
         let backend = self.threat.name();
+        let version = (cfg.authority.enabled && cfg.authority.advancement)
+            .then(|| self.verdict_scoring_version(cfg));
         let binary_model = crate::backend::is_binary_backend(&backend)
             && !crate::backend::is_binary_starter(&backend);
         for candidate in self
@@ -1279,6 +1289,12 @@ impl Scanner {
             .fresh_blocked(now, cfg.block_threshold, cfg.fusion)?
         {
             if cfg.authority.enabled {
+                if version
+                    .as_ref()
+                    .is_some_and(|current| current != &candidate.finding_version)
+                {
+                    continue;
+                }
                 let source = crate::authority::Source::of(&candidate.source);
                 let may_block = crate::authority::decision_for(&decisions, source)
                     .is_some_and(|decision| decision.may_block());
@@ -1348,9 +1364,12 @@ impl Scanner {
             let intel = intel.index();
             let calibration = self.calibration.load_full();
             let weights = self.weights.load_full();
-            for (domain, expires_at) in
-                self.store.page_discovery_blocks(now, cfg.block_threshold)?
-            {
+            let page_version = version.as_ref().map(|_| self.page_scoring_version(cfg));
+            for (domain, expires_at) in self.store.page_discovery_blocks(
+                now,
+                cfg.block_threshold,
+                page_version.as_deref(),
+            )? {
                 if eligible.contains_key(&domain)
                     || exempt(&domain, overrides)
                     || intel.is_popular(&domain)

@@ -324,6 +324,7 @@ impl AiStore {
         &self,
         now: i64,
         threshold: f32,
+        scoring_version: Option<&str>,
     ) -> Result<Vec<(String, i64)>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
@@ -332,6 +333,7 @@ impl AiStore {
                ON v.domain = p.domain AND v.channel = 'threat'
              WHERE p.enforcement_eligible = 1 AND p.confidence >= ?2
                AND p.final_host = p.domain AND p.retry_at > ?1
+               AND (?3 IS NULL OR p.scoring_version = ?3)
                AND v.expires_at > ?1 AND v.status IN ('classified', 'skipped')
                AND v.severity != 'disputed'
                AND NOT EXISTS (SELECT 1 FROM ai_overrides o WHERE o.domain = p.domain)
@@ -339,7 +341,11 @@ impl AiStore {
         )?;
         let rows = stmt
             .query_map(
-                params![now, threshold.max(crate::page::DISCOVERY_ENFORCEMENT_FLOOR)],
+                params![
+                    now,
+                    threshold.max(crate::page::DISCOVERY_ENFORCEMENT_FLOOR),
+                    scoring_version
+                ],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?
             .collect::<rusqlite::Result<_>>()?;
@@ -1047,7 +1053,10 @@ mod tests {
         store
             .save_page_discovery(domain, &reading, now, "page")
             .unwrap();
-        assert!(store.page_discovery_blocks(now, 0.95).unwrap().is_empty());
+        assert!(store
+            .page_discovery_blocks(now, 0.95, None)
+            .unwrap()
+            .is_empty());
         assert!(store
             .directly_corroborated_discoveries(now)
             .unwrap()
@@ -1056,7 +1065,17 @@ mod tests {
         store
             .save_page_discovery(domain, &reading, now, "page")
             .unwrap();
-        assert_eq!(store.page_discovery_blocks(now, 0.95).unwrap()[0].0, domain);
+        assert_eq!(
+            store
+                .page_discovery_blocks(now, 0.95, Some("page"))
+                .unwrap()[0]
+                .0,
+            domain
+        );
+        assert!(store
+            .page_discovery_blocks(now, 0.95, Some("superseded"))
+            .unwrap()
+            .is_empty());
         assert_eq!(
             store.directly_corroborated_discoveries(now).unwrap(),
             [(domain.to_string(), None)]

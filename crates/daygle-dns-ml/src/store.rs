@@ -148,6 +148,7 @@ impl BlockSource {
 /// that qualified it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlockCandidate {
+    pub(crate) finding_version: String,
     pub domain: String,
     pub category: String,
     pub expires_at: i64,
@@ -863,7 +864,7 @@ impl AiStore {
         let mut stmt = conn.prepare(&format!(
             "SELECT domain, category, expires_at,
                     CASE WHEN instr(evidence, ', listed by ') > 0 THEN 'feed' ELSE 'model' END,
-                    backend
+                    backend, finding_version
              FROM ai_verdicts
              WHERE channel = 'threat' AND status = 'classified'
                AND severity != 'disputed'
@@ -893,6 +894,7 @@ impl AiStore {
                         category: r.get(1)?,
                         expires_at: r.get(2)?,
                         backend: r.get(4)?,
+                        finding_version: r.get(5)?,
                         source: match r.get::<_, String>(3)?.as_str() {
                             "feed" => BlockSource::Feed,
                             _ => BlockSource::Model,

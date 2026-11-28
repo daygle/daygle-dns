@@ -73,10 +73,27 @@ pub struct AuthorityDecision {
     pub false_positives: i64,
     pub true_positives: i64,
     pub demoted: bool,
+    pub confirmed_reviews: i64,
+    pub corrected_reviews: i64,
+    pub next_review_target: Option<i64>,
     pub reason: String,
 }
 
 impl AuthorityDecision {
+    pub(crate) fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "source": self.source.as_str(),
+            "configured": self.configured.as_str(),
+            "effective": self.effective.as_str(),
+            "false_positives": self.false_positives,
+            "true_positives": self.true_positives,
+            "demoted": self.demoted,
+            "reason": self.reason,
+            "confirmed_reviews": self.confirmed_reviews,
+            "corrected_reviews": self.corrected_reviews,
+            "next_review_target": self.next_review_target,
+        })
+    }
     /// Whether findings from this source may reach the block snapshot.
     pub fn may_block(&self) -> bool {
         self.effective == AuthorityStage::Enforce
@@ -287,6 +304,10 @@ pub(crate) fn evaluate_for_identity(
             false_positives,
             true_positives,
             demoted: demote,
+            confirmed_reviews,
+            corrected_reviews,
+            next_review_target: (settings.advancement && !demote && rung(effective) < ceiling)
+                .then(|| (i64::from(rung(effective)) + 1) * minimum),
             reason,
         });
     }
