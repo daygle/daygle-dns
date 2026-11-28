@@ -19,7 +19,7 @@ use hickory_proto::dnssec::{Algorithm, DigestType, Proof, SigningKey, TrustAncho
 use hickory_proto::op::{
     DnsRequest, DnsRequestOptions, DnsResponse, Message, OpCode, ResponseCode,
 };
-use hickory_proto::rr::rdata::{A, NS, SOA};
+use hickory_proto::rr::rdata::{A, CNAME, NS, SOA};
 use hickory_proto::rr::{DNSClass, LowerName, Name, RData, Record, RecordType};
 use hickory_resolver::net::dnssec::DnssecDnsHandle;
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
@@ -269,6 +269,100 @@ async fn an_answer_under_a_signed_delegation_with_unreadable_servers_stays_bogus
 #[tokio::test]
 async fn an_answer_under_a_name_that_is_no_delegation_stays_bogus() {
     assert_eq!(proof_of("www.inside.").await, Proof::Bogus);
+}
+
+#[tokio::test]
+async fn alias_rrsets_are_validated_concurrently_with_separate_proofs() {
+    #[derive(Clone)]
+    struct Chain {
+        root: Fake,
+        target: Name,
+        probes: Arc<tokio::sync::Barrier>,
+    }
+
+    impl DnsHandle for Chain {
+        type Response = BoxStream<'static, Result<DnsResponse, NetError>>;
+        type Runtime = TokioRuntimeProvider;
+
+        fn send(&self, request: DnsRequest) -> Self::Response {
+            let query = request.queries.first().unwrap().clone();
+            let owner = query.name().clone();
+            let alias = name("alias.unsigned.");
+            let target = self.target.clone();
+            let mut message = Message::response(request.metadata.id, OpCode::Query);
+            message.queries.push(query.clone());
+            if owner == alias && query.query_type() == RecordType::A {
+                message.add_answer(Record::from_rdata(
+                    owner,
+                    300,
+                    RData::CNAME(CNAME(target.clone())),
+                ));
+                message.add_answer(Record::from_rdata(
+                    target,
+                    300,
+                    RData::A(A::new(198, 51, 100, 7)),
+                ));
+            } else if query.query_type() == RecordType::NS && (owner == alias || owner == target) {
+                // The first probe cannot finish until the other RRset starts.
+                let probes = self.probes.clone();
+                return stream::once(async move {
+                    probes.wait().await;
+                    DnsResponse::from_message(message).map_err(NetError::from)
+                })
+                .boxed();
+            } else {
+                return self.root.send(request);
+            }
+            stream::once(std::future::ready(
+                DnsResponse::from_message(message).map_err(NetError::from),
+            ))
+            .boxed()
+        }
+    }
+
+    let root = Arc::new(Root::new());
+    let anchor = Arc::new(root.anchor.clone());
+    for (target, target_proof) in [
+        ("target.unsigned.", Proof::Insecure),
+        ("target.signed.", Proof::Bogus),
+    ] {
+        let validator = DnssecDnsHandle::with_trust_anchor(
+            Chain {
+                root: Fake(root.clone()),
+                target: name(target),
+                probes: Arc::new(tokio::sync::Barrier::new(2)),
+            },
+            anchor.clone(),
+        );
+        let answer = validator
+            .lookup(
+                hickory_proto::op::Query::query(name("alias.unsigned."), RecordType::A),
+                DnsRequestOptions::default(),
+            )
+            .first_answer();
+        let response = tokio::time::timeout(std::time::Duration::from_secs(2), answer)
+            .await
+            .expect("both alias-chain RRsets should start validating")
+            .unwrap();
+        assert_eq!(
+            response
+                .answers
+                .iter()
+                .find(|record| record.record_type() == RecordType::CNAME)
+                .unwrap()
+                .proof,
+            Proof::Insecure
+        );
+        assert_eq!(
+            response
+                .answers
+                .iter()
+                .find(|record| record.record_type() == RecordType::A)
+                .unwrap()
+                .proof,
+            target_proof
+        );
+    }
 }
 
 /// A DS denial can come back with an unsigned SOA owned by the very name

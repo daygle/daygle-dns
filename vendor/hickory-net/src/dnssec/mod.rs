@@ -17,7 +17,7 @@ use core::{
     time::Duration,
 };
 use std::{
-    collections::{HashMap, HashSet, hash_map::DefaultHasher},
+    collections::{hash_map::DefaultHasher, HashMap, HashSet},
     sync::Arc,
     time::Instant,
 };
@@ -34,8 +34,8 @@ use crate::{
     error::{DnsError, NetError, NoRecords},
     proto::{
         dnssec::{
+            rdata::{DNSSECRData, DNSKEY, DS, NSEC, RRSIG},
             Proof, TrustAnchors, Verifier,
-            rdata::{DNSKEY, DNSSECRData, DS, NSEC, RRSIG},
         },
         op::{
             DnsRequest, DnsRequestOptions, DnsResponse, Edns, Message, OpCode, Query, ResponseCode,
@@ -46,7 +46,7 @@ use crate::{
         },
     },
     runtime::{RuntimeProvider, Time},
-    xfer::{FirstAnswer, dns_handle::DnsHandle},
+    xfer::{dns_handle::DnsHandle, FirstAnswer},
 };
 
 mod error;
@@ -439,6 +439,7 @@ impl<H: DnsHandle> DnssecDnsHandle<H> {
             .into_iter()
             .partition::<Vec<_>, _>(|r| r.record_type().is_rrsig());
 
+        let mut rrsets = Vec::with_capacity(rrset_types.len());
         for (name, record_type) in rrset_types {
             // collect all the rrsets to verify
             let current_rrset;
@@ -461,7 +462,17 @@ impl<H: DnsHandle> DnssecDnsHandle<H> {
                 "verifying: {name} record_type: {record_type}, rrsigs: {rrsig_len}",
                 rrsig_len = rrsigs.len()
             );
+            rrsets.push(rrset);
+        }
 
+        // Validate independent RRsets in a top-level response concurrently.
+        // A CNAME chain may cross several zones. Each RRset still needs its
+        // own proof, but their lookups need not run one after another.
+        // Keep nested DS and DNSKEY lookups serial to bound fan-out.
+        const RESPONSE_VALIDATION_CONCURRENCY: usize = 3;
+        let validations = stream::iter(rrsets).map(|rrset| async move {
+            let name = rrset.name();
+            let record_type = rrset.record_type();
             // verify this rrset
             let context = RrsetVerificationContext {
                 query,
@@ -532,13 +543,12 @@ impl<H: DnsHandle> DnssecDnsHandle<H> {
                 ..
             } = rrset.into_parts();
 
-            for mut record in current_rrset {
+            let mut validated = current_rrset;
+            for record in &mut validated {
                 record.proof = proof;
                 if let (Proof::Secure, Some(ttl)) = (proof, adjusted_ttl) {
                     record.ttl = ttl;
                 }
-
-                return_records.push(record);
             }
 
             // only mark the RRSIG used for the proof
@@ -558,7 +568,18 @@ impl<H: DnsHandle> DnssecDnsHandle<H> {
             }
 
             // push all the RRSIGs back to the return
-            return_records.extend(current_rrsigs);
+            validated.extend(current_rrsigs);
+            validated
+        });
+        let concurrency = if self.request_depth == 1 {
+            RESPONSE_VALIDATION_CONCURRENCY
+        } else {
+            1
+        };
+        let validations = validations.buffered(concurrency);
+        futures_util::pin_mut!(validations);
+        while let Some(validated) = validations.next().await {
+            return_records.extend(validated);
         }
 
         // Add back all the RRSIGs and any records that were not verified
@@ -1354,7 +1375,9 @@ fn verify_dnskey(
         if r.data.algorithm() != key_algorithm {
             trace!(
                 "skipping DS record due to algorithm mismatch, expected algorithm {}: ({}, {})",
-                key_algorithm, r.name, r.data,
+                key_algorithm,
+                r.name,
+                r.data,
             );
 
             continue;
@@ -1363,7 +1386,8 @@ fn verify_dnskey(
         if r.data.key_tag() != key_tag {
             trace!(
                 "skipping DS record due to key tag mismatch, expected tag {key_tag}: ({}, {})",
-                r.name, r.data,
+                r.name,
+                r.data,
             );
 
             continue;
@@ -2091,27 +2115,27 @@ mod test {
         time::{Duration, Instant},
     };
 
-    use super::{RrsigValidity, find_nsec_covering_record, no_closer_matches, verify_nsec};
+    use super::{find_nsec_covering_record, no_closer_matches, verify_nsec, RrsigValidity};
     use crate::{
         dnssec::{
             DnsRequestOptions, Proof, ProofError, ProofErrorKind, RrsetVerificationContext,
             ValidationCache,
         },
         proto::{
-            ProtoError,
             dnssec::{
-                Algorithm, PublicKeyBuf,
                 rdata::{
-                    DNSKEY as rdataDNSKEY, DNSSECRData, NSEC as rdataNSEC, RRSIG as rdataRRSIG,
-                    SigInput,
+                    DNSSECRData, SigInput, DNSKEY as rdataDNSKEY, NSEC as rdataNSEC,
+                    RRSIG as rdataRRSIG,
                 },
+                Algorithm, PublicKeyBuf,
             },
             op::{Query, ResponseCode},
             rr::{
-                Name, RData, Record, RecordSet,
+                rdata, Name, RData, Record, RecordSet,
                 RecordType::{A, AAAA, DNSKEY, DS, MX, NS, NSEC, RRSIG, SOA, TXT},
-                SerialNumber, rdata,
+                SerialNumber,
             },
+            ProtoError,
         },
     };
     use test_support::subscribe;

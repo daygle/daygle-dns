@@ -103,6 +103,14 @@ All are worth offering upstream.
    still cannot establish an insecure delegation. Covered by
    `a_ds_denial_does_not_reenter_its_own_validation`.
 
+9. **Validate independent record sets in a top-level response concurrently**
+   (`hickory-net` `dnssec/mod.rs`). A long CNAME chain can cross several
+   zones. Validate up to three record sets from the response at once, with
+   no change to the proof required for each. Nested DS and DNSKEY validation
+   keeps its serial order. This reduces cold lookup latency for chains like
+   `global.cainiao.com`. Covered by
+   `alias_rrsets_are_validated_concurrently_with_separate_proofs`.
+
 ## Upgrading hickory
 
 Bump the version in the workspace `Cargo.toml`, replace each directory here
