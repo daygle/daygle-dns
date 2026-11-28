@@ -724,12 +724,18 @@ impl AiStore {
     /// candidate a candidate again. Its calibration is not touched - the caller
     /// restores the map that was active before.
     pub fn retire_active_candidate(&self, id: i64) -> Result<()> {
-        let conn = self.lock()?;
-        conn.execute(
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        tx.execute(
             "UPDATE ai_candidates SET status = 'candidate', promoted_at = 0, superseded_id = 0
              WHERE id = ?1 AND status = 'active'",
             params![id],
         )?;
+        tx.execute(
+            "DELETE FROM ai_meta WHERE key = 'scheduled_activation_pending' AND value = ?1",
+            params![id.to_string()],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -739,6 +745,21 @@ impl AiStore {
     /// a rollback finds it. The rows change in one transaction; the caller
     /// then restores the artifact and publishes the threshold.
     pub fn promote_candidate(&self, id: i64) -> Result<CandidateVersion> {
+        self.promote_candidate_with_pending_activation(id, false)
+    }
+
+    /// Promote a scheduled candidate and record the in-progress activation
+    /// marker in the same SQLite transaction. Startup uses this marker to
+    /// finish the model-file half if the process stops before installation.
+    pub fn promote_scheduled_candidate(&self, id: i64) -> Result<CandidateVersion> {
+        self.promote_candidate_with_pending_activation(id, true)
+    }
+
+    fn promote_candidate_with_pending_activation(
+        &self,
+        id: i64,
+        scheduled_activation: bool,
+    ) -> Result<CandidateVersion> {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
         let previous: Option<i64> = tx
@@ -785,8 +806,67 @@ impl AiStore {
                 params![candidate.calibration_version],
             )?;
         }
+        if scheduled_activation {
+            tx.execute(
+                "INSERT INTO ai_meta (key, value) VALUES ('scheduled_activation_pending', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = ?1",
+                params![id.to_string()],
+            )?;
+        } else {
+            // Any explicit later promotion supersedes a pending scheduled
+            // activation, so startup must not resurrect that older candidate.
+            tx.execute(
+                "DELETE FROM ai_meta WHERE key = 'scheduled_activation_pending'",
+                [],
+            )?;
+        }
         tx.commit()?;
         Ok(candidate)
+    }
+
+    /// The active scheduled activation awaiting startup/runtime completion.
+    pub fn pending_scheduled_activation(&self) -> Result<Option<CandidateVersion>> {
+        let conn = self.lock()?;
+        let id: Option<String> = conn
+            .query_row(
+                "SELECT value FROM ai_meta WHERE key = 'scheduled_activation_pending'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(id) = id else {
+            return Ok(None);
+        };
+        let id = id.parse::<i64>().map_err(|error| {
+            DaygleError::Database(format!("invalid scheduled activation marker: {error}"))
+        })?;
+        let candidate = conn
+            .query_row(
+                &format!("SELECT {CANDIDATE_COLUMNS} FROM ai_candidates WHERE id = ?1"),
+                params![id],
+                candidate_row,
+            )
+            .optional()?;
+        match candidate {
+            Some(candidate) if candidate.is_active() => Ok(Some(candidate)),
+            Some(_) => Err(DaygleError::Database(format!(
+                "scheduled activation marker refers to inactive candidate {id}"
+            ))),
+            None => Err(DaygleError::Database(format!(
+                "scheduled activation marker refers to missing candidate {id}"
+            ))),
+        }
+    }
+
+    /// Clear the in-progress marker after the model and scoring are installed.
+    /// The id guard prevents an older completion from clearing a newer one.
+    pub fn finish_scheduled_activation(&self, id: i64) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "DELETE FROM ai_meta WHERE key = 'scheduled_activation_pending' AND value = ?1",
+            params![id.to_string()],
+        )?;
+        Ok(())
     }
 
     /// Roll back the active candidate to the one it replaced. Returns the
@@ -840,6 +920,10 @@ impl AiStore {
                 params![restored.calibration_version],
             )?;
         }
+        tx.execute(
+            "DELETE FROM ai_meta WHERE key = 'scheduled_activation_pending' AND value = ?1",
+            params![active.id.to_string()],
+        )?;
         tx.commit()?;
         Ok(Some(restored))
     }

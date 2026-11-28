@@ -259,6 +259,13 @@ impl AiEngine {
                 "restored learned model files after an interrupted rotation",
             );
         }
+        // The scoring version and this pending marker commit together before
+        // the scheduled model-file rotation. If the process stopped in that
+        // window, startup restores the version's artifact before choosing
+        // either model channel, rebuilds its assessments and finishes the trial
+        // watch/history before clearing the marker.
+        let recovered_scheduled_activation =
+            recover_scheduled_activation(&store, &learned_shared, &logs)?;
         let learned_reference = database_path.with_file_name(LEARNED_REFERENCE_FILE);
         let pick = |learned: &Path, configured: &str, what: &str| -> bool {
             if !prefer_learned(learned, configured) {
@@ -285,7 +292,8 @@ impl AiEngine {
             );
             true
         };
-        let shared_learned = pick(&learned_shared, &settings.model_path, "classifier");
+        let shared_learned = recovered_scheduled_activation.is_some()
+            || pick(&learned_shared, &settings.model_path, "classifier");
         let shared_path = if shared_learned {
             learned_shared.to_string_lossy().into_owned()
         } else {
@@ -486,8 +494,12 @@ impl AiEngine {
             false
         };
         retire_calibration_for_changed_model(&store, &scanner, settings, &startup_model, &logs);
-        if mismatched_candidate {
-            scanner.rescore_assessments(settings)?;
+        if mismatched_candidate || recovered_scheduled_activation.is_some() {
+            // A scheduled version is committed before its in-memory scoring
+            // and model installation. Re-score on startup even when artifact
+            // recovery succeeded, so a stop between record commit and rescore
+            // cannot leave stored verdicts tagged with the prior calibration.
+            scanner.rescore_assessments(&settings_swap.load_full())?;
         }
         // Maintenance installs models too (a retrain, a scheduled promotion, a
         // restore), and the scanner is the only holder of the map in force, so
@@ -639,14 +651,27 @@ impl AiEngine {
         engine.shared.retrainer.set_activation(Box::new({
             let engine = engine.clone();
             move |artifact, live, activation| {
-                let (_promoted, undo) =
+                let (promoted, undo) =
                     engine.record_scheduled_activation(artifact, live, activation)?;
-                let engine = engine.clone();
-                Ok(crate::maintain::ActivationUndo::new(move || {
-                    engine.undo_scheduled_activation(undo)
-                }))
+                let engine_for_undo = engine.clone();
+                let engine_for_complete = engine.clone();
+                Ok(crate::maintain::ActivationUndo::new(
+                    move || engine_for_undo.undo_scheduled_activation(undo),
+                    move || {
+                        engine_for_complete
+                            .shared
+                            .retrainer
+                            .complete_recovered_activation(&promoted)
+                    },
+                ))
             }
         }));
+        if let Some(candidate) = recovered_scheduled_activation {
+            engine
+                .shared
+                .retrainer
+                .complete_recovered_activation(&candidate)?;
+        }
         Ok(engine)
     }
 
@@ -1477,15 +1502,14 @@ impl AiEngine {
                 .and_then(|map| map.metrics.clone()),
         };
         let candidate = candidate::build_from(&self.store, &spec, artifact)?;
-        let promoted = self.store.promote_candidate(candidate.id)?;
+        let promoted = self.store.promote_scheduled_candidate(candidate.id)?;
         let undo = ScheduledActivationUndo {
             promoted: promoted.clone(),
             previous_calibration,
             previous_weights,
             previous_threshold,
         };
-        let calibration = self.store.active_calibration()?;
-        self.scanner.set_calibration(calibration);
+        self.scanner.set_calibration(promoted.calibration.clone());
         self.scanner
             .set_signal_weights(promoted.signal_weights.clone());
         let mut live = (*settings).clone();
@@ -1566,6 +1590,11 @@ impl AiEngine {
         if let Err(e) = self.rescore_stored_verdicts("a scheduled activation was undone") {
             failures.push(format!(
                 "could not put the stored verdicts back under the scoring that was in force: {e}"
+            ));
+        }
+        if let Err(e) = self.store.finish_scheduled_activation(undo.promoted.id) {
+            failures.push(format!(
+                "could not clear the pending activation marker: {e}"
             ));
         }
         if failures.is_empty() {
@@ -2316,6 +2345,87 @@ fn note_live_model(store: &AiStore, path: &str, logs: &LogStore) {
 
 /// Whether a learned model should be preferred over the configured one: it
 /// exists and is at least as new (or nothing is configured).
+/// Complete the file half of a scheduled activation if its scoring record
+/// committed but the learned model rotation did not. The active record stores
+/// the model bytes in `ai_model_artifacts`; restoring them here makes startup
+/// load the exact model whose calibration, weights and threshold are active.
+///
+/// Return the pending version after verifying/restoring its artifact, so
+/// startup gives it precedence over an older configured model, rebuilds stored
+/// scores and completes its watch/history before clearing the marker.
+fn recover_scheduled_activation(
+    store: &AiStore,
+    learned: &Path,
+    logs: &LogStore,
+) -> Result<Option<store::CandidateVersion>> {
+    let Some(active) = store.pending_scheduled_activation()? else {
+        return Ok(None);
+    };
+    if Path::new(&active.model_path) != learned {
+        return Err(DaygleError::Database(format!(
+            "pending scheduled activation {} points at unexpected model path {}",
+            active.version, active.model_path
+        )));
+    }
+    let expected = if active.model_sha256 == "builtin" {
+        "builtin".to_string()
+    } else {
+        format!("sha256:{}", active.model_sha256)
+    };
+    let already_installed = threshold::model_version(&learned.to_string_lossy()) == expected;
+    if !already_installed {
+        // Rotation recovery restores the incumbent files first. Preserve that
+        // learned model as the watch rollback target before writing the active
+        // candidate over it; otherwise a crash during file promotion followed
+        // by a restart would complete the new version but lose its predecessor.
+        if learned.is_file() {
+            let previous = learn::previous_model_path(learned);
+            candidate::write_artifact(&previous, &std::fs::read(learned)?)?;
+            let current_stats = learn::stats_path(learned);
+            let previous_stats = learn::previous_stats_path(learned);
+            if current_stats.is_file() {
+                candidate::write_artifact(&previous_stats, &std::fs::read(&current_stats)?)?;
+                std::fs::remove_file(current_stats)?;
+            } else if let Err(error) = std::fs::remove_file(previous_stats) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    return Err(error.into());
+                }
+            }
+        }
+        candidate::restore_artifact(store, &active)?;
+    }
+    let actual = threshold::model_version(&learned.to_string_lossy());
+    if actual != expected {
+        return Err(DaygleError::Config(format!(
+            "could not recover the model for scheduled activation {}: expected {expected}, found {actual}",
+            active.version
+        )));
+    }
+    if already_installed {
+        logs.push(
+            daygle_dns_core::LogLevel::Info,
+            "ai",
+            format!(
+                "completed scheduled activation {} after confirming its model artifact",
+                active.version
+            ),
+        );
+    } else {
+        logs.warn(
+            "ai",
+            format!(
+                "completed scheduled activation {} after restoring its interrupted model install",
+                active.version
+            ),
+        );
+    }
+    // Always select the learned path for this active scheduled version. This
+    // also covers a restart after the file move but before the in-memory model
+    // channels were switched, even if the older configured model has a newer
+    // timestamp than the candidate artifact.
+    Ok(Some(active))
+}
+
 fn prefer_learned(learned: &Path, configured: &str) -> bool {
     if !learned.is_file() {
         return false;

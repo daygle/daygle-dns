@@ -156,15 +156,28 @@ pub type Activation =
 /// Takes a passed trial's scoring back out of force after the model it was
 /// recorded for could not be installed. Returns what could not be restored, so
 /// the caller can report a half-undone activation instead of dropping it.
-pub struct ActivationUndo(Box<dyn FnOnce() -> Vec<String> + Send + Sync>);
+pub struct ActivationUndo {
+    undo: Box<dyn FnOnce() -> Vec<String> + Send + Sync>,
+    complete: Box<dyn FnOnce() -> Result<()> + Send + Sync>,
+}
 
 impl ActivationUndo {
-    pub fn new(undo: impl FnOnce() -> Vec<String> + Send + Sync + 'static) -> Self {
-        Self(Box::new(undo))
+    pub fn new(
+        undo: impl FnOnce() -> Vec<String> + Send + Sync + 'static,
+        complete: impl FnOnce() -> Result<()> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            undo: Box::new(undo),
+            complete: Box::new(complete),
+        }
     }
 
     pub fn undo(self) -> Vec<String> {
-        (self.0)()
+        (self.undo)()
+    }
+
+    pub fn complete(self) -> Result<()> {
+        (self.complete)()
     }
 }
 
@@ -886,6 +899,63 @@ impl Retrainer {
             .unwrap_or_default()
     }
 
+    /// Finish durable trial/watch bookkeeping after startup recovered a
+    /// scheduled activation. Idempotent so a second interruption retries it.
+    pub(crate) fn complete_recovered_activation(
+        &self,
+        candidate: &crate::store::CandidateVersion,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        let watch_path = self.watch_path();
+        let existing_watch = std::fs::read(&watch_path)
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok());
+        let same_watch = existing_watch
+            .as_ref()
+            .and_then(|watch| watch.get("candidate_id"))
+            .and_then(serde_json::Value::as_i64)
+            == Some(candidate.id);
+        let watch = if same_watch {
+            existing_watch.unwrap_or_default()
+        } else {
+            serde_json::json!({
+                "candidate_id": candidate.id,
+                "promoted_at": now,
+                "until": now + WATCH_SECS,
+            })
+        };
+        let watch_bytes = serde_json::to_vec_pretty(&watch).map_err(|error| {
+            DaygleError::Internal(format!("could not encode model watch: {error}"))
+        })?;
+        std::fs::write(&watch_path, watch_bytes)?;
+
+        let trial = self.trial();
+        let concluded_scoring = trial
+            .shadow_scoring
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+        let already_concluded = trial
+            .last_outcome
+            .as_deref()
+            .is_some_and(|outcome| outcome.starts_with("promoted:"))
+            && concluded_scoring.as_ref() == Some(&candidate.validation_report);
+        if !already_concluded {
+            let reason = candidate
+                .validation_report
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("validated scheduled replay");
+            let concluded = trial
+                .concluded(format!("promoted: {reason}; completed after restart"), None)
+                .with_scoring(Some(&candidate.validation_report));
+            let trial_bytes = serde_json::to_vec_pretty(&concluded.to_json()).map_err(|error| {
+                DaygleError::Internal(format!("could not encode completed model trial: {error}"))
+            })?;
+            std::fs::write(trial_path(&self.learned), trial_bytes)?;
+        }
+        self.store.finish_scheduled_activation(candidate.id)
+    }
+
     fn write_trial(&self, trial: &Trial) {
         let written = serde_json::to_vec_pretty(&trial.to_json())
             .map_err(std::io::Error::other)
@@ -1197,6 +1267,16 @@ impl Retrainer {
                         .concluded(format!("promoted: {why}"), None)
                         .with_scoring(Some(&scoring)),
                 );
+                if let Some(activation) = undo {
+                    if let Err(error) = activation.complete() {
+                        self.log(
+                            LogLevel::Warn,
+                            format!(
+                                "the scheduled model is live but its activation recovery marker could not be cleared: {error}"
+                            ),
+                        );
+                    }
+                }
             }
             Err(why) => self.reject(settings, trial, why, now, None),
         }
