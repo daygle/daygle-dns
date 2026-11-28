@@ -724,11 +724,13 @@
           <input
             type="checkbox"
             style="width: auto"
-            checked={!!status.trial_new_models}
+            checked={!!status.trial_new_models || (status.threat_backend || '').startsWith('fasttext-binary')}
             onchange={(event) => setSwitch('trial_new_models', event.currentTarget.checked)}
-            disabled={switching}
+            disabled={switching || (status.threat_backend || '').startsWith('fasttext-binary')}
           />
-          <span>Trial New Models First</span>
+          <span>{(status.threat_backend || '').startsWith('fasttext-binary')
+            ? 'Binary candidates always run a trial'
+            : 'Trial New Models First'}</span>
         </label>
         {#if status.verifier_supported === false}
           <label class="row muted" style="gap: 6px; align-items: center; font-size: 0.85rem" title="This build has no ONNX support. The threat feeds and evidence checks stand in for it.">

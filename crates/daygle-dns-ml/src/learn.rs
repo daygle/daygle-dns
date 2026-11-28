@@ -74,6 +74,136 @@ const STARTER_CORPUS: &str = include_str!("../../../models/starter-training.txt"
 /// The corpus's file name in the models directory, where a models bundle
 /// installs the copy that matches its starter model.
 pub const STARTER_CORPUS_FILE: &str = "starter-training.txt";
+pub const BUILTIN_BINARY_MODEL: &str = "builtin-binary";
+pub(crate) const BINARY_STARTER_FILE: &str = "binary-starter-v1.bin";
+
+pub(crate) fn binary_training_record(learned: &Path) -> Option<serde_json::Value> {
+    let raw = std::fs::read(stats_path(learned)).ok()?;
+    serde_json::from_slice::<serde_json::Value>(&raw)
+        .ok()?
+        .get("binary_training")
+        .cloned()
+}
+
+pub(crate) fn binary_starter_pairs() -> Vec<(String, String)> {
+    let mut domains = std::collections::BTreeMap::new();
+    for (label, domain) in starter_pairs() {
+        let threat = matches!(label.as_str(), "malware" | "phishing" | "scam");
+        domains
+            .entry(domain)
+            .and_modify(|value| *value |= threat)
+            .or_insert(threat);
+    }
+    domains
+        .into_iter()
+        .map(|(domain, threat)| binary_pair(domain, threat))
+        .collect()
+}
+
+pub(crate) fn binary_pair(domain: String, threat: bool) -> (String, String) {
+    (
+        if threat {
+            crate::backend::BINARY_THREAT_LABEL
+        } else {
+            BENIGN_LABEL
+        }
+        .to_string(),
+        domain,
+    )
+}
+
+fn binary_evaluation(domain: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    let root = crate::assessment::registrable(domain);
+    Sha256::digest(root.as_bytes())[0] < 128
+}
+
+/// One stable partition per registrable domain. Only external evidence and
+/// explicit adjudications may supply outcomes. Model, verifier and automatic
+/// page predictions never enter this dataset.
+pub(crate) fn binary_outcomes(
+    store: &AiStore,
+    settings: &AiSettings,
+    intel: &crate::intel::IntelIndex,
+    evaluate: bool,
+    before: i64,
+) -> Result<Vec<(String, bool, crate::threshold::LabelSource)>> {
+    use crate::threshold::LabelSource;
+    let starter_roots: HashSet<_> = binary_starter_pairs()
+        .iter()
+        .map(|(_, domain)| crate::assessment::registrable(domain))
+        .collect();
+    let mut outcomes = std::collections::BTreeMap::new();
+    for domain in intel.popular_sample() {
+        if intel.label_for(&domain).is_none() {
+            outcomes.insert(domain, (false, LabelSource::Popular));
+        }
+    }
+    let (training, probe) = intel.sample(|_| true);
+    for (_, domain) in training.into_iter().chain(probe) {
+        outcomes.insert(domain, (true, LabelSource::FeedListing));
+    }
+    for domain in store.reviewed_page_discovery_labels(before)?.into_keys() {
+        outcomes.insert(domain, (true, LabelSource::OperatorCorrection));
+    }
+    for row in store.corrections_between(0, before)?.into_iter().rev() {
+        let domain = row.domain.trim().trim_matches('.').to_ascii_lowercase();
+        match row.action.as_str() {
+            "not_threat" => {
+                if settings.learn_negatives {
+                    outcomes.insert(domain, (false, LabelSource::OperatorCorrection));
+                } else {
+                    outcomes.remove(&domain);
+                }
+            }
+            "category"
+                if row.category == crate::backend::BINARY_THREAT_LABEL
+                    || is_threat_label(settings, &row.category) =>
+            {
+                outcomes.insert(domain, (true, LabelSource::OperatorCorrection));
+            }
+            _ => {}
+        }
+    }
+    let mut evaluation_roots = HashSet::new();
+    Ok(outcomes
+        .into_iter()
+        .filter(|(domain, _)| {
+            let root = crate::assessment::registrable(domain);
+            looks_like_domain(domain)
+                && binary_evaluation(domain) == evaluate
+                && !starter_roots.contains(&root)
+                && (!evaluate || evaluation_roots.insert(root))
+        })
+        .map(|(domain, (outcome, source))| (domain, outcome, source))
+        .collect())
+}
+
+pub(crate) fn prepare_binary_starter(path: &Path) -> Result<()> {
+    if is_binary_model(path) {
+        return Ok(());
+    }
+    let (validation, training): (Vec<_>, Vec<_>) = binary_starter_pairs()
+        .into_iter()
+        .partition(|(_, domain)| crate::threshold::held_out(domain));
+    let dir = tempfile::tempdir()?;
+    let staged = dir.path().join("model.bin");
+    train(&training, &staged)?;
+    let predicted = predict_all(&staged, &validation)?;
+    for label in [crate::backend::BINARY_THREAT_LABEL, BENIGN_LABEL] {
+        if !validation
+            .iter()
+            .zip(&predicted)
+            .any(|((expected, _), actual)| expected == label && actual == label)
+        {
+            return Err(DaygleError::Config(
+                "the built-in binary starter did not detect both classes on held-out names"
+                    .to_string(),
+            ));
+        }
+    }
+    crate::candidate::write_artifact(path, &std::fs::read(staged)?)
+}
 /// A held-out threat family may take at most this share of the threat
 /// verdicts out of training, so one sprawling word family cannot starve the
 /// threat labels of examples.

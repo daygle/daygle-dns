@@ -28,6 +28,7 @@ pub struct FastTextBackend {
     model: fasttext::FastText,
     threat_categories: Vec<String>,
     binary: bool,
+    starter: bool,
 }
 
 impl FastTextBackend {
@@ -72,13 +73,20 @@ impl FastTextBackend {
             model,
             threat_categories,
             binary,
+            starter: binary
+                && model_path
+                    .as_ref()
+                    .file_name()
+                    .is_some_and(|name| name == crate::learn::BINARY_STARTER_FILE),
         })
     }
 }
 
 impl DomainClassifier for FastTextBackend {
     fn name(&self) -> String {
-        if self.binary {
+        if self.starter {
+            crate::backend::BINARY_STARTER_BACKEND_NAME
+        } else if self.binary {
             crate::backend::BINARY_BACKEND_NAME
         } else {
             "fasttext"

@@ -1012,6 +1012,129 @@ fn binary_name_model_blocks_without_enabled_families_and_respects_policy() {
 }
 
 #[test]
+fn builtin_binary_starts_in_monitor_and_promotes_without_operator_reviews() {
+    let _training = training_guard();
+    let dir = TempDir::new().unwrap();
+    let config = AiSettings {
+        model_path: daygle_dns_ml::learn::BUILTIN_BINARY_MODEL.to_string(),
+        auto_retrain: true,
+        // Scheduled binary candidates still need validation.
+        trial_new_models: false,
+        network_evidence: true,
+        block_threshold: 0.93,
+        threshold_fpr_target: 0.05,
+        ..settings(AiMode::Enforce)
+    };
+    let ai = engine(&dir, config.clone());
+    assert!(ai.binary_name_model_active());
+    assert!(ai.threat_backend_name().contains("+starter"));
+    let starter = ai.live_model_path();
+    let suspicious = "ransomware-droploader.biz";
+    ai.store.observe(suspicious).unwrap();
+    ai.scanner.run_cycle(0, zone_store(&dir).as_ref()).unwrap();
+    assert_eq!(
+        ai.store
+            .verdict(suspicious, "threat")
+            .unwrap()
+            .unwrap()
+            .severity,
+        "threat",
+    );
+    assert!(!ai.snapshot().load().contains_key(suspicious));
+    assert!(!learned_active(&ai));
+    let skipped = ai
+        .run_due_maintenance()
+        .expect("the first scheduled run is due")
+        .unwrap_err();
+    assert!(skipped
+        .to_string()
+        .contains("independent training names per class"));
+    assert!(!learned_trial(&ai).in_progress());
+    drop(ai);
+
+    let store = daygle_dns_ml::store::AiStore::open(&dir.path().join("ai.db")).unwrap();
+    let threats = (0..450)
+        .map(|i| format!("credentialgrabber-c2-{i}.test"))
+        .collect();
+    let ordinary = (0..300)
+        .map(|i| format!("communitylibrary-{i}.test"))
+        .collect();
+    store
+        .replace_intel(daygle_dns_ml::intel::INTEL_FEEDS[0].id, &threats)
+        .unwrap();
+    store
+        .replace_intel(daygle_dns_ml::intel::POPULAR.id, &ordinary)
+        .unwrap();
+    drop(store);
+
+    let ai = engine(&dir, config.clone());
+    assert_eq!(ai.live_model_path(), starter);
+    ai.run_due_maintenance()
+        .expect("a scheduled candidate")
+        .unwrap();
+    assert!(learned_trial(&ai).in_progress());
+    assert_eq!(ai.live_model_path(), starter);
+    end_trial_soon(&ai);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    assert!(ai.run_due_maintenance().is_none());
+    let status = ai.maintained_status();
+    assert!(learned_active(&ai), "{status}");
+    assert!(!ai.threat_backend_name().contains("+starter"));
+    let threshold = ai.settings.load().block_threshold;
+    assert_ne!(threshold, config.block_threshold);
+    let model = daygle_dns_ml::threshold::model_version(&ai.live_model_path());
+    assert_eq!(
+        ai.store.active_calibration().unwrap().unwrap().source_model,
+        model
+    );
+    drop(ai);
+
+    let restarted = engine(&dir, config.clone());
+    assert!(learned_active(&restarted));
+    assert_eq!(restarted.settings.load().block_threshold, threshold);
+    assert_eq!(
+        restarted
+            .store
+            .active_calibration()
+            .unwrap()
+            .unwrap()
+            .source_model,
+        model
+    );
+
+    for i in 0..3 {
+        let domain = format!("mistaken-{i}.test");
+        restarted.store.observe(&domain).unwrap();
+        restarted
+            .store
+            .save_verdict(
+                Channel::Threat,
+                &domain,
+                "binary-threat",
+                "threat",
+                "classified",
+                0.99,
+                "fasttext-binary",
+                "test finding",
+                3600,
+            )
+            .unwrap();
+        restarted
+            .store
+            .set_override(&domain, "not_threat", "watch fixture")
+            .unwrap();
+    }
+    assert!(restarted.run_due_maintenance().is_none());
+    assert_eq!(restarted.live_model_path(), starter);
+    assert_eq!(
+        restarted.settings.load().block_threshold,
+        config.block_threshold
+    );
+    assert!(restarted.store.active_calibration().unwrap().is_none());
+    assert!(restarted.store.active_candidate().unwrap().is_none());
+}
+
+#[test]
 fn dropping_the_engine_releases_the_scanner_and_activation_hook() {
     let dir = TempDir::new().unwrap();
     let ai = engine(&dir, settings(AiMode::Train));

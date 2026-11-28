@@ -5,6 +5,8 @@
 const BACKENDS = {
   heuristic: 'Built-In Heuristic Rules',
   fasttext: 'fastText Model',
+  'fasttext-binary': 'Binary Name Model',
+  starter: 'Starter (Monitor Only)',
   'minilm-onnx': 'MiniLM Verifier',
 };
 

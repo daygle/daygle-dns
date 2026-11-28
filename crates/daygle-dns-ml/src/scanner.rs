@@ -1237,7 +1237,9 @@ impl Scanner {
         };
         // The label list is what separates a threat from an ordinary
         // category, so it gates blocking too.
-        let binary_model = crate::backend::is_binary_backend(&self.threat.name());
+        let backend = self.threat.name();
+        let binary_model = crate::backend::is_binary_backend(&backend)
+            && !crate::backend::is_binary_starter(&backend);
         for candidate in self
             .store
             .fresh_blocked(now, cfg.block_threshold, cfg.fusion)?
@@ -1253,6 +1255,7 @@ impl Scanner {
             let included = if candidate.category == crate::backend::BINARY_THREAT_LABEL {
                 binary_model
                     && crate::backend::is_binary_backend(&candidate.backend)
+                    && !crate::backend::is_binary_starter(&candidate.backend)
                     && cfg.label_role(&candidate.category)
                         != daygle_dns_core::config::LabelRole::Suppressed
             } else {

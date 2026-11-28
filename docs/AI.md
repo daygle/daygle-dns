@@ -102,7 +102,14 @@ exemptions and expiry still decide what blocks, and only in enforce mode.
 
 ### Binary name model
 
-Point `ai.model_path` at a supervised fastText artifact containing exactly
+Set `ai.model_path = "builtin-binary"` and restart to start the binary name
+detector without a separate model download or manual training. On first
+startup, Daygle-DNS trains and checks a starter using bundled labelled
+examples and saves it beside the AI database. Hostnames detected by the
+starter appear in the console in monitor mode, even when AI is otherwise in
+Enforce. Existing feed, page and operator override policy continues to apply.
+
+Alternatively, point `ai.model_path` at a supervised fastText artifact containing exactly
 `binary-threat` and `benign` to score the hostname independently of the
 enabled threat families. The content channel uses the built-in categorizer
 in this mode. A binary finding appears as **Binary Threat** in Detected
@@ -122,8 +129,17 @@ The command reports the candidate threshold and writes the artifact only
 after the validation split meets the target and both evaluation partitions
 contain detections. Its result measures hostname scores. Verify the operating
 threshold with the live evidence pipeline in Train mode before using
-Enforce. Retrain binary artifacts through this tool. The existing scheduled
-family-model trainer does not replace an active binary artifact.
+Enforce. The command also remains available for offline training.
+
+With `ai.auto_retrain` enabled, the scheduler builds binary candidates
+from independently labelled feed names, a popular-domain reference sample,
+and explicit operator adjudications. Popularity is a benign proxy. The
+candidate's own verdicts and unreviewed page findings supply no labels.
+Training and promotion data are separated by registrable domain. Binary
+candidates always run a shadow trial and need validated calibration and a
+threshold that meets the false-positive target before they can go live.
+The current model stays in force when there is insufficient evidence or a
+candidate fails. Promotion and recovery reuse the scheduled model journal.
 
 Existing blocks stay: the stored `ai.auto_block_categories` list is read as
 the threat role, so no domain that blocks today stops blocking.

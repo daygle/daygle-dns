@@ -104,6 +104,12 @@ pub struct Verdict {
 /// Reserved output of a classifier trained on explicit binary outcomes.
 pub const BINARY_THREAT_LABEL: &str = "binary-threat";
 pub(crate) const BINARY_BACKEND_NAME: &str = "fasttext-binary";
+pub(crate) const BINARY_STARTER_BACKEND_NAME: &str = "fasttext-binary+starter";
+
+pub(crate) fn is_binary_starter(name: &str) -> bool {
+    name.strip_prefix(BINARY_STARTER_BACKEND_NAME)
+        .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('+'))
+}
 
 pub(crate) fn is_binary_backend(name: &str) -> bool {
     name == BINARY_BACKEND_NAME

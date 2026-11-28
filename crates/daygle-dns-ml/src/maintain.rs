@@ -414,6 +414,7 @@ struct Built {
     threat_validation_examples: usize,
     intel_validation_examples: usize,
     established_probe_examples: usize,
+    binary_training: Option<serde_json::Value>,
 }
 
 impl Built {
@@ -435,6 +436,7 @@ impl Built {
             "intel": self.stats.intel,
             "intel_validation_examples": self.intel_validation_examples,
             "established_probe_examples": self.established_probe_examples,
+            "binary_training": self.binary_training,
         })
     }
 }
@@ -534,6 +536,13 @@ impl Retrainer {
 
     /// The model the operator configured: the fixed reference.
     fn configured_model(&self, settings: &AiSettings) -> String {
+        if settings.model_path.trim() == crate::learn::BUILTIN_BINARY_MODEL {
+            return self
+                .learned
+                .with_file_name(crate::learn::BINARY_STARTER_FILE)
+                .to_string_lossy()
+                .into_owned();
+        }
         settings.model_path.trim().to_string()
     }
 
@@ -557,6 +566,9 @@ impl Retrainer {
     /// Train a candidate into the temp file and run every offline gate on it
     /// against the live model. The caller decides what happens to it.
     fn build(&self, settings: &AiSettings) -> Result<Built> {
+        if self.uses_binary_name_model() {
+            return self.build_binary(settings);
+        }
         let current_path = self.current_model.load_full().to_string();
         let current_model = (!current_path.trim().is_empty()).then(|| PathBuf::from(&current_path));
         let current_labels = current_model.as_deref().and_then(model_labels);
@@ -630,12 +642,92 @@ impl Retrainer {
                 threat_validation_examples: threat_validation.len(),
                 intel_validation_examples: intel_validation.len(),
                 established_probe_examples: established.len(),
+                binary_training: None,
             }),
             Err(e) => {
                 let _ = std::fs::remove_file(&temp);
                 Err(e)
             }
         }
+    }
+
+    fn build_binary(&self, settings: &AiSettings) -> Result<Built> {
+        let intel = self
+            .evidence
+            .get()
+            .map(|evidence| evidence.intel())
+            .unwrap_or_default();
+        let now = chrono::Utc::now().timestamp();
+        let outcomes = crate::learn::binary_outcomes(&self.store, settings, &intel, false, now)?;
+        let threats = outcomes.iter().filter(|(_, threat, _)| *threat).count();
+        let intel_examples = outcomes
+            .iter()
+            .filter(|(_, _, source)| *source == crate::threshold::LabelSource::FeedListing)
+            .count();
+        let negatives = outcomes.len() - threats;
+        if threats < 20 || negatives < 20 {
+            return Err(DaygleError::Config(format!(
+                "binary retraining needs 20 independent training names per class ({threats} threat, {negatives} ordinary)"
+            )));
+        }
+        let mut pairs: Vec<_> = outcomes
+            .into_iter()
+            .map(|(domain, threat, _)| crate::learn::binary_pair(domain, threat))
+            .collect();
+        let starter: Vec<_> = crate::learn::binary_starter_pairs()
+            .into_iter()
+            .filter(|(_, domain)| !crate::threshold::held_out(domain))
+            .collect();
+        let stats = TrainingStats {
+            examples: pairs.len() + starter.len(),
+            labels: 2,
+            intel: intel_examples,
+            negatives,
+            starter: starter.len(),
+            ..TrainingStats::default()
+        };
+        pairs.extend(starter);
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        for (label, domain) in &pairs {
+            hash.update(label);
+            hash.update(b" ");
+            hash.update(domain);
+            hash.update(b"\n");
+        }
+        let digest = crate::candidate::hex(&hash.finalize());
+        let reference = settings.model_path.trim();
+        let training = serde_json::json!({ "reference": reference, "digest": digest,
+            "independent_threats": threats, "independent_ordinary": negatives });
+        if crate::learn::binary_training_record(&self.learned).as_ref() == Some(&training) {
+            return Err(DaygleError::Config(
+                "no new independent binary training outcomes".to_string(),
+            ));
+        }
+        let temp = self.learned.with_extension("tmp");
+        let trained = train(&pairs, &temp).and_then(|()| probe_accuracy(&temp, &pairs));
+        let train_accuracy = match trained {
+            Ok(accuracy) if accuracy >= MIN_ACCURACY => accuracy,
+            result => {
+                let _ = std::fs::remove_file(&temp);
+                return Err(result.err().unwrap_or_else(|| {
+                    DaygleError::Config(
+                        "binary model did not pass the training sanity check".to_string(),
+                    )
+                }));
+            }
+        };
+        Ok(Built {
+            temp,
+            stats,
+            train_accuracy,
+            validation_examples: 0,
+            validation_accuracy: None,
+            threat_validation_examples: 0,
+            intel_validation_examples: 0,
+            established_probe_examples: 0,
+            binary_training: Some(training),
+        })
     }
 
     /// The offline gates: train accuracy, held-out corrections, held-out
@@ -1010,9 +1102,6 @@ impl Retrainer {
         if self.check_watch(&settings, now) {
             return None;
         }
-        if self.uses_binary_name_model() {
-            return None;
-        }
         let trial = self.trial();
         if trial.in_progress() {
             if trial.ends_at.is_some_and(|ends| now >= ends) {
@@ -1061,7 +1150,7 @@ impl Retrainer {
         let _running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         let built = self.build(settings)?;
         let record = built.record();
-        if !settings.trial_new_models {
+        if !settings.trial_new_models && !self.uses_binary_name_model() {
             if let Err(e) = self.promote(&built.temp, &record) {
                 let _ = std::fs::remove_file(&built.temp);
                 return Err(e);
@@ -1456,13 +1545,35 @@ impl Retrainer {
         let undone = {
             let _running = self.running.lock().unwrap_or_else(|e| e.into_inner());
             self.with_rotation(|| {
-                if previous_model_path(&self.learned).is_file() {
+                let previous = previous_model_path(&self.learned);
+                let predecessor = if self.uses_binary_name_model() {
+                    self.store.active_candidate()?.and_then(|active| {
+                        active.scoring_config["binary_previous_scoring"]["model"]
+                            .as_str()
+                            .map(str::to_owned)
+                    })
+                } else {
+                    None
+                };
+                if previous.is_file()
+                    && predecessor.as_ref().is_none_or(|digest| {
+                        crate::threshold::model_version(&previous.to_string_lossy()) == *digest
+                    })
+                {
                     self.swap_with_previous().and_then(|()| self.install())
                 } else {
                     // The first model it learned: back to the configured one.
+                    let configured = self.configured_model(settings);
+                    if predecessor.as_ref().is_some_and(|digest| {
+                        crate::threshold::model_version(&configured) != *digest
+                    }) {
+                        return Err(DaygleError::Config(
+                            "the binary model's rollback artifact is unavailable".to_string(),
+                        ));
+                    }
                     let set_aside = self.learned.with_extension("rolled-back.bin");
                     std::fs::rename(&self.learned, &set_aside)?;
-                    self.install_path(Path::new(&self.configured_model(settings)))
+                    self.install_path(Path::new(&configured))
                 }
             })
         };
@@ -1657,7 +1768,10 @@ fn judge_shadow(
     let candidate_model =
         Predictor::load(&candidate.to_string_lossy()).map_err(|e| e.to_string())?;
     let live_model = Predictor::load(live).map_err(|e| e.to_string())?;
-    let is_threat = |label: &str| is_threat_label(settings, label);
+    let binary = crate::learn::is_binary_model(candidate);
+    let is_threat = |label: &str| {
+        is_threat_label(settings, label) || (binary && label == crate::backend::BINARY_THREAT_LABEL)
+    };
     let mut notes: Vec<String> = Vec::new();
     let intel = evidence.map(|e| e.intel());
 

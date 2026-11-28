@@ -39,16 +39,26 @@ use crate::store::AiStore;
 /// held-out names, then select and validate its calibrated threshold.
 /// A zero score means replay found no enforceable verdict for that name.
 pub(crate) fn tune_replayed_scores(
+    samples: Vec<Sample>,
+    model: &str,
+    settings: &AiSettings,
+    now: i64,
+) -> serde_json::Value {
+    tune_replayed_scores_for_model(samples, model, settings, now, false)
+}
+
+pub(crate) fn tune_replayed_scores_for_model(
     mut samples: Vec<Sample>,
     model: &str,
     settings: &AiSettings,
     now: i64,
+    include_no_signal: bool,
 ) -> serde_json::Value {
     use crate::calibration::{self, CalibrationMap, Labelled};
 
     let (holdout, tuning): (Vec<_>, Vec<_>) = samples
         .iter()
-        .filter(|sample| sample.score > 0.0)
+        .filter(|sample| include_no_signal || sample.score > 0.0)
         .filter_map(|sample| {
             Some((
                 held_out(&sample.domain),
