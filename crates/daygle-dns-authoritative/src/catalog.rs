@@ -1024,7 +1024,10 @@ fn build_catalog(
                 // As the master sent it: its signatures stay valid only if
                 // every record is served byte for byte as signed.
                 Some(wire) => match secondary_zone(&origin, &wire) {
-                    Ok(handler) => Some(handler),
+                    Ok((handler, oversized)) => {
+                        built.oversized.extend(oversized);
+                        Some(handler)
+                    }
                     Err(e) => {
                         warn!(zone = %zone.name, error = %e, "stored transfer is unreadable; serving the record table");
                         None
@@ -1322,13 +1325,30 @@ fn signed_zone(
 /// Serve a secondary zone from the records its master transferred
 /// (`wire`, see [`encode_transfer`]), signatures and denial proofs
 /// included, without re-signing anything.
-fn secondary_zone(origin: &Name, wire: &[u8]) -> Result<ZoneData> {
+///
+/// A transferred record too large to be encoded into one DNS message could
+/// never travel in an answer, so it is left out and returned to be reported
+/// with the record table's oversized rows (see [`served_records`]).
+fn secondary_zone(origin: &Name, wire: &[u8]) -> Result<(ZoneData, Vec<OversizedRecord>)> {
     let mut map: BTreeMap<RrKey, RecordSet> = BTreeMap::new();
     let mut rrsigs = Vec::new();
+    let mut oversized = Vec::new();
     let mut nsec = false;
     let mut nsec3: Option<NxProofKind> = None;
     let mut opt_out = false;
     for record in decode_transfer(wire)? {
+        if !crate::model::record_fits_a_message(&record) {
+            warn!(
+                "skipping record {} ({}): it cannot fit in one DNS message",
+                record.name,
+                record.record_type()
+            );
+            oversized.push(OversizedRecord {
+                name: ascii_name(&record.name.to_ascii()),
+                rtype: record.record_type().to_string(),
+            });
+            continue;
+        }
         match &record.data {
             RData::DNSSEC(DNSSECRData::RRSIG(_)) => {
                 rrsigs.push(record);
@@ -1386,7 +1406,7 @@ fn secondary_zone(origin: &Name, wire: &[u8]) -> Result<ZoneData> {
             Arc::make_mut(set).insert_rrsig(rrsig);
         }
     }
-    Ok(handler)
+    Ok((handler, oversized))
 }
 
 /// Encode a transfer's records for storage: each in wire format, after
