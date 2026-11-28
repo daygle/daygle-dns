@@ -52,7 +52,11 @@ const LLM_MIN_START: std::time::Duration = std::time::Duration::from_secs(60);
 /// (the name and the page) agreeing strongly reach blocking confidence; a
 /// weaker agreement adds a little, never to blocking. Never lowers, and
 /// `ai.page_rule = "evidence"` only records.
-fn llm_raise(cfg: &AiSettings, base: f32, reading: &crate::llm::LlmReading) -> Option<f32> {
+pub(crate) fn llm_raise(
+    cfg: &AiSettings,
+    base: f32,
+    reading: &crate::llm::LlmReading,
+) -> Option<f32> {
     if cfg.page_rule == daygle_dns_core::config::PageRule::Evidence
         || !reading.threat
         || reading.confidence < 0.7
@@ -125,12 +129,13 @@ pub struct Scanner {
     /// Held while a block snapshot is computed and published, so a scan
     /// cycle cannot publish one computed before an override landed.
     publishing: std::sync::Mutex<()>,
+    scoring_staged: std::sync::atomic::AtomicBool,
     /// Set after the first snapshot is published: the blocks already in
     /// force at startup are not news.
     primed: std::sync::atomic::AtomicBool,
     /// Model maintenance, set once by the engine: the scan loop runs it
     /// after each successful cycle.
-    maintenance: std::sync::OnceLock<Arc<crate::maintain::Maintenance>>,
+    maintenance: std::sync::OnceLock<std::sync::Weak<crate::maintain::Maintenance>>,
     /// Page reader override, set once: tests supply readings without a
     /// network. `None` fetches the live page with the settings' limits.
     page_reader: std::sync::OnceLock<Box<dyn crate::page::PageReader>>,
@@ -144,6 +149,7 @@ pub struct Scanner {
     calibration: Arc<ArcSwap<Option<CalibrationMap>>>,
     /// The signal weights in force: the active candidate's, or the defaults.
     weights: Arc<ArcSwap<SignalWeights>>,
+    classifier_digest: std::sync::OnceLock<Arc<ArcSwap<String>>>,
     /// Threat feeds and popularity, for the structured observations.
     intel: std::sync::OnceLock<Arc<crate::intel::Intel>>,
 }
@@ -172,6 +178,7 @@ impl Scanner {
             rescan_notify: Arc::new(Notify::new()),
             last_expiry: AtomicI64::new(0),
             publishing: std::sync::Mutex::new(()),
+            scoring_staged: std::sync::atomic::AtomicBool::new(false),
             primed: std::sync::atomic::AtomicBool::new(false),
             maintenance: std::sync::OnceLock::new(),
             page_reader: std::sync::OnceLock::new(),
@@ -179,6 +186,7 @@ impl Scanner {
             domain_age: std::sync::OnceLock::new(),
             calibration: Arc::new(ArcSwap::from_pointee(None)),
             weights: Arc::new(ArcSwap::from_pointee(SignalWeights::default())),
+            classifier_digest: std::sync::OnceLock::new(),
             intel: std::sync::OnceLock::new(),
         })
     }
@@ -214,19 +222,61 @@ impl Scanner {
     /// reader, the calibration map and the fusion mode. A review of a page
     /// finding counts for advancement only against the identity that made it.
     pub fn scoring_version(&self) -> String {
-        let calibration = self.calibration.load_full();
+        let settings = self.settings.load_full();
+        self.page_scoring_version(&settings)
+    }
+
+    fn page_scoring_version(&self, settings: &AiSettings) -> String {
         let reader = self
             .page_model
             .get()
             .map_or_else(|| "phrases".to_string(), |model| model.version());
-        format!(
-            "page:{reader}|{}|{}",
+        format!("page:{reader}|{}", self.verdict_scoring_version(settings))
+    }
+
+    pub(crate) fn set_classifier_digest(&self, digest: Arc<ArcSwap<String>>) {
+        let _ = self.classifier_digest.set(digest);
+    }
+
+    pub(crate) fn verdict_scoring_version(&self, settings: &AiSettings) -> String {
+        use sha2::{Digest, Sha256};
+        let model = self
+            .classifier_digest
+            .get()
+            .map(|digest| digest.load_full());
+        let calibration = self.calibration.load();
+        let payload = serde_json::json!({
+            "model": model.as_deref().map(String::as_str).unwrap_or("builtin"),
+            "fusion": settings.fusion,
+            "weights": self.signal_weights(),
+            "calibration": calibration.as_ref().as_ref().map(|map| &map.version),
+            "threshold": settings.block_threshold,
+            "confidence_floor": settings.confidence_floor,
+            "threat_labels": settings.threat_labels(),
+            "page_rule": settings.page_rule,
+        });
+        crate::candidate::hex(&Sha256::digest(payload.to_string()))
+    }
+
+    pub(crate) fn authority_decisions(
+        &self,
+        settings: &AiSettings,
+    ) -> Result<Vec<crate::authority::AuthorityDecision>> {
+        let calibration = self.calibration.load();
+        let identity = self.verdict_scoring_version(settings);
+        let page = (settings.authority.advancement && settings.monitor_page_discovery)
+            .then(|| self.page_scoring_version(settings));
+        crate::authority::evaluate_for_identity(
+            &self.store,
+            &settings.authority,
             calibration
                 .as_ref()
                 .as_ref()
                 .map(|map| map.version.as_str())
-                .unwrap_or("identity"),
-            self.settings.load().fusion.as_str()
+                .unwrap_or(""),
+            settings.fusion.as_str(),
+            Some(&identity),
+            page.as_deref(),
         )
     }
 
@@ -238,8 +288,8 @@ impl Scanner {
 
     /// Hand the scanner the model-maintenance step it runs after each cycle
     /// (see [`crate::maintain`]).
-    pub fn set_maintenance(&self, maintenance: Arc<crate::maintain::Maintenance>) {
-        let _ = self.maintenance.set(maintenance);
+    pub fn set_maintenance(&self, maintenance: &Arc<crate::maintain::Maintenance>) {
+        let _ = self.maintenance.set(Arc::downgrade(maintenance));
     }
 
     /// Hand the scanner the page-text model the page stage refines readings
@@ -274,6 +324,9 @@ impl Scanner {
         since_epoch: i64,
         source: &daygle_dns_authoritative::ZoneStore,
     ) -> Result<usize> {
+        if self.scoring_staged.load(Ordering::Acquire) {
+            return Ok(0);
+        }
         let cfg = self.settings.load().clone();
         let now = Utc::now().timestamp();
 
@@ -511,6 +564,7 @@ impl Scanner {
         now: i64,
     ) -> std::collections::HashMap<String, f32> {
         let mut scores = std::collections::HashMap::new();
+        let identity = self.verdict_scoring_version(cfg);
         for row in rows
             .iter()
             .filter(|r| r.channel == Channel::Threat && r.status == "classified")
@@ -523,6 +577,7 @@ impl Scanner {
                 &row.severity,
                 &row.evidence,
                 now,
+                Some(&identity),
             ) {
                 scores.insert(row.domain.clone(), score);
             }
@@ -559,6 +614,7 @@ impl Scanner {
             &row.severity,
             &row.evidence,
             now,
+            None,
         );
     }
 
@@ -572,6 +628,7 @@ impl Scanner {
         severity: &str,
         evidence: &str,
         now: i64,
+        identity: Option<&str>,
     ) -> Option<f32> {
         let intel = self.intel.get()?;
         let index = intel.index();
@@ -629,7 +686,7 @@ impl Scanner {
         }
         if let Err(e) = self
             .store
-            .save_assessment(domain, "threat", cfg.fusion, &score)
+            .save_assessment_for_identity(domain, "threat", cfg.fusion, &score, identity)
         {
             self.log_warn(format!(
                 "AI could not store the assessment of {domain}: {e}"
@@ -764,6 +821,7 @@ impl Scanner {
                 &note,
                 confidence,
                 category.as_deref(),
+                &reading,
             )?;
             // A raised threat confidence has to be calibrated again before the
             // snapshot is rebuilt, or the gate would compare a stale map.
@@ -1163,17 +1221,7 @@ impl Scanner {
         // reaches the block snapshot. A source is demoted here automatically
         // when its measured false-positive share passes the configured limit.
         let decisions = if cfg.authority.enabled {
-            match crate::authority::evaluate_for_scoring(
-                &self.store,
-                &cfg.authority,
-                self.calibration
-                    .load_full()
-                    .as_ref()
-                    .as_ref()
-                    .map(|map| map.version.as_str())
-                    .unwrap_or(""),
-                cfg.fusion.as_str(),
-            ) {
+            match self.authority_decisions(cfg) {
                 Ok(decisions) => decisions,
                 Err(e) => {
                     // Fail closed: a broken measurement must not grant
@@ -1236,8 +1284,13 @@ impl Scanner {
         // listed. The operator's explicit switches (fetch, monitor, enforce),
         // per-domain exemptions and the authority stage still bound it, and a
         // family they suppressed globally is skipped below.
+        let page_source = if cfg.authority.advancement {
+            crate::authority::Source::Page
+        } else {
+            crate::authority::Source::Model
+        };
         let automated_may_block = !cfg.authority.enabled
-            || crate::authority::decision_for(&decisions, crate::authority::Source::Model)
+            || crate::authority::decision_for(&decisions, page_source)
                 .is_some_and(|decision| decision.may_block());
         if let Some(intel) = self.intel.get().filter(|_| {
             cfg.mode == AiMode::Enforce
@@ -1267,9 +1320,9 @@ impl Scanner {
                 let Some(report) = self.store.page_discovery(&domain, now)? else {
                     continue;
                 };
-                if report.reading.category.as_deref().is_some_and(|category| {
-                    cfg.label_role(category) == daygle_dns_core::config::LabelRole::Suppressed
-                }) {
+                if cfg.label_role(report.reading.category.as_deref().unwrap_or("phishing"))
+                    == daygle_dns_core::config::LabelRole::Suppressed
+                {
                     // An explicit global suppression outranks a page finding.
                     continue;
                 }
@@ -1399,6 +1452,9 @@ impl Scanner {
         // below must not keep the new exemptions from the plugin.
         let overrides = Arc::new(overrides);
         self.exemptions.store(overrides.clone());
+        if self.scoring_staged.load(Ordering::Acquire) {
+            return;
+        }
         // The eligible threats, read once: both snapshots are built from them.
         let eligible = match self.blocks_with(cfg, now, &overrides) {
             Ok(eligible) => eligible,
@@ -1493,6 +1549,11 @@ impl Scanner {
         self.snapshot.store(Arc::new(snapshot));
     }
 
+    pub(crate) fn stage_scoring(&self, staged: bool) {
+        let _publishing = self.publishing.lock().unwrap_or_else(|e| e.into_inner());
+        self.scoring_staged.store(staged, Ordering::Release);
+    }
+
     /// The published exemptions, for the policy plugin.
     pub fn exemptions(&self) -> Arc<ArcSwap<ExemptionSnapshot>> {
         self.exemptions.clone()
@@ -1537,7 +1598,9 @@ impl Scanner {
                     // Model maintenance runs after a successful cycle, on a
                     // blocking thread. A due retrain delays the next cycle by
                     // its duration; one that is not due costs nothing.
-                    if let Some(maintenance) = self.maintenance.get().cloned() {
+                    if let Some(maintenance) =
+                        self.maintenance.get().and_then(std::sync::Weak::upgrade)
+                    {
                         let _ = tokio::task::spawn_blocking(move || maintenance.run()).await;
                     }
                 }

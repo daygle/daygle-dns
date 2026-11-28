@@ -1132,6 +1132,8 @@ pub struct DiscoveryReading {
     pub final_host: Option<String>,
     pub category: Option<String>,
     pub confidence: Option<f32>,
+    /// Whether direct, corroborated page evidence may reach the exact-host gate.
+    pub enforcement_eligible: bool,
     pub evidence: String,
 }
 
@@ -1141,6 +1143,7 @@ impl DiscoveryReading {
             final_host,
             category: None,
             confidence: None,
+            enforcement_eligible: false,
             evidence: truncate(evidence, 160),
         }
     }
@@ -1173,6 +1176,7 @@ fn discovery_reading(domain: &str, page: &PageContent, floor: f32) -> DiscoveryR
         Some(registered) != psl::domain_str(domain) || page.redirects.cross_site_hops > 0;
     let mut reading = discovery_destination(page, registered, final_host.clone(), floor);
     if crosses_sites || page.redirects.downgraded || page.redirects.meta_refresh {
+        reading.enforcement_eligible = false;
         let chain = format!(
             "redirect chain: {} cross-site hop(s){}{}",
             page.redirects.cross_site_hops,
@@ -1242,6 +1246,7 @@ fn discovery_destination(
                 final_host,
                 category: Some("phishing".to_owned()),
                 confidence: Some(confidence),
+                enforcement_eligible: pressures_password,
                 evidence: if pressures_password {
                     format!("{brand} sign-in title on a different site, password form, and password-confirmation demand under threat of suspension")
                 } else {
@@ -1256,6 +1261,7 @@ fn discovery_destination(
             final_host,
             category: Some("scam".to_string()),
             confidence: Some(0.9),
+            enforcement_eligible: false,
             evidence: "reward claim with a processing fee and a payment or identity form"
                 .to_string(),
         };
@@ -1284,6 +1290,7 @@ fn discovery_destination(
             final_host,
             category: Some("phishing".to_string()),
             confidence: Some(0.9),
+            enforcement_eligible: false,
             evidence: "sensitive payment, identity, or verification form paired with a pressured verification request".to_string(),
         };
     }
@@ -1301,6 +1308,7 @@ fn discovery_destination(
             final_host,
             category: Some(reading.category.to_owned()),
             confidence: Some(reading.confidence),
+            enforcement_eligible: false,
             evidence: reading
                 .cues
                 .into_iter()

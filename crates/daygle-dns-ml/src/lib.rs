@@ -313,6 +313,9 @@ impl AiEngine {
         // A model file that changed while the server was down (a release
         // bundle, a new configured path) re-checks verdicts like a promotion.
         note_live_model(&store, &shared_path, &logs);
+        let classifier_digest = Arc::new(ArcSwap::from_pointee(threshold::model_version(
+            &shared_path,
+        )));
 
         // The channels sit behind reloadable handles, so a new model goes
         // live without a restart.
@@ -341,6 +344,7 @@ impl AiEngine {
         // Every model that goes live - a promotion, a manual retrain or a
         // rollback - goes through these.
         let install_model: ModelInstaller = {
+            let classifier_digest = classifier_digest.clone();
             let settings = settings_swap.clone();
             let logs = logs.clone();
             let content_swap = content_swap.clone();
@@ -363,6 +367,7 @@ impl AiEngine {
                 threat_swap.replace(threat);
                 announce(&logs, path == learned, "classifier", &file);
                 note_live_model(&store, &file, &logs);
+                classifier_digest.store(Arc::new(threshold::model_version(&file)));
                 model.store(Arc::new(file));
                 active.store(path == learned, std::sync::atomic::Ordering::Relaxed);
                 Ok(())
@@ -435,9 +440,10 @@ impl AiEngine {
             categories.clone(),
             logs.clone(),
         );
-        scanner.set_maintenance(maintenance.clone());
+        scanner.set_maintenance(&maintenance);
         scanner.set_page_model(page_model.clone());
         scanner.set_intel(intel.clone());
+        scanner.set_classifier_digest(classifier_digest);
         // A promoted candidate is already in force at startup: its calibration
         // map and signal weights are what the scanner applies from the first
         // cycle. With no active candidate (every existing install) these stay
@@ -522,10 +528,7 @@ impl AiEngine {
                 }
                 let mut seen = std::collections::HashSet::new();
                 let mut reviewed = Vec::new();
-                for correction in store.corrections()? {
-                    if !(started..ends).contains(&correction.created_at) {
-                        continue;
-                    }
+                for correction in store.corrections_between(started, ends)? {
                     let domain = correction
                         .domain
                         .trim()
@@ -573,8 +576,10 @@ impl AiEngine {
                 let samples = reviewed
                     .into_iter()
                     .map(|(domain, threat)| {
+                        let verdict = backend
+                            .classify(&backend::ClassificationInput::domain_only(domain.clone()));
                         let outcome =
-                            replay::replay_with(&context, backend.as_ref(), &domain, &index, ends);
+                            context.replay_review(&domain, verdict.as_ref(), &index, ends);
                         if outcome.policy_blocked.is_some() {
                             policy_blocked += 1;
                             if outcome.threat {
@@ -649,8 +654,13 @@ impl AiEngine {
         // once, after the engine exists, so the retrainer can call back into
         // the activation service without owning the configuration.
         engine.shared.retrainer.set_activation(Box::new({
-            let engine = engine.clone();
+            let owner = Arc::downgrade(&engine);
             move |artifact, live, activation| {
+                let engine = owner.upgrade().ok_or_else(|| {
+                    DaygleError::Internal(
+                        "the engine shut down before scheduled activation".to_string(),
+                    )
+                })?;
                 let (promoted, undo) =
                     engine.record_scheduled_activation(artifact, live, activation)?;
                 let engine_for_undo = engine.clone();
@@ -658,6 +668,7 @@ impl AiEngine {
                 Ok(crate::maintain::ActivationUndo::new(
                     move || engine_for_undo.undo_scheduled_activation(undo),
                     move || {
+                        engine_for_complete.publish_scheduled_scoring(&promoted);
                         engine_for_complete
                             .shared
                             .retrainer
@@ -1509,18 +1520,13 @@ impl AiEngine {
             previous_weights,
             previous_threshold,
         };
-        self.scanner.set_calibration(promoted.calibration.clone());
-        self.scanner
-            .set_signal_weights(promoted.signal_weights.clone());
-        let mut live = (*settings).clone();
-        live.block_threshold = promoted.block_threshold;
-        self.settings.store(Arc::new(live));
-        match self.rescore_stored_verdicts("a scheduled promotion") {
-            Ok(_) => {
-                self.refresh_snapshot_now();
-                self.trigger_rescan();
-                Ok((promoted, undo))
-            }
+        self.scanner.stage_scoring(true);
+        match self.store.rescore_assessments(
+            settings.fusion,
+            &promoted.signal_weights,
+            promoted.calibration.as_ref(),
+        ) {
+            Ok(_) => Ok((promoted, undo)),
             Err(e) => {
                 let failures = self.undo_scheduled_activation(undo);
                 Err(failed_change(
@@ -1530,6 +1536,18 @@ impl AiEngine {
                 ))
             }
         }
+    }
+
+    fn publish_scheduled_scoring(&self, promoted: &store::CandidateVersion) {
+        self.scanner.set_calibration(promoted.calibration.clone());
+        self.scanner
+            .set_signal_weights(promoted.signal_weights.clone());
+        let mut live = (*self.settings.load_full()).clone();
+        live.block_threshold = promoted.block_threshold;
+        self.settings.store(Arc::new(live));
+        self.scanner.stage_scoring(false);
+        self.refresh_snapshot_now();
+        self.trigger_rescan();
     }
 
     /// Take a passed trial's scoring back out of force after the model it was
@@ -1598,6 +1616,7 @@ impl AiEngine {
             ));
         }
         if failures.is_empty() {
+            self.scanner.stage_scoring(false);
             self.refresh_snapshot_now();
             self.trigger_rescan();
         }
@@ -1996,17 +2015,7 @@ impl AiEngine {
     /// stage in force.
     pub fn authority_status(&self) -> Result<serde_json::Value> {
         let settings = self.settings.load_full();
-        let calibration_version = self
-            .scanner
-            .calibration_map()
-            .map(|map| map.version)
-            .unwrap_or_default();
-        let decisions = authority::evaluate_for_scoring(
-            &self.store,
-            &settings.authority,
-            &calibration_version,
-            settings.fusion.as_str(),
-        )?;
+        let decisions = self.scanner.authority_decisions(&settings)?;
         let now = chrono::Utc::now().timestamp();
         let reviews = self.store.authority_reviews(now)?;
         let reviewed_sources = [authority::Source::Feed, authority::Source::Model]

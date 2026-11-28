@@ -941,6 +941,17 @@ fn engine(dir: &TempDir, settings: AiSettings) -> Arc<AiEngine> {
 }
 
 #[test]
+fn dropping_the_engine_releases_the_scanner_and_activation_hook() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(&dir, settings(AiMode::Train));
+    let engine = Arc::downgrade(&ai);
+    let scanner = Arc::downgrade(&ai.scanner);
+    drop(ai);
+    assert!(engine.upgrade().is_none());
+    assert!(scanner.upgrade().is_none());
+}
+
+#[test]
 fn expired_verdicts_are_reclassified_by_the_next_cycle() {
     let dir = TempDir::new().unwrap();
     let zones = zone_store(&dir);
@@ -1600,6 +1611,7 @@ impl daygle_dns_ml::page::PageReader for FixedReader {
             final_host: Some(domain.to_owned()),
             category: Some("phishing".to_owned()),
             confidence: Some(0.95),
+            enforcement_eligible: true,
             evidence: "verify your account, confirm your password".to_owned(),
         }
     }
@@ -3498,8 +3510,6 @@ fn undoing_a_scheduled_activation_restores_the_scoring_it_replaced() {
         "the-candidate-model",
         chrono::Utc::now().timestamp(),
     );
-    let trial_version = trial_map.version.clone();
-
     let (_promoted, undo) = ai
         .record_scheduled_activation(
             &artifact,
@@ -3512,11 +3522,11 @@ fn undoing_a_scheduled_activation_restores_the_scoring_it_replaced() {
             },
         )
         .expect("one recoverable activation");
-    assert!((ai.settings.load().block_threshold - 0.9).abs() < f32::EPSILON);
+    assert!((ai.settings.load().block_threshold - threshold).abs() < f32::EPSILON);
     assert!(ai.store.active_candidate().unwrap().is_some());
     assert_eq!(
         ai.scanner.calibration_map().map(|map| map.version),
-        Some(trial_version)
+        Some(incumbent_map.version.clone())
     );
     assert_eq!(
         ai.live_model_path(),
@@ -3963,7 +3973,7 @@ fn a_scheduled_activation_is_one_recoverable_version() {
         },
     )
     .expect("one recoverable activation");
-    assert!((ai.settings.load().block_threshold - threshold).abs() < f32::EPSILON);
+    assert!((ai.settings.load().block_threshold - before).abs() < f32::EPSILON);
     let active = ai
         .store
         .active_candidate()

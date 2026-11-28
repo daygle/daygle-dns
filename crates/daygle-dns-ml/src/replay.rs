@@ -129,6 +129,27 @@ impl<'a> ReplayContext<'a> {
         intel: &crate::intel::IntelIndex,
         now: i64,
     ) -> ReplayOutcome {
+        self.replay_inner(domain, verdict, intel, now, false)
+    }
+
+    pub(crate) fn replay_review(
+        &self,
+        domain: &str,
+        verdict: Option<&Verdict>,
+        intel: &crate::intel::IntelIndex,
+        now: i64,
+    ) -> ReplayOutcome {
+        self.replay_inner(domain, verdict, intel, now, true)
+    }
+
+    fn replay_inner(
+        &self,
+        domain: &str,
+        verdict: Option<&Verdict>,
+        intel: &crate::intel::IntelIndex,
+        now: i64,
+        reviewed: bool,
+    ) -> ReplayOutcome {
         // No candidate verdict is a miss, not the incumbent's finding: the
         // live gate would have no row for the name at all, so there is nothing
         // to score. Reading the stored row here would let a candidate that saw
@@ -149,11 +170,7 @@ impl<'a> ReplayContext<'a> {
         // and confidence onto the stored verdict. The candidate supplies its
         // own severity, name score and confidence; the stored notes are the
         // later evidence every candidate meets.
-        let stored = self.store.verdict(domain, "threat").ok().flatten();
-        let evidence = match stored.as_ref() {
-            Some(row) if !row.evidence.is_empty() => row.evidence.as_str(),
-            _ => verdict.evidence.as_str(),
-        };
+        let mut evidence = verdict.evidence.clone();
         let mut confidence = verdict.confidence;
         // The page rule's adjustment is stored as the value it moved the
         // confidence to: a raise targets the page's own reading, and a Decide
@@ -166,13 +183,14 @@ impl<'a> ReplayContext<'a> {
                 confidence = confidence.min(adjustment.confidence);
             }
         }
-        // The language model's raise is kept on the stored verdict; it read
-        // the page, not the name, so it applies to any candidate's reading.
-        if let Some(row) = stored
-            .as_ref()
-            .filter(|row| row.evidence.contains("language model"))
-        {
-            confidence = confidence.max(row.confidence);
+        if self.settings.llm_enabled {
+            if let Ok(Some(reading)) = self.store.threat_llm_reading(domain) {
+                if let Some(raised) = crate::scanner::llm_raise(self.settings, confidence, &reading)
+                {
+                    confidence = raised;
+                    evidence.push_str(", language model corroborated");
+                }
+            }
         }
         let severity = verdict.severity;
         let threat_score = verdict.threat_score.unwrap_or(confidence);
@@ -204,7 +222,7 @@ impl<'a> ReplayContext<'a> {
                 threat_score,
                 confidence,
                 severity: severity.as_str(),
-                evidence,
+                evidence: &evidence,
                 page,
                 now,
             },
@@ -231,7 +249,7 @@ impl<'a> ReplayContext<'a> {
         } else if self
             .overrides
             .get(domain)
-            .is_some_and(|action| action == "allow" || action == "not_threat")
+            .is_some_and(|action| action == "allow" || (!reviewed && action == "not_threat"))
         {
             blocked = Some(format!(
                 "operator {} override",
@@ -240,17 +258,22 @@ impl<'a> ReplayContext<'a> {
                     .map(String::as_str)
                     .unwrap_or("allow")
             ));
-        } else if self.category_overrides.contains_key(domain) {
+        } else if !reviewed && self.category_overrides.contains_key(domain) {
             blocked = Some("operator category override".to_string());
-        } else if self.settings.authority.enabled {
-            let decision = authority::decision_for(&self.authority, authority::Source::Model);
-            if !decision.is_some_and(|decision| decision.may_block()) {
-                blocked = Some("the model source is held below enforce".to_string());
-            }
         } else if !self.settings.is_auto_block_category(&category) {
             blocked = Some(format!(
                 "category '{category}' is not an enabled threat family"
             ));
+        } else if !reviewed && self.settings.authority.enabled {
+            let source = if evidence.contains(", listed by ") {
+                authority::Source::Feed
+            } else {
+                authority::Source::Model
+            };
+            let decision = authority::decision_for(&self.authority, source);
+            if !decision.is_some_and(|decision| decision.may_block()) {
+                blocked = Some("the finding's source is held below enforce".to_string());
+            }
         }
         ReplayOutcome {
             // The block query reads only `severity = 'threat'`, so a verdict
@@ -360,6 +383,113 @@ mod tests {
         assert!(!outcome.threat);
         assert_eq!(outcome.score, 0.0, "a miss is not the incumbent's score");
         assert!(outcome.policy_blocked.is_some());
+    }
+
+    #[test]
+    fn reviewed_labels_measure_predictions_without_reapplying_the_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AiStore::open(&dir.path().join("ai.db")).unwrap();
+        store
+            .set_category_override("positive.example", "phishing")
+            .unwrap();
+        store
+            .set_override("negative.example", "not_threat", "reviewed")
+            .unwrap();
+        store
+            .set_override("allow.example", "allow", "policy")
+            .unwrap();
+        let settings = settings();
+        let context = context(&store, &settings, SignalWeights::default());
+        let intel = crate::intel::IntelIndex::default();
+        let now = chrono::Utc::now().timestamp();
+        for domain in ["positive.example", "negative.example"] {
+            assert!(!context
+                .replay(domain, Some(&reading(0.9)), &intel, now)
+                .would_block(0.8));
+            assert!(context
+                .replay_review(domain, Some(&reading(0.9)), &intel, now)
+                .would_block(0.8));
+        }
+        assert!(!context
+            .replay_review("sub.allow.example", Some(&reading(0.9)), &intel, now)
+            .would_block(0.8));
+    }
+
+    #[test]
+    fn llm_replay_applies_the_reading_to_the_candidate_score() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AiStore::open(&dir.path().join("ai.db")).unwrap();
+        let domain = "llm.example";
+        stored_threat(&store, domain, 0.99);
+        store
+            .record_llm_reading(
+                domain,
+                "threat",
+                "language model",
+                None,
+                None,
+                &crate::llm::LlmReading {
+                    category: Some("phishing".to_string()),
+                    threat: true,
+                    confidence: 0.9,
+                    reason: String::new(),
+                },
+            )
+            .unwrap();
+        let mut settings = settings();
+        settings.llm_enabled = true;
+        settings.page_rule = PageRule::Corroborate;
+        let replay = context(&store, &settings, SignalWeights::default());
+        let intel = crate::intel::IntelIndex::default();
+        let now = chrono::Utc::now().timestamp();
+        let outcome = replay.replay(domain, Some(&reading(0.3)), &intel, now);
+        assert!((outcome.score - 0.4).abs() < 1e-5, "{outcome:?}");
+    }
+
+    #[test]
+    fn reviewed_replay_can_pass_and_rejects_held_out_false_positives() {
+        use crate::threshold::{self, Group, LabelSource, Sample};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = AiStore::open(&dir.path().join("ai.db")).unwrap();
+        let settings = settings();
+        let intel = crate::intel::IntelIndex::default();
+        let now = chrono::Utc::now().timestamp();
+        let domains: Vec<_> = (0..400)
+            .map(|i| (format!("review-{i}.example"), i % 2 == 0))
+            .collect();
+        for (domain, threat) in &domains {
+            if *threat {
+                store.set_category_override(domain, "phishing").unwrap();
+            } else {
+                store.set_override(domain, "not_threat", "review").unwrap();
+            }
+        }
+        let context = context(&store, &settings, SignalWeights::default());
+        let samples = |false_positives: bool| {
+            domains
+                .iter()
+                .map(|(domain, threat)| {
+                    let flagged = *threat || (false_positives && threshold::held_out(domain));
+                    let verdict = reading(if flagged { 0.9 } else { 0.3 });
+                    let result = context.replay_review(domain, Some(&verdict), &intel, now);
+                    Sample {
+                        domain: domain.clone(),
+                        registrable: assessment::registrable(domain),
+                        score: result.score,
+                        group: Group::Correction,
+                        label: LabelSource::OperatorCorrection,
+                        threat: Some(*threat),
+                        scored_at: now,
+                        policy_blocked: result.policy_blocked,
+                    }
+                })
+                .collect()
+        };
+        let good = threshold::tune_replayed_scores(samples(false), "candidate", &settings, now);
+        assert_eq!(good["passed"], true, "{good}");
+        let bad = threshold::tune_replayed_scores(samples(true), "candidate", &settings, now);
+        assert_eq!(bad["passed"], false, "{bad}");
     }
 
     #[test]

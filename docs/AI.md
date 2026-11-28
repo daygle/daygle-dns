@@ -477,6 +477,8 @@ The next regular block snapshot refresh considers new findings.
 findings for the current cache. Its correction share covers only explicit
 reviews. A policy allow exemption alone leaves the finding unreviewed.
 A missing share means there are no reviewed findings.
+On upgrade, cached discoveries are rechecked before they can qualify for
+exact-host enforcement under the direct-evidence eligibility flag.
 Evidence-only page mode, overrides, popularity and established-domain
 disputes, automated finding authority, and the per-refresh cap still apply.
 Page-only entries stay out of the category snapshot and threat export, where

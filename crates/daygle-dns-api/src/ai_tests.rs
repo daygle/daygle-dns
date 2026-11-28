@@ -1253,6 +1253,35 @@ async fn candidate_validation_uses_the_applied_trial_for_the_current_scoring() {
 }
 
 #[tokio::test]
+async fn an_unrelated_ai_edit_preserves_the_scheduled_threshold() {
+    let dir = scratch_dir("scheduled-threshold-settings");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai.clone()));
+    let mut live = (*ai.settings.load_full()).clone();
+    live.block_threshold = 0.94;
+    ai.settings.store(Arc::new(live));
+    let (code, _, body) = call(
+        state.clone(),
+        "PUT",
+        "/api/config",
+        Some(serde_json::json!({ "ai": { "workers": 3 } })),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    assert_eq!(ai.settings.load().block_threshold, 0.94);
+    assert_eq!(overlay_threshold(&state), Some(0.99));
+    let (code, _, body) = call(
+        state,
+        "PUT",
+        "/api/config",
+        Some(serde_json::json!({ "ai": { "block_threshold": 0.97 } })),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    assert_eq!(ai.settings.load().block_threshold, 0.97);
+}
+
+#[tokio::test]
 async fn a_threshold_trial_cannot_be_applied_after_the_target_tightens() {
     let dir = scratch_dir("threshold-stricter-target");
     let ai = engine(&dir);

@@ -32,6 +32,8 @@ pub enum Source {
     Feed,
     /// The primary model (with whatever independent evidence) found it.
     Model,
+    /// A finding from standalone page discovery.
+    Page,
 }
 
 impl Source {
@@ -39,6 +41,7 @@ impl Source {
         match self {
             Self::Feed => "feed",
             Self::Model => "model",
+            Self::Page => "page",
         }
     }
 
@@ -46,6 +49,7 @@ impl Source {
         match value {
             "feed" => Some(Self::Feed),
             "model" => Some(Self::Model),
+            "page" => Some(Self::Page),
             _ => None,
         }
     }
@@ -88,7 +92,7 @@ impl AuthorityDecision {
 pub fn stage_for(settings: &AuthoritySettings, source: Source) -> AuthorityStage {
     match source {
         Source::Feed => settings.feed_stage,
-        Source::Model => settings.model_stage,
+        Source::Model | Source::Page => settings.model_stage,
     }
 }
 
@@ -103,7 +107,7 @@ pub fn evaluate(store: &AiStore, settings: &AuthoritySettings) -> Result<Vec<Aut
 /// step and never goes past the ceiling.
 fn advance(stage: AuthorityStage, steps: i64) -> AuthorityStage {
     let mut stage = stage;
-    for _ in 0..steps {
+    for _ in 0..steps.min(2) {
         stage = match stage {
             AuthorityStage::Monitor => AuthorityStage::Propose,
             AuthorityStage::Propose => AuthorityStage::Enforce,
@@ -139,14 +143,45 @@ pub fn evaluate_for_scoring(
     calibration_version: &str,
     assessment_mode: &str,
 ) -> Result<Vec<AuthorityDecision>> {
+    evaluate_for_identity(
+        store,
+        settings,
+        calibration_version,
+        assessment_mode,
+        None,
+        None,
+    )
+}
+
+pub(crate) fn evaluate_for_identity(
+    store: &AiStore,
+    settings: &AuthoritySettings,
+    calibration_version: &str,
+    assessment_mode: &str,
+    identity: Option<&str>,
+    page_identity: Option<&str>,
+) -> Result<Vec<AuthorityDecision>> {
     if !settings.enabled {
         return Ok(vec![]);
     }
-    let measurements = store.authority_measurements()?;
+    let mut measurements = store.authority_measurements()?;
     let now = chrono::Utc::now().timestamp();
-    let reviews = store.authority_reviews_for_scoring(now, calibration_version, assessment_mode)?;
+    let mut reviews = store.authority_reviews_for_identity(
+        now,
+        calibration_version,
+        assessment_mode,
+        identity,
+    )?;
+    let mut sources = vec![Source::Feed, Source::Model];
+    if let Some(page_identity) = page_identity {
+        let (findings, corrected, confirmed) =
+            store.page_discovery_reviews(now, Some(page_identity))?;
+        reviews.push(("page".to_string(), findings, corrected, confirmed));
+        measurements.push(("page".to_string(), corrected, confirmed));
+        sources.push(Source::Page);
+    }
     let mut decisions = Vec::new();
-    for source in [Source::Feed, Source::Model] {
+    for source in sources {
         let (false_positives, true_positives) = measurements
             .iter()
             .find(|(name, _, _)| name == source.as_str())
@@ -427,6 +462,80 @@ mod tests {
         let decisions = evaluate_for_scoring(&store, &settings, "", "").unwrap();
         assert_eq!(
             decision_for(&decisions, Source::Model).unwrap().effective,
+            AuthorityStage::Monitor
+        );
+    }
+
+    #[test]
+    fn advancement_tracks_full_finding_identity_and_page_reviews_separately() {
+        use daygle_dns_core::config::FusionMode;
+
+        let (_dir, store) = store();
+        let now = chrono::Utc::now().timestamp();
+        let model = "model.example";
+        verdict(&store, model, "model, malware", 0.99);
+        store
+            .save_assessment_for_identity(
+                model,
+                "threat",
+                FusionMode::Decide,
+                &crate::assessment::score_of_record(FusionMode::Decide, 0.99, None, None),
+                Some("scoring-a"),
+            )
+            .unwrap();
+        store.set_category_override(model, "malware").unwrap();
+        let page = "page.example";
+        store
+            .save_page_discovery(
+                page,
+                &crate::page::DiscoveryReading {
+                    final_host: Some(page.to_string()),
+                    category: Some("phishing".to_string()),
+                    confidence: Some(0.95),
+                    enforcement_eligible: true,
+                    evidence: String::new(),
+                },
+                now,
+                "page-a",
+            )
+            .unwrap();
+        store.set_category_override(page, "phishing").unwrap();
+        let settings = AuthoritySettings {
+            enabled: true,
+            advancement: true,
+            model_stage: AuthorityStage::Enforce,
+            advance_min_reviews: 1,
+            ..Default::default()
+        };
+        let evaluate = |identity, page_identity| {
+            evaluate_for_identity(
+                &store,
+                &settings,
+                "",
+                "decide",
+                Some(identity),
+                Some(page_identity),
+            )
+            .unwrap()
+        };
+        let current = evaluate("scoring-a", "page-a");
+        let changed = evaluate("scoring-b", "page-a");
+        assert_eq!(
+            decision_for(&current, Source::Model).unwrap().effective,
+            AuthorityStage::Propose
+        );
+        assert_eq!(
+            decision_for(&changed, Source::Model).unwrap().effective,
+            AuthorityStage::Monitor
+        );
+        assert_eq!(
+            decision_for(&changed, Source::Page).unwrap().effective,
+            AuthorityStage::Propose
+        );
+        assert_eq!(
+            decision_for(&evaluate("scoring-b", "page-b"), Source::Page)
+                .unwrap()
+                .effective,
             AuthorityStage::Monitor
         );
     }

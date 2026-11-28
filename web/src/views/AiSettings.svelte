@@ -25,6 +25,9 @@
     max_new_blocks_per_refresh: 500,
     demote_fp_rate: 0.05,
     demote_min_samples: 20,
+    advancement: false,
+    advance_min_reviews: 20,
+    advance_fp_rate: 0.05,
   };
   const STAGES = [
     ['monitor', 'Monitor - Record Only'],
@@ -63,6 +66,7 @@
       floorPct: round2(src.confidence_floor * 100),
       fprPct: round2((src.threshold_fpr_target ?? 0.01) * 100),
       demotePct: round2((src.authority?.demote_fp_rate ?? AUTHORITY_DEFAULTS.demote_fp_rate) * 100),
+      advancePct: round2((src.authority?.advance_fp_rate ?? AUTHORITY_DEFAULTS.advance_fp_rate) * 100),
     };
   }
 
@@ -92,6 +96,9 @@
         max_new_blocks_per_refresh: Number(ai_.authority.max_new_blocks_per_refresh),
         demote_fp_rate: Number(aiForm.demotePct) / 100,
         demote_min_samples: Number(ai_.authority.demote_min_samples),
+        advancement: !!ai_.authority.advancement,
+        advance_min_reviews: Number(ai_.authority.advance_min_reviews),
+        advance_fp_rate: Number(aiForm.advancePct) / 100,
       },
     };
   }
@@ -143,6 +150,12 @@
     }
     if (!(body.authority.demote_min_samples >= 1)) {
       return 'Auto-Demote needs at least one measured finding.';
+    }
+    if (!Number.isInteger(body.authority.advance_min_reviews) || body.authority.advance_min_reviews < 1) {
+      return 'Auto-Advance needs at least one reviewed finding per stage.';
+    }
+    if (!(body.authority.advance_fp_rate >= 0 && body.authority.advance_fp_rate <= 1)) {
+      return 'The Auto-Advance Correction Share must be between 0 and 100%.';
     }
     if (body.enabled && (body.scan_interval_secs < 10 || body.expire_check_secs < 10)) {
       return 'Scan and expiry intervals must be at least 10 seconds (0.17 minutes).';
@@ -290,6 +303,7 @@
 
     <h4>Enforcement Authority</h4>
     <label class="check"><input type="checkbox" bind:checked={ai_.authority.enabled} /> <span>Grade Authority per Evidence Source</span></label>
+    <label class="check"><input type="checkbox" bind:checked={ai_.authority.advancement} disabled={!ai_.authority.enabled} /> <span>Advance Authority From Reviewed Findings</span></label>
     <div class="form-grid">
       <label>
         <span>Feed-Confirmed Findings</span>
@@ -306,6 +320,10 @@
       <label><span>New Blocks Per Refresh (Max 500)</span><input type="number" min="1" max="500" bind:value={ai_.authority.max_new_blocks_per_refresh} /></label>
       <label><span>Auto-Demote Above (% False Positives)</span><input type="number" min="0" max="100" step="any" bind:value={aiForm.demotePct} /></label>
       <label><span>Auto-Demote After (Measured Findings)</span><input type="number" min="1" bind:value={ai_.authority.demote_min_samples} /></label>
+      {#if ai_.authority.advancement}
+        <label><span>Reviews Required per Advancement Stage</span><input type="number" min="1" bind:value={ai_.authority.advance_min_reviews} /></label>
+        <label><span>Maximum Auto-Advance Correction Share (%)</span><input type="number" min="0" max="100" step="any" bind:value={aiForm.advancePct} /></label>
+      {/if}
     </div>
     <p class="muted help">
       Off leaves the Mode setting alone deciding what may block. When on, a
@@ -314,6 +332,8 @@
       share is demoted to Monitor on its own. Your labels and overrides are
       never filtered or demoted. New Blocks Per Refresh can tighten the
       built-in 500 ceiling, never raise it.
+      With advancement enabled, the selected stages are ceilings. Sources
+      begin in Monitor and advance using confirmed and corrected reviews.
     </p>
   </div>
 </SettingsForm>

@@ -8898,6 +8898,8 @@ pub async fn update_settings(
                 authority.max_new_blocks_per_refresh.clamp(1, 500);
             authority.demote_fp_rate = authority.demote_fp_rate.clamp(0.0, 1.0);
             authority.demote_min_samples = authority.demote_min_samples.max(1);
+            authority.advance_min_reviews = authority.advance_min_reviews.max(1);
+            authority.advance_fp_rate = authority.advance_fp_rate.clamp(0.0, 1.0);
             config.ai.authority = authority;
         }
         if let Some(v) = a.confidence_floor {
@@ -9250,7 +9252,14 @@ pub async fn update_settings(
                 // Rebuilding the snapshots reads SQLite: off the async workers.
                 let restart = run_blocking({
                     let ai = ai.clone();
-                    let settings = config.ai.clone();
+                    let mut settings = config.ai.clone();
+                    if update
+                        .ai
+                        .as_ref()
+                        .is_none_or(|ai| ai.block_threshold.is_none())
+                    {
+                        settings.block_threshold = ai.settings.load().block_threshold;
+                    }
                     move || ai.apply_settings(&settings)
                 })
                 .await;
