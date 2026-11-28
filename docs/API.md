@@ -1039,8 +1039,10 @@ Supported `rtype` values: `A`, `AAAA`, `CNAME`, `MX`, `TXT`, `NS`, `SOA`,
 `AUTOPTR`.
 `content` must parse as that type's RDATA, otherwise the request fails with
 400, as does a record too large for one DNS message (about 64 KB on the
-wire). `priority` is not served: MX and SRV take their priority from
-`content`.
+wire). A row written by an older build that is too large is left out of the
+served zone (a lookup that would have reached it is reported in the server
+log) and skipped, also reported, by zone transfers. `priority` is not served:
+MX and SRV take their priority from `content`.
 For A and AAAA records with health checks it is the failover priority (see
 below).
 

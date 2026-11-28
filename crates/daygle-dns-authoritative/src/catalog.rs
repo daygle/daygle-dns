@@ -77,6 +77,9 @@ pub struct AuthorityCatalog {
     /// (signed zones, and secondaries kept as their master sent them), by
     /// lowercase zone name.
     transfer_sets: arc_swap::ArcSwap<HashMap<String, Arc<ServedRecords>>>,
+    /// Stored records left out of the served zones because they cannot be
+    /// encoded into one DNS message (see [`OversizedRecord`]).
+    oversized: arc_swap::ArcSwap<Vec<OversizedRecord>>,
     /// The SOA serial each primary zone was last served with.
     serials: Mutex<HashMap<String, u32>>,
     /// Primary zones whose serial changed since [`Self::take_changed_zones`]
@@ -229,6 +232,21 @@ impl RuntimeProvider for SigningRuntime {
 /// The zone handler every hosted zone is served by.
 type ZoneData = InMemoryZoneHandler<SigningRuntime>;
 
+/// A stored record too large to be encoded into one DNS message.
+///
+/// Records written before they were size-checked can still be in the
+/// database. Such a record makes every answer that contains it unencodable,
+/// so zones are built without it (a transfer has its own skip), and a lookup
+/// that would have reached it reports it here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OversizedRecord {
+    /// Owner name in the form the server matches names in: lowercase ASCII,
+    /// no trailing dot.
+    pub name: String,
+    /// Record type as stored, e.g. `TXT`.
+    pub rtype: String,
+}
+
 /// A freshly built catalog and what changed in it.
 struct Built {
     catalog: Catalog,
@@ -240,6 +258,8 @@ struct Built {
     aliases: HashMap<String, Alias>,
     weighted: WeightedIndex,
     auto_ptr: AutoPtrIndex,
+    /// Records no zone serves because they do not fit in one DNS message.
+    oversized: Vec<OversizedRecord>,
 }
 
 /// Whether two zone names are the same zone, comparing their ASCII
@@ -384,6 +404,7 @@ impl AuthorityCatalog {
             unhealthy: Default::default(),
             reload_lock: Mutex::new(()),
             transfer_sets: arc_swap::ArcSwap::from_pointee(built.transfer_sets),
+            oversized: arc_swap::ArcSwap::from_pointee(built.oversized),
             serials: Mutex::new(built.serials),
             changed_zones: Mutex::new(BTreeSet::new()),
             zones_changed: Arc::new(tokio::sync::Notify::new()),
@@ -588,6 +609,7 @@ impl AuthorityCatalog {
         drop(signed_zones);
         self.catalog.store(Arc::new(built.catalog));
         self.transfer_sets.store(Arc::new(built.transfer_sets));
+        self.oversized.store(Arc::new(built.oversized));
         self.aliases.store(Arc::new(built.aliases));
         self.weighted.store(Arc::new(built.weighted));
         self.auto_ptr.store(Arc::new(built.auto_ptr));
@@ -704,6 +726,23 @@ impl AuthorityCatalog {
             .filter(|r| !r.disabled && r.rtype == wanted && r.name.eq_ignore_ascii_case(&name))
             .filter_map(|r| record_to_hickory(r).ok())
             .collect())
+    }
+
+    /// The stored records at `name` that no zone serves because they cannot
+    /// be encoded into one DNS message; `rtype` matches one type, and `ANY`
+    /// matches all of them. Empty unless such a row was written before
+    /// records were size-checked.
+    pub fn oversized_records(&self, name: &str, rtype: &str) -> Vec<OversizedRecord> {
+        let name = ascii_name(name);
+        let any = rtype.eq_ignore_ascii_case("ANY");
+        self.oversized
+            .load()
+            .iter()
+            .filter(|record| {
+                record.name == name && (any || record.rtype.eq_ignore_ascii_case(rtype))
+            })
+            .cloned()
+            .collect()
     }
 
     /// Clone out the current split-horizon index (cheap `Arc` bump).
@@ -958,6 +997,7 @@ fn build_catalog(
         aliases: HashMap::new(),
         weighted: HashMap::new(),
         auto_ptr: AutoPtrIndex::default(),
+        oversized: Vec::new(),
     };
     let serials = &mut built.serials;
     let transfer_sets = &mut built.transfer_sets;
@@ -970,6 +1010,12 @@ fn build_catalog(
         if !zone.enabled {
             continue;
         }
+        // A record too large for one DNS message can never be served: any
+        // answer holding it fails to encode, so the whole query gets nothing.
+        // Leave it out of the zone and report it here; a transfer, which
+        // reads the stored rows itself, skips and reports it there.
+        let (records, oversized) = served_records(records);
+        built.oversized.extend(oversized);
         let origin = fqdn_name(&zone.name)?;
         let lower = LowerName::from(origin.clone());
 
@@ -1501,6 +1547,36 @@ fn catalog_zone_rrsets(
         )?;
     }
     Ok((map, changed))
+}
+
+/// The records a zone may serve: the stored rows minus those that cannot be
+/// encoded into one DNS message, each reported. Rows a zone never serves
+/// (disabled, ALIAS, AUTOPTR, stored SOA) pass through; [`served_as_record`]
+/// leaves them out later.
+fn served_records(records: Vec<DbRecord>) -> (Vec<DbRecord>, Vec<OversizedRecord>) {
+    let mut kept = Vec::with_capacity(records.len());
+    let mut oversized = Vec::new();
+    for record in records {
+        if served_as_record(&record) {
+            // A row that does not parse is skipped, with a warning, by the
+            // zone builder already.
+            if let Ok(decoded) = record_to_hickory(&record) {
+                if !crate::model::record_fits_a_message(&decoded) {
+                    warn!(
+                        "skipping record {} ({}): it cannot fit in one DNS message",
+                        record.name, record.rtype
+                    );
+                    oversized.push(OversizedRecord {
+                        name: ascii_name(&record.name),
+                        rtype: record.rtype.clone(),
+                    });
+                    continue;
+                }
+            }
+        }
+        kept.push(record);
+    }
+    (kept, oversized)
 }
 
 /// Build the full set of `RrKey -> RecordSet` for one zone, including the

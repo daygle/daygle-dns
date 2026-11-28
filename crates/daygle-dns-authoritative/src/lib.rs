@@ -41,7 +41,7 @@ pub mod tsig;
 pub mod update;
 pub mod zonemd;
 
-pub use catalog::{generate_signing_key, AuthorityCatalog};
+pub use catalog::{generate_signing_key, AuthorityCatalog, OversizedRecord};
 pub use catalog_zone::CatalogConsumer;
 pub use dnssec::{DnssecMaintenance, MaintenanceConfig};
 pub use health::HealthMonitor;

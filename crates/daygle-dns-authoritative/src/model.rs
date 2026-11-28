@@ -147,6 +147,21 @@ pub const KNOWN_RECORD_TYPES: &[&str] = &[
 /// break the transfers and lookups that reached it later.
 pub const MAX_RECORD_WIRE_BYTES: usize = 64_000;
 
+/// Whether `record` can be encoded as part of one DNS message.
+///
+/// A record left in the database by a build that did not check could never
+/// travel in any response: serving it makes the whole answer unencodable,
+/// so the query gets nothing back. Callers skip such a record and report it.
+pub fn record_fits_a_message(record: &hickory_proto::rr::Record) -> bool {
+    use hickory_proto::serialize::binary::BinEncodable;
+
+    // The encoder itself refuses anything past 65,535 bytes, so a refused
+    // encode and an oversized encoding are both "does not fit".
+    record
+        .to_bytes()
+        .is_ok_and(|bytes| bytes.len() <= MAX_RECORD_WIRE_BYTES)
+}
+
 /// Refuse a record that does not fit in one DNS message.
 ///
 /// Zone transfers answer with what they are given, so a record that cannot be

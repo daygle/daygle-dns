@@ -639,6 +639,33 @@ impl DnsDispatcher {
         );
     }
 
+    /// Report, once a minute per record, the stored records a query for
+    /// `qname`/`rtype` would have answered with but that are too large to
+    /// encode into one DNS message. `build_catalog` skips them from the served
+    /// zones, so they can no longer break the whole answer; this is the same
+    /// skip-and-report a zone transfer does, for the lookup that reaches one.
+    fn report_oversized_records(&self, qname: &str, rtype: &str) {
+        for record in self.catalog.oversized_records(qname, rtype) {
+            let key = format!("{} {}", record.name, record.rtype);
+            if !self.first_use_this_minute(OVERSIZED_RECORD_USE_NAME, &key) {
+                continue;
+            }
+            warn!(
+                query = %qname,
+                name = %record.name,
+                rtype = %record.rtype,
+                "skipping a record that cannot be encoded into one DNS message"
+            );
+            self.log_error(
+                "query",
+                format!(
+                    "query for {qname} skipped {} {}: it cannot fit in one DNS message",
+                    record.name, record.rtype
+                ),
+            );
+        }
+    }
+
     /// Whether `name`/`rtype` is used for the first time this clock minute
     /// (and so needs a "last used" database write). Past
     /// [`RECORD_USE_CACHE_CAP`] pairs seen within the last two minutes - a
@@ -881,10 +908,7 @@ impl DnsDispatcher {
         let answers: Vec<Record> = answers
             .into_iter()
             .filter(|record| {
-                let fits = hickory_proto::serialize::binary::BinEncodable::to_bytes(record)
-                    .is_ok_and(|bytes| {
-                        bytes.len() <= daygle_dns_authoritative::model::MAX_RECORD_WIRE_BYTES
-                    });
+                let fits = daygle_dns_authoritative::model::record_fits_a_message(record);
                 if !fits {
                     warn!(
                         query = %qname,
@@ -1760,6 +1784,10 @@ impl DnsDispatcher {
 
         // 2e. Authoritative zones.
         if self.catalog.contains(info.query.name()) {
+            // A record too large for one DNS message is left out of the served
+            // zones (see `build_catalog`), so this answer cannot fail on it;
+            // report it here, where the query would have hit it.
+            self.report_oversized_records(&qname, &rtype);
             self.metrics.inc(&self.metrics.authoritative);
             // The catalog builds and sends the response itself; its exact
             // rcode is not surfaced here, so the log records the outcome
@@ -2371,6 +2399,11 @@ const RECORD_USE_CACHE_CAP: usize = 16_384;
 /// entry's id is the type half of its key. "@" cannot start a host name, so
 /// it never collides with a queried name.
 const SPLIT_HORIZON_USE_NAME: &str = "@split-horizon";
+
+/// Name under which skipped oversized records share the record-use cache: the
+/// type half of each key is the record's name and type. "@" cannot start a
+/// host name, so it never collides with a queried name.
+const OVERSIZED_RECORD_USE_NAME: &str = "@oversized-record";
 
 /// When each (name, type) - or split-horizon entry - was last recorded as
 /// used, by clock minute, and when the map was last swept.
