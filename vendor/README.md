@@ -95,6 +95,14 @@ All are worth offering upstream.
    still builds on the minimum supported Rust (1.95), under
    `#[allow(deprecated)]`. Drop this once upstream switches.
 
+8. **DS validation skips cuts already being checked in the same chain**
+   (`hickory-net` `dnssec/mod.rs`). An unsigned SOA in a DS denial can cause
+   the validator to ask for the same DS while checking that SOA. The zone-cut
+   search now skips active DS lookups in its validation chain and looks for
+   independent proof at a higher cut. A positive DS or an unproven denial
+   still cannot establish an insecure delegation. Covered by
+   `a_ds_denial_does_not_reenter_its_own_validation`.
+
 ## Upgrading hickory
 
 Bump the version in the workspace `Cargo.toml`, replace each directory here

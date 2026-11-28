@@ -66,6 +66,7 @@ pub struct DnssecDnsHandle<H> {
     handle: H,
     trust_anchor: Arc<TrustAnchors>,
     request_depth: usize,
+    ds_ancestors: Vec<Name>,
     nsec3_soft_iteration_limit: u16,
     nsec3_hard_iteration_limit: u16,
     validation_cache: ValidationCache,
@@ -94,6 +95,7 @@ impl<H: DnsHandle> DnssecDnsHandle<H> {
             handle,
             trust_anchor,
             request_depth: 0,
+            ds_ancestors: Vec::new(),
             // These default values are based on
             // [RFC 9276 Appendix A](https://www.rfc-editor.org/rfc/rfc9276.html#appendix-A)
             nsec3_soft_iteration_limit: 100,
@@ -755,6 +757,14 @@ impl<H: DnsHandle> DnssecDnsHandle<H> {
                 return Err(ProofError::ds_should_exist(name));
             }
 
+            // An unsigned SOA in a DS response can send validation back to the
+            // same cut. That response cannot prove itself. Check higher cuts
+            // for independent proof that this branch has no chain of trust.
+            if self.ds_ancestors.contains(&ancestor) {
+                ancestor = ancestor.base_name();
+                continue;
+            }
+
             // Make an un-verified request for the NS RRset at this ancestor name. Only whether
             // the name is a zone cut matters: an alias (CNAME) at it is not one, and following
             // the alias would resolve an unrelated chain for nothing.
@@ -1156,6 +1166,7 @@ impl<H: DnsHandle> DnssecDnsHandle<H> {
             handle: self.handle.clone(),
             trust_anchor: Arc::clone(&self.trust_anchor),
             request_depth: self.request_depth + 1,
+            ds_ancestors: self.ds_ancestors.clone(),
             nsec3_soft_iteration_limit: self.nsec3_soft_iteration_limit,
             nsec3_hard_iteration_limit: self.nsec3_hard_iteration_limit,
             validation_cache: self.validation_cache.clone(),
@@ -1200,7 +1211,10 @@ impl<H: DnsHandle> DnsHandle for DnssecDnsHandle<H> {
             ))));
         };
 
-        let handle = self.clone_with_context();
+        let mut handle = self.clone_with_context();
+        if query.query_type() == RecordType::DS {
+            handle.ds_ancestors.push(query.name().clone());
+        }
         request.edns.get_or_insert_with(Edns::new).enable_dnssec();
 
         request.metadata.authentic_data = true;
