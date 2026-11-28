@@ -3725,6 +3725,208 @@ fn restart_completes_a_scheduled_activation_interrupted_before_model_install() {
     );
 }
 
+/// If the process stops after the model is installed but before the watch and
+/// trial are finished, startup completes that bookkeeping from the pending
+/// activation instead of leaving a live model nobody watches. The model the
+/// install rotated aside must still be the rollback target, so the watch that
+/// recovery starts can put the incumbent back.
+#[test]
+fn restart_completes_a_scheduled_activation_interrupted_before_watch_and_trial() {
+    let _train = training_guard();
+    let dir = TempDir::new().unwrap();
+    let configured = dir.path().join("configured.bin");
+    std::fs::copy(PROMOTION_MODEL, &configured).unwrap();
+    let initial = AiSettings {
+        model_path: configured.to_string_lossy().into_owned(),
+        block_threshold: 0.55,
+        ..settings(AiMode::Enforce)
+    };
+    let first = engine(&dir, initial.clone());
+    let learned = first.learned_model_path().to_path_buf();
+    drop(first);
+    let incumbent_source = dir.path().join("incumbent.bin");
+    let incumbent_pairs = (0..80)
+        .map(|i| {
+            (
+                if i % 2 == 0 { "news" } else { "shopping" }.to_string(),
+                format!("incumbent-domain{i}.example"),
+            )
+        })
+        .collect::<Vec<_>>();
+    daygle_dns_ml::learn::train(&incumbent_pairs, &incumbent_source).unwrap();
+    std::fs::copy(&incumbent_source, &learned).unwrap();
+    let incumbent_bytes = std::fs::read(&learned).unwrap();
+    let ai = engine(&dir, initial.clone());
+    assert_eq!(ai.live_model_path(), learned.to_string_lossy());
+
+    let artifact = dir.path().join("scheduled-candidate.bin");
+    let pairs = (0..80)
+        .map(|i| {
+            (
+                if i % 2 == 0 { "phishing" } else { "news" }.to_string(),
+                format!("candidate-domain{i}.example"),
+            )
+        })
+        .collect::<Vec<_>>();
+    daygle_dns_ml::learn::train(&pairs, &artifact).unwrap();
+    let candidate_bytes = std::fs::read(&artifact).unwrap();
+    let source_model = daygle_dns_ml::threshold::model_version(&artifact.to_string_lossy());
+    let map = daygle_dns_ml::calibration::CalibrationMap::identity(
+        &source_model,
+        chrono::Utc::now().timestamp(),
+    );
+    let weights = daygle_dns_ml::fusion::SignalWeights {
+        model: 0.73,
+        ..Default::default()
+    };
+    // The shadow trial was running when its candidate passed: the trial record
+    // is still the in-progress one the conclusion would have replaced.
+    let now = chrono::Utc::now().timestamp();
+    let trial = daygle_dns_ml::maintain::Trial {
+        started_at: Some(now - 600),
+        ends_at: Some(now + 1),
+        ..Default::default()
+    };
+    std::fs::write(
+        daygle_dns_ml::learn::trial_path(&learned),
+        serde_json::to_vec(&trial.to_json()).unwrap(),
+    )
+    .unwrap();
+
+    let (promoted, _undo) = ai
+        .record_scheduled_activation(
+            &artifact,
+            &learned,
+            &daygle_dns_ml::maintain::TrialActivation {
+                calibration: Some(map.clone()),
+                threshold: 0.81,
+                signal_weights: weights.clone(),
+                report: serde_json::json!({"passed": true, "reason": "held-out replay"}),
+            },
+        )
+        .expect("activation record commits before installation");
+    // The file half of the promotion ran, exactly as `promote_files` leaves it:
+    // the incumbent rotated aside, the candidate live, and nothing yet written
+    // to the watch or the trial.
+    std::fs::rename(
+        &learned,
+        daygle_dns_ml::learn::previous_model_path(&learned),
+    )
+    .unwrap();
+    std::fs::rename(&artifact, &learned).unwrap();
+
+    assert_eq!(std::fs::read(&learned).unwrap(), candidate_bytes);
+    assert_eq!(
+        std::fs::read(daygle_dns_ml::learn::previous_model_path(&learned)).unwrap(),
+        incumbent_bytes,
+        "the install rotated the incumbent aside for the rollback"
+    );
+    assert!(
+        ai.maintained_status()["watch"].is_null(),
+        "the simulated crash is before the watch starts"
+    );
+    assert!(
+        learned_trial(&ai).in_progress(),
+        "the simulated crash is before the trial is concluded"
+    );
+    assert_eq!(
+        ai.store.pending_scheduled_activation().unwrap().unwrap().id,
+        promoted.id,
+        "the activation is still pending across the crash"
+    );
+    drop(ai);
+
+    let restarted = engine(&dir, initial);
+    assert_eq!(
+        restarted.live_model_path(),
+        learned.to_string_lossy(),
+        "startup loads the installed scheduled model"
+    );
+    assert_eq!(std::fs::read(&learned).unwrap(), candidate_bytes);
+    assert_eq!(
+        std::fs::read(daygle_dns_ml::learn::previous_model_path(&learned)).unwrap(),
+        incumbent_bytes,
+        "completing an install that already happened must not overwrite the incumbent"
+    );
+    assert!(
+        (restarted.settings.load().block_threshold - 0.81).abs() < f32::EPSILON,
+        "the recorded threshold is restored"
+    );
+    assert_eq!(
+        restarted
+            .scanner
+            .calibration_map()
+            .map(|active| active.version),
+        Some(map.version.clone()),
+        "the recorded calibration is active"
+    );
+    assert_eq!(
+        restarted.scanner.signal_weights(),
+        weights,
+        "the recorded signal weights are active"
+    );
+    assert_eq!(
+        restarted.store.active_candidate().unwrap().unwrap().id,
+        promoted.id
+    );
+    assert!(
+        restarted
+            .store
+            .pending_scheduled_activation()
+            .unwrap()
+            .is_none(),
+        "startup clears the marker only after finishing the bookkeeping"
+    );
+    let watch = restarted.maintained_status()["watch"].clone();
+    let promoted_at = watch["promoted_at"]
+        .as_i64()
+        .expect("startup starts the watch on the installed model");
+    assert!(
+        promoted_at >= now,
+        "the watch starts at recovery, not before the install finished"
+    );
+    let concluded = learned_trial(&restarted);
+    assert!(!concluded.in_progress(), "the interrupted trial is over");
+    assert!(
+        concluded
+            .last_outcome
+            .as_deref()
+            .is_some_and(|outcome| outcome.starts_with("promoted:")),
+        "startup concludes the trial the activation came from: {concluded:?}"
+    );
+
+    // The recovered watch must still be able to undo the promotion: the model
+    // that was live before the candidate has to be what it restores.
+    restarted
+        .store
+        .record_threat_rate_at(1_000, 10, promoted_at - 3_600)
+        .unwrap();
+    restarted
+        .store
+        .record_threat_rate_at(1_000, 200, promoted_at)
+        .unwrap();
+    restarted.run_due_maintenance();
+    assert_eq!(
+        std::fs::read(&learned).unwrap(),
+        incumbent_bytes,
+        "the watch puts the incumbent back, not the candidate it replaced"
+    );
+    assert_eq!(restarted.live_model_path(), learned.to_string_lossy());
+    assert_eq!(
+        std::fs::read(daygle_dns_ml::learn::previous_model_path(&learned)).unwrap(),
+        candidate_bytes,
+        "the rolled-back model is kept for a further rotation"
+    );
+    assert!(restarted.maintained_status()["watch"].is_null());
+    assert!(
+        learned_trial(&restarted)
+            .last_outcome
+            .as_deref()
+            .is_some_and(|outcome| outcome.starts_with("rolled back")),
+        "the watch rollback is recorded"
+    );
+}
+
 /// A scheduled promotion records its validated threshold in the same
 /// candidate version a manual promotion uses, and a restart puts that number
 /// back instead of leaving the candidate's scores compared against the old
