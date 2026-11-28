@@ -326,7 +326,9 @@ see [AI.md](AI.md).
   only channel that can block on its own. It reports only threat labels
   (`AiSettings::threat_labels`: the built-in families minus
   `ai.auto_block_removals`, plus `ai.auto_block_categories`). Both run
-  `ai.model_path`; each has its own confidence floor
+  `ai.model_path`, except that `ai.model_path = "builtin-binary"` puts the
+  binary name model on the threat channel and leaves the content channel on
+  the built-in categorizer; each has its own confidence floor
   (`ai.category_confidence_floor` / `ai.confidence_floor`) and its own
   verdict TTL (`ai.category_ttl_secs` / `ai.threat_ttl_secs`).
   `channel::ChannelBackend` is what scopes a classifier to one job; a
@@ -410,8 +412,29 @@ see [AI.md](AI.md).
   `authority.rs` applies a per-source stage (`monitor`, `propose`, `enforce`)
   to what may reach the block snapshot, demoting a source automatically when
   its measured false-positive share passes `ai.authority.demote_fp_rate`. All
-  of it is off or in monitor mode by default; see
-  [AI_SCORING_AUDIT.md](AI_SCORING_AUDIT.md).
+  of it is off or in monitor mode by default;
+  [AI.md](AI.md#signals-calibration-and-versioned-scoring) describes what each
+  stage is worth and where it stops.
+- **Outside evidence.** A name-only classifier gets a second opinion from
+  what the server already knows. `intel.rs` downloads the threat feeds and
+  Tranco's popular-sites ranking into `ai.db`; `age.rs` looks up a flagged
+  domain's registration date over RDAP; and `evidence.rs` checks each verdict
+  against a feed listing, this network's usage history and popularity. A feed
+  listing corroborates a verdict even over a verifier dispute, a popular or
+  established domain disputes it, and a freshly registered one is noted.
+- **Page reading.** `page.rs` fetches a threat candidate's home page and
+  classifies its text with cue phrases (`page_model.rs` also learns a
+  fastText model from labelled pages kept in `ai.db`). `ai.page_rule` decides
+  whether a reading is recorded, can raise the verdict, or can also cap it.
+  With `ai.monitor_page_discovery` the scan also investigates unfamiliar names
+  and uncertain results; `ai.enforce_page_discovery` lets a high-confidence
+  finding block its exact host only. `llm.rs` can read the stored pages
+  through a local Ollama model, and can only strengthen a threat or name an
+  unsure category.
+- **Binary name model.** `ai.model_path = "builtin-binary"` makes `learn.rs`
+  train and maintain a hostname-only `binary-threat`/`benign` model beside
+  `ai.db`, scored independently of the enabled threat families and gated by
+  the same threshold, authority, exemptions and per-refresh cap.
 
 ## Console, roles and dashboard
 

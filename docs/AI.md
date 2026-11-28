@@ -405,8 +405,24 @@ each source's current authority, configured ceiling and review progress.
 The last scheduled training outcome survives restart. Passing model
 validation and earning production enforcement authority are separate steps.
 
-The audit and the exact migration, endpoint, test and limitation of each
-stage are in [AI_SCORING_AUDIT.md](AI_SCORING_AUDIT.md).
+### Limits of the scoring stages
+
+- Calibration with few positives gives coarse steps, and a map is accepted
+  against the map in force on point estimates of Brier score and ECE, without
+  confidence intervals; ECE is measured in ten fixed bins. An install with too
+  few labels cannot fit or accept one at all.
+- A calibrated score is stored on the verdict, so it is only as current as the
+  last re-score. Fusion-mode changes, map changes, model changes and candidate
+  promotion or rollback all re-score the stored verdicts.
+- Candidate model versions keep their artifacts; nothing prunes them.
+- Authority demotion reads your corrections for its false-positive signal, so
+  an install nobody corrects can neither demote nor promote a source from its
+  own outcomes. There is no separate proposals queue: `propose` means listed as
+  a verdict, not blocking. A feed listing is attributed from the verdict's
+  evidence note rather than a stored reference.
+- The console's Signals column reads an older six-signal view computed
+  separately from the structured observations, so the two can describe the
+  same input slightly differently.
 
 ## Outside evidence
 

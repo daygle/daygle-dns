@@ -444,7 +444,8 @@ DELETE /api/querylogs
 
 Every served DNS query is recorded into the SQLite database (when
 `logging.query_db_enabled`, on by default) with its client address, query
-name/type, transport (`udp`, `tcp`, `tls`, `https`, `quic`), outcome
+name/type, transport (`udp`, `tcp`, `tls`, `https`, `h3`, `quic`, or `other`
+for a transport the server has no label for), outcome
 (`authoritative`, `recursive`, `split_horizon`, `blocked`, `rate_limited`,
 `error`), response code and server-side handling time. The console's
 **Logs → Query Log** tab searches this history.
@@ -1694,7 +1695,10 @@ label only, `threat` reports detected threats and is the only channel that
 can block on its own. `threat` reports the effective threat labels: the
 built-in families (`malware`, `phishing`, `scam`) minus `ai.auto_block_removals`,
 plus every label in `ai.auto_block_categories`. Both channels run `ai.model_path`; each has its own
-confidence floor and verdict TTL. Blocking a *content* category is an
+confidence floor and verdict TTL. With `ai.model_path = "builtin-binary"`
+the threat channel runs the trained binary name model and the content
+channel keeps the built-in categorizer (see
+[AI.md](AI.md#binary-name-model)). Blocking a *content* category is an
 operator rule on a client group (`blocked_categories`, see Advanced
 blocking) - the label comes from the scanner, the decision does not.
 
@@ -1709,7 +1713,12 @@ blocked in enforce mode, what would be blocked in train mode), `threat_counts`
 (stored threat verdicts by label: what saving a label list that drops the
 label deletes), the current block-snapshot size, `auto_block_categories` (the
 operator's list), `auto_block_removals` (the built-in families forced off) and
-`threat_labels` (the resulting effective set).
+`threat_labels` (the resulting effective set), `fusion` (the fusion mode),
+`calibration_version` and `calibrated` (whether a map is in force), `authority`
+(whether it is enabled, with the configured stages and per-refresh cap), `autonomy`,
+and `autonomy_readiness` (`state`, `last_attempt`, `enforcement_holds` and the
+per-source `authority` decisions with the reviews each source still needs
+before it advances: why training is waiting, validating or paused).
 
 A domain qualifies for auto-blocking when its *threat-channel* verdict is at
 or above `ai.block_threshold`, neither it nor a parent domain is exempt, and
@@ -1741,7 +1750,11 @@ site cannot land on both sides.
 threat verdict - source, direction, value, explanation, timestamp and
 hostname/registrable-domain scope for the model, verifier, feed, popularity,
 usage history, domain age, name shape, page and language model - plus the
-fused view and the calibrated score. `GET /api/ai/calibration` reports the map
+fused view, the calibrated score and `gate_score` (the number the block gate
+compares). It also reports the page-discovery reading (`page_discovery` and
+`page_discovery_fusion`, `null` when discovery is off) and
+`page_discovery_active`, whether that finding is published as an exact-host
+block. `GET /api/ai/calibration` reports the map
 in force and every recorded map with its held-out Brier/ECE; `POST
 /api/ai/calibration/fit` fits and evaluates one without activating it, `POST
 /api/ai/calibration/apply` puts it in force (409 when it is worse than the map
@@ -1755,8 +1768,7 @@ record. Its `reviewed_sources` field counts explicit reviews for current feed an
 model findings. A matching operator label confirms a finding and a
 `not_threat` review corrects it. An allow exemption alone leaves a finding
 unreviewed. Reviews predating the verdict are excluded. These counts are
-diagnostic and do not set authority. Details in
-[AI_SCORING_AUDIT.md](AI_SCORING_AUDIT.md).
+diagnostic and do not set authority.
 
 Nothing is applied. `POST /api/ai/threshold/apply` with `{"id": n}` puts that
 trial's candidate in force and publishes it as `ai.block_threshold`, recording
@@ -1840,9 +1852,12 @@ mode); a threat label counts as such a category only at or above
 `ai.block_threshold`. `not_threat` marks rows the operator corrected: they
 stay in the list for audit but never block (see the override action below).
 
-`GET /api/ai/threats/export` downloads the *active* threat list - exactly the
-rows the block snapshot is built from (fresh, undisputed, at or above the
-threshold, not exempt and not corrected). `format=list` is one domain per
+`GET /api/ai/threats/export` downloads the stored *active* threat list: fresh,
+undisputed, at or above the threshold, not exempt and not corrected. The block
+snapshot applies more policy on top - the effective threat labels, the
+authority stage when `ai.authority` is on, and exact-host page findings - so
+the two lists can differ: an entry here is not always a block, and a page
+finding can block without appearing here. `format=list` is one domain per
 line, ready to use as a blocklist source elsewhere; `format=csv` (the default)
 adds label, confidence and `expires_at`. The list is a snapshot of current
 detections: entries age out with the threat TTL and reappear only after a new
@@ -1854,7 +1869,9 @@ the names of the filtering groups that block it, and a `reasons` list in plain
 language covering the threshold, the label gate, a disputed verification, an
 expired or missing verdict, and exemptions. It carries the same `decision`
 (`block`/`override`/`monitor`/`allow`) as the list, and the threat verdict's
-`label_role` and `classification`.
+`label_role` and `classification`. It also carries the fused assessment
+(`fusion`), `calibrated_score`, `gate_score` and `over_threshold` (whether the
+gate score reaches `ai.block_threshold`).
 
 Model files are managed over the API too: `GET /api/ai/model-status` reports
 the models directory, each installed model file (presence, size, sha256) and
@@ -2555,6 +2572,7 @@ needs attention:
 | `update_available` | `true` | A newer release is available (`update_available`), once per release. |
 | `update_failure` | `true` | A scheduled stable-release update failed; includes rollback and service health-check results (`update_failure`). |
 | `ai_blocks` | `false` | The AI scanner in Enforce mode started blocking new domains (`ai_blocks`). |
+| `ai_model` | `true` | The AI rejected a retrained model, rolled back a model that went live, or a threat feed or popular-sites list has not updated for 2 days (`ai_model`). |
 
 A failure that persists is reported again after 6 hours at the soonest (24
 hours for certificates); once it clears, the next failure is reported right
