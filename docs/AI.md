@@ -89,12 +89,12 @@ The tab keeps the three outputs of a detection apart:
 - **Decision** - `block`, `override` (your exemption, your *not a threat*
   mark or a removal wins), `monitor` (reported, not blocked) or `allow`.
 
-A domain the model *classified* as `news` can still be a reported threat: if
-its score for a threat label reaches `ai.block_threshold`, the row appears in
-the threats list with that threat label as its category, that score as its
-confidence, and the model's classification shown beside it. Below the
-threshold the classification is left alone. Either way the row's *Why* line
-says what the model read, what it scored and what evidence confirmed or
+A domain classified as `news` can still have a threat assessment. In Signal
+Fusion Decide mode, an alternate threat reading at the scanner confidence
+floor reaches the verifier and evidence assessment. Off and Monitor still
+require the alternate reading to reach `ai.block_threshold` before reporting
+it as a threat. The content classification stays on its own channel. The
+threat row shows the assessed family and explains what evidence confirmed or
 disputed it.
 
 Enforcement is unchanged: `ai.block_threshold`, the verifier, disputes,
