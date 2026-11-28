@@ -14,8 +14,8 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use daygle_dns_core::error::Result;
-use rusqlite::{params, Connection, OptionalExtension};
+use daygle_dns_core::{config::FusionMode, error::Result};
+use rusqlite::{named_params, params, Connection, OptionalExtension};
 
 use super::{now_epoch, AiStore};
 
@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS ai_page_discovery (
     confidence REAL,
     evidence TEXT NOT NULL,
     inspected_at INTEGER NOT NULL,
-    retry_at INTEGER NOT NULL
+    retry_at INTEGER NOT NULL,
+    scoring_version TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_ai_page_discovery_retry ON ai_page_discovery (retry_at);
 CREATE TABLE IF NOT EXISTS ai_age_attempts (
@@ -170,6 +171,19 @@ pub(super) fn upgrade(conn: &Connection) -> rusqlite::Result<()> {
             [],
         )?;
     }
+    // A page finding made by an older scoring version is not evidence for the
+    // version now in force: the review joins on this column.
+    let has_scoring: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('ai_page_discovery') WHERE name = 'scoring_version')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_scoring {
+        conn.execute(
+            "ALTER TABLE ai_page_discovery ADD COLUMN scoring_version TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -204,21 +218,26 @@ impl AiStore {
         now: i64,
         floor: f32,
         limit: usize,
+        fusion: FusionMode,
     ) -> Result<Vec<String>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT v.domain FROM ai_verdicts v
-             WHERE v.channel = 'threat' AND v.expires_at > ?1
+             WHERE v.channel = 'threat' AND v.expires_at > :now
                AND v.severity != 'disputed'
-               AND (v.status = 'skipped' OR (v.status = 'classified' AND v.confidence < ?2))
+               AND (v.status = 'skipped' OR (v.status = 'classified'
+                    AND (v.confidence < :floor OR ({gate}) < :floor)))
                AND NOT EXISTS (SELECT 1 FROM ai_page_discovery p
-                               WHERE p.domain = v.domain AND p.retry_at > ?1)
+                               WHERE p.domain = v.domain AND p.retry_at > :now)
                AND NOT EXISTS (SELECT 1 FROM ai_overrides o WHERE o.domain = v.domain)
                AND NOT EXISTS (SELECT 1 FROM ai_category_overrides o WHERE o.domain = v.domain)
-             ORDER BY v.classified_at, v.domain LIMIT ?3",
-        )?;
+             ORDER BY v.classified_at, v.domain LIMIT :limit",
+            gate = super::threshold::GATE_SCORE,
+        ))?;
         let rows = stmt
-            .query_map(params![now, floor, limit as i64], |r| r.get(0))?
+            .query_map(named_params! {
+                ":now": now, ":floor": floor, ":limit": limit as i64, ":fusion": fusion.as_str(),
+            }, |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         Ok(rows)
     }
@@ -228,6 +247,7 @@ impl AiStore {
         domain: &str,
         reading: &crate::page::DiscoveryReading,
         now: i64,
+        scoring_version: &str,
     ) -> Result<()> {
         let retry_at = now
             + if reading.final_host.is_some() {
@@ -237,12 +257,12 @@ impl AiStore {
             };
         self.lock()?.execute(
             "INSERT INTO ai_page_discovery
-                 (domain, final_host, category, confidence, evidence, inspected_at, retry_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 (domain, final_host, category, confidence, evidence, inspected_at, retry_at, scoring_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(domain) DO UPDATE SET final_host = excluded.final_host,
                  category = excluded.category, confidence = excluded.confidence,
                  evidence = excluded.evidence, inspected_at = excluded.inspected_at,
-                 retry_at = excluded.retry_at",
+                 retry_at = excluded.retry_at, scoring_version = excluded.scoring_version",
             params![
                 domain,
                 reading.final_host,
@@ -250,7 +270,8 @@ impl AiStore {
                 reading.confidence,
                 reading.evidence,
                 now,
-                retry_at
+                retry_at,
+                scoring_version
             ],
         )?;
         Ok(())
@@ -283,19 +304,106 @@ impl AiStore {
         Ok(rows)
     }
 
-    pub(crate) fn page_discovery_reviews(&self, now: i64) -> Result<(i64, i64, i64)> {
-        let counts = self.lock()?.query_row(
-            "SELECT count(*),
-                    count(CASE WHEN o.action IN ('allow', 'not_threat') THEN 1 END),
-                    count(CASE WHEN o.action IS NULL AND c.category = p.category THEN 1 END)
+    /// Counts for [`Self::page_discovery_review_rows`]: every current finding,
+    /// and how many were explicitly corrected or confirmed. Deriving the
+    /// counts from the same rows the status reports keeps the two from
+    /// disagreeing, and counts each finding once even when it has several
+    /// overrides. A policy `allow` exemption is neither.
+    pub(crate) fn page_discovery_reviews(
+        &self,
+        now: i64,
+        scoring_version: Option<&str>,
+    ) -> Result<(i64, i64, i64)> {
+        let rows = self.page_discovery_review_rows(now, scoring_version)?;
+        let mut findings = 0;
+        let mut corrected = 0;
+        let mut confirmed = 0;
+        for row in &rows {
+            findings += 1;
+            match row.get("review").and_then(serde_json::Value::as_str) {
+                Some("corrected") => corrected += 1,
+                Some("confirmed") => confirmed += 1,
+                _ => {}
+            }
+        }
+        Ok((findings, corrected, confirmed))
+    }
+
+    /// Every current page finding under `scoring_version` with the explicit
+    /// review that attaches to it: the domain, evidence source (`page`),
+    /// scoring version, and review time. A policy `allow` exemption is not a
+    /// review outcome: it is listed as `exempted`, never as a confirmation.
+    /// One row per finding, whatever the number of overrides.
+    pub(crate) fn page_discovery_review_rows(
+        &self,
+        now: i64,
+        scoring_version: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT p.domain, p.category, p.confidence, p.inspected_at,
+                    p.scoring_version,
+                    CASE WHEN EXISTS (SELECT 1 FROM ai_overrides a
+                                      WHERE a.domain = p.domain AND a.action = 'allow'
+                                        AND a.created_at >= p.inspected_at) THEN 'exempted'
+                         WHEN EXISTS (SELECT 1 FROM ai_overrides o
+                                      WHERE o.domain = p.domain AND o.action = 'not_threat'
+                                        AND o.created_at >= p.inspected_at) THEN 'corrected'
+                         WHEN EXISTS (SELECT 1 FROM ai_category_overrides c
+                                      WHERE c.domain = p.domain AND c.category = p.category
+                                        AND c.created_at >= p.inspected_at) THEN 'confirmed'
+                         ELSE 'unreviewed' END AS review,
+                    COALESCE((SELECT MAX(o.created_at) FROM ai_overrides o
+                              WHERE o.domain = p.domain
+                                AND o.action IN ('allow', 'not_threat')
+                                AND o.created_at >= p.inspected_at),
+                             (SELECT MAX(c.created_at) FROM ai_category_overrides c
+                              WHERE c.domain = p.domain AND c.category = p.category
+                                AND c.created_at >= p.inspected_at), 0) AS reviewed_at
              FROM ai_page_discovery p
-             LEFT JOIN ai_overrides o ON o.domain = p.domain AND o.created_at >= p.inspected_at
-             LEFT JOIN ai_category_overrides c ON c.domain = p.domain AND c.created_at >= p.inspected_at
-             WHERE p.category IS NOT NULL AND p.retry_at > ?1",
-            params![now],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+             WHERE p.category IS NOT NULL AND p.retry_at > ?1
+               AND (?2 IS NULL OR p.scoring_version = ?2)
+             ORDER BY p.inspected_at DESC, p.domain",
         )?;
-        Ok(counts)
+        let rows = stmt
+            .query_map(params![now, scoring_version], |r| {
+                Ok(serde_json::json!({
+                    "domain": r.get::<_, String>(0)?,
+                    "source": "page",
+                    "category": r.get::<_, Option<String>>(1)?,
+                    "confidence": r.get::<_, Option<f64>>(2)?,
+                    "finding_at": r.get::<_, i64>(3)?,
+                    "scoring_version": r.get::<_, String>(4)?,
+                    "review": r.get::<_, String>(5)?,
+                    "reviewed_at": r.get::<_, i64>(6)?,
+                }))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Page findings an operator explicitly confirmed: the category override
+    /// matches the finding and no allow/not_threat override covers it. These
+    /// are the only page discoveries a retrain or a holdout may use as labels;
+    /// an unreviewed finding and a policy exemption supply nothing.
+    pub(crate) fn reviewed_page_discovery_labels(
+        &self,
+        now: i64,
+    ) -> Result<std::collections::HashMap<String, String>> {
+        let mut labels = std::collections::HashMap::new();
+        for row in self.page_discovery_review_rows(now, None)? {
+            if row.get("review").and_then(serde_json::Value::as_str) != Some("confirmed") {
+                continue;
+            }
+            let (Some(domain), Some(category)) = (
+                row.get("domain").and_then(serde_json::Value::as_str),
+                row.get("category").and_then(serde_json::Value::as_str),
+            ) else {
+                continue;
+            };
+            labels.insert(domain.to_string(), category.to_string());
+        }
+        Ok(labels)
     }
 
     pub(crate) fn page_discovery(
@@ -306,7 +414,8 @@ impl AiStore {
         let result = self
             .lock()?
             .query_row(
-                "SELECT final_host, category, confidence, evidence, inspected_at, retry_at
+                "SELECT final_host, category, confidence, evidence, inspected_at, retry_at,
+                        scoring_version
              FROM ai_page_discovery WHERE domain = ?1 AND retry_at > ?2",
                 params![domain, now],
                 |r| {
@@ -319,6 +428,7 @@ impl AiStore {
                         },
                         inspected_at: r.get(4)?,
                         retry_at: r.get(5)?,
+                        scoring_version: r.get(6)?,
                     })
                 },
             )
@@ -758,6 +868,81 @@ mod tests {
     }
 
     #[test]
+    fn discovery_considers_the_live_assessment_and_keeps_reviews_explicit() {
+        let (_dir, store) = store();
+        let domain = "uncertain.example";
+        store.observe(domain).unwrap();
+        store
+            .save_verdict(
+                crate::backend::Channel::Threat,
+                domain,
+                "phishing",
+                "threat",
+                "classified",
+                0.9,
+                "fasttext",
+                "model",
+                3600,
+            )
+            .unwrap();
+        store.lock().unwrap().execute(
+            "UPDATE ai_verdicts SET assessment_mode = 'decide', assessment_score = 0.25 WHERE domain = ?1",
+            [domain],
+        ).unwrap();
+        let now = now_epoch();
+        assert_eq!(
+            store
+                .page_discovery_candidates(now, 0.5, 4, FusionMode::Decide)
+                .unwrap(),
+            [domain]
+        );
+        assert!(store
+            .page_discovery_candidates(now, 0.5, 4, FusionMode::Monitor)
+            .unwrap()
+            .is_empty());
+
+        store
+            .save_page_discovery(
+                domain,
+                &crate::page::DiscoveryReading {
+                    final_host: Some(domain.to_string()),
+                    category: Some("phishing".to_string()),
+                    confidence: Some(0.9),
+                    evidence: "two page cues".to_string(),
+                },
+                now,
+                "test-version",
+            )
+            .unwrap();
+        store
+            .set_override(domain, "allow", "policy exemption")
+            .unwrap();
+        assert_eq!(
+            store
+                .page_discovery_reviews(now, Some("test-version"))
+                .unwrap(),
+            (1, 0, 0),
+            "an allow exemption earns no review credit"
+        );
+        store
+            .set_override(domain, "not_threat", "reviewed")
+            .unwrap();
+        assert_eq!(
+            store
+                .page_discovery_reviews(now, Some("test-version"))
+                .unwrap(),
+            (1, 1, 0)
+        );
+        assert!(
+            store
+                .page_discovery_reviews(now, Some("another-version"))
+                .unwrap()
+                == (0, 0, 0),
+            "a review only counts under the scoring version that made the finding"
+        );
+    }
+
+    #[test]
     fn discovery_cache_delays_retry_and_leaves_the_threat_verdict_unchanged() {
         let (_dir, store) = store();
         let domain = "ordinary.example";
@@ -777,7 +962,9 @@ mod tests {
             .unwrap();
         let now = now_epoch();
         assert_eq!(
-            store.page_discovery_candidates(now, 0.5, 4).unwrap(),
+            store
+                .page_discovery_candidates(now, 0.5, 4, FusionMode::Monitor)
+                .unwrap(),
             [domain]
         );
         let unknown = crate::page::DiscoveryReading {
@@ -786,9 +973,11 @@ mod tests {
             confidence: None,
             evidence: "unavailable".to_owned(),
         };
-        store.save_page_discovery(domain, &unknown, now).unwrap();
+        store
+            .save_page_discovery(domain, &unknown, now, "test-version")
+            .unwrap();
         assert!(store
-            .page_discovery_candidates(now, 0.5, 4)
+            .page_discovery_candidates(now, 0.5, 4, FusionMode::Monitor)
             .unwrap()
             .is_empty());
         let report = store.page_discovery(domain, now).unwrap().unwrap();
@@ -796,7 +985,7 @@ mod tests {
         assert_eq!(report.retry_at, now + 3_600);
         assert_eq!(
             store
-                .page_discovery_candidates(report.retry_at, 0.5, 4)
+                .page_discovery_candidates(report.retry_at, 0.5, 4, FusionMode::Monitor)
                 .unwrap(),
             [domain]
         );
@@ -806,7 +995,9 @@ mod tests {
             confidence: Some(0.9),
             evidence: "two page cues".to_owned(),
         };
-        store.save_page_discovery(domain, &finding, now).unwrap();
+        store
+            .save_page_discovery(domain, &finding, now, "test-version")
+            .unwrap();
         assert_eq!(
             store.page_discovery(domain, now).unwrap().unwrap().retry_at,
             now + 86_400

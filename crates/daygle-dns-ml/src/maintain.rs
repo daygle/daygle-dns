@@ -29,6 +29,7 @@ use arc_swap::ArcSwap;
 use daygle_dns_core::config::AiSettings;
 use daygle_dns_core::error::{DaygleError, Result};
 use daygle_dns_core::{LogLevel, LogStore};
+use serde::{Deserialize, Serialize};
 
 use crate::backend::{ClassificationInput, DomainClassifier};
 use crate::evidence::NetworkEvidence;
@@ -41,6 +42,85 @@ use crate::learn::{
 };
 use crate::store::AiStore;
 
+const ROTATION_KEY: &str = "manifest";
+
+#[derive(Deserialize, Serialize)]
+struct SavedFile {
+    digest: String,
+    modified: Option<std::time::SystemTime>,
+}
+
+fn rotation_files(learned: &Path) -> [PathBuf; 4] {
+    [
+        learned.to_path_buf(),
+        previous_model_path(learned),
+        stats_path(learned),
+        previous_stats_path(learned),
+    ]
+}
+
+fn begin_rotation(store: &AiStore, learned: &Path) -> Result<()> {
+    let mut saved = Vec::new();
+    let mut files = Vec::new();
+    for path in rotation_files(learned) {
+        let entry = match std::fs::read(&path) {
+            Ok(bytes) => {
+                use sha2::{Digest, Sha256};
+                let digest = crate::candidate::hex(&Sha256::digest(&bytes));
+                files.push((digest.clone(), bytes));
+                Some(SavedFile {
+                    digest,
+                    modified: std::fs::metadata(&path)?.modified().ok(),
+                })
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        saved.push(entry);
+    }
+    let journal = serde_json::to_vec(&saved).map_err(|error| {
+        DaygleError::Internal(format!("could not record model rotation: {error}"))
+    })?;
+    store.record_model_rotation(&journal, &files)
+}
+
+/// A rotation with a durable marker was interrupted. Restore its original
+/// files before choosing a model. Keep the marker if any recovery step fails.
+pub(crate) fn recover_rotation(store: &AiStore, learned: &Path) -> Result<bool> {
+    let Some(journal) = store.model_rotation_backup(ROTATION_KEY)? else {
+        return Ok(false);
+    };
+    let saved: [Option<SavedFile>; 4] = serde_json::from_slice(&journal).map_err(|error| {
+        DaygleError::Database(format!("invalid model rotation journal: {error}"))
+    })?;
+    for (path, entry) in rotation_files(learned).into_iter().zip(saved) {
+        if let Some(entry) = entry {
+            let bytes = store.model_rotation_backup(&entry.digest)?.ok_or_else(|| {
+                DaygleError::Database(format!("model rotation backup {} is missing", entry.digest))
+            })?;
+            if !crate::candidate::artifact_matches(&bytes, &entry.digest) {
+                return Err(DaygleError::Database(format!(
+                    "model rotation backup {} failed its digest check",
+                    entry.digest
+                )));
+            }
+            crate::candidate::write_artifact(&path, &bytes)?;
+            if let Some(modified) = entry.modified {
+                std::fs::File::options()
+                    .write(true)
+                    .open(&path)?
+                    .set_modified(modified)?;
+            }
+        } else if let Err(error) = std::fs::remove_file(&path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(error.into());
+            }
+        }
+    }
+    store.finish_model_rotation()?;
+    Ok(true)
+}
+
 /// Loads an accepted model file into the running channels. Set by the engine,
 /// so every way a model goes live - a promotion, a manual retrain or a
 /// rollback - goes live the same way.
@@ -50,6 +130,56 @@ pub type Installer = Box<dyn Fn(&Path) -> Result<()> + Send + Sync>;
 /// use: the engine retires a calibration map fitted for the model it replaced.
 /// Never fails the install - the new model is already serving.
 pub type InstalledHook = Box<dyn Fn(&Path) + Send + Sync>;
+pub(crate) type ShadowScoring =
+    Box<dyn Fn(&Path, &AiSettings, i64, i64) -> Result<serde_json::Value> + Send + Sync>;
+
+/// What a passed replay says to put in force with the model: the calibration
+/// map fitted on the tuning half and the threshold it validated. The engine
+/// applies all of it through the candidate ledger, so a scheduled promotion is
+/// the same recoverable record a manual promotion uses.
+#[derive(Debug, Clone)]
+pub struct TrialActivation {
+    pub calibration: Option<crate::calibration::CalibrationMap>,
+    pub threshold: f32,
+    pub signal_weights: crate::fusion::SignalWeights,
+    pub report: serde_json::Value,
+}
+
+/// Puts the validated scoring in force before the model is installed, and
+/// hands back the step that takes it back out if the install then fails. The
+/// activation is called with the candidate artifact and the path it will live
+/// at, so the record it writes refers to the model that is about to be loaded
+/// rather than a file that is about to be rotated away.
+pub type Activation =
+    Box<dyn Fn(&Path, &Path, &TrialActivation) -> Result<ActivationUndo> + Send + Sync>;
+
+/// Takes a passed trial's scoring back out of force after the model it was
+/// recorded for could not be installed. Returns what could not be restored, so
+/// the caller can report a half-undone activation instead of dropping it.
+pub struct ActivationUndo {
+    undo: Box<dyn FnOnce() -> Vec<String> + Send + Sync>,
+    complete: Box<dyn FnOnce() -> Result<()> + Send + Sync>,
+}
+
+impl ActivationUndo {
+    pub fn new(
+        undo: impl FnOnce() -> Vec<String> + Send + Sync + 'static,
+        complete: impl FnOnce() -> Result<()> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            undo: Box::new(undo),
+            complete: Box::new(complete),
+        }
+    }
+
+    pub fn undo(self) -> Vec<String> {
+        (self.undo)()
+    }
+
+    pub fn complete(self) -> Result<()> {
+        (self.complete)()
+    }
+}
 
 /// A maintenance step with nothing to report (the verifier refresh).
 pub type Step = Box<dyn Fn() + Send + Sync>;
@@ -59,15 +189,27 @@ pub type Step = Box<dyn Fn() + Send + Sync>;
 pub struct Maintenance {
     retrainer: Arc<Retrainer>,
     after: Step,
+    scoring_change: tokio::sync::Mutex<()>,
 }
 
 impl Maintenance {
     pub fn new(retrainer: Arc<Retrainer>, after: Step) -> Self {
-        Self { retrainer, after }
+        Self {
+            retrainer,
+            after,
+            scoring_change: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    pub(crate) async fn lock_scoring_change(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.scoring_change.lock().await
     }
 
     /// Run every due step. Returns the build, if one ran.
     pub fn run(&self) -> Option<Result<TrainingStats>> {
+        // Leave due work queued while the API is publishing or restoring a
+        // scoring change. DNS queries do not acquire this lock.
+        let _scoring_change = self.scoring_change.try_lock().ok()?;
         let built = self.retrainer.maybe_retrain();
         (self.after)();
         built
@@ -138,6 +280,10 @@ pub struct Trial {
     pub last_outcome: Option<String>,
     /// Newest first, at most [`TRIAL_HISTORY`].
     pub history: Vec<TrialEntry>,
+    /// The held-out replay's report for the last concluded trial, as JSON
+    /// text, kept even when the candidate was rejected: it is the diagnostic
+    /// result the operator can read.
+    pub shadow_scoring: Option<String>,
 }
 
 impl Trial {
@@ -153,6 +299,11 @@ impl Trial {
                 .get("last_outcome")
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
+            shadow_scoring: value.get("shadow_scoring").map(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| v.to_string())
+            }),
             history: value
                 .get("history")
                 .and_then(|v| v.as_array())
@@ -178,6 +329,10 @@ impl Trial {
             "ends_at": self.ends_at,
             "retry_after": self.retry_after,
             "last_outcome": self.last_outcome,
+            "shadow_scoring": self
+                .shadow_scoring
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()),
             "history": self
                 .history
                 .iter()
@@ -208,7 +363,14 @@ impl Trial {
             retry_after,
             last_outcome: Some(outcome),
             history,
+            shadow_scoring: None,
         }
+    }
+
+    /// Attach the replay report to the record the status API reports.
+    fn with_scoring(mut self, scoring: Option<&serde_json::Value>) -> Self {
+        self.shadow_scoring = scoring.map(|value| value.to_string());
+        self
     }
 }
 
@@ -293,6 +455,8 @@ pub struct Retrainer {
     running: Mutex<()>,
     installer: OnceLock<Installer>,
     installed: OnceLock<InstalledHook>,
+    shadow_scoring: OnceLock<ShadowScoring>,
+    activation: OnceLock<Activation>,
     /// Threat feeds and this network's usage: confirmation, probes and trial
     /// truths that do not depend on the operator.
     evidence: OnceLock<Arc<NetworkEvidence>>,
@@ -316,6 +480,8 @@ impl Retrainer {
             running: Mutex::new(()),
             installer: OnceLock::new(),
             installed: OnceLock::new(),
+            shadow_scoring: OnceLock::new(),
+            activation: OnceLock::new(),
             evidence: OnceLock::new(),
         }
     }
@@ -337,6 +503,16 @@ impl Retrainer {
     /// Hand the retrainer a step that runs once a model it installed is live.
     pub fn set_installed(&self, installed: InstalledHook) {
         let _ = self.installed.set(installed);
+    }
+
+    pub(crate) fn set_shadow_scoring(&self, scoring: ShadowScoring) {
+        let _ = self.shadow_scoring.set(scoring);
+    }
+
+    /// Hand the retrainer the step that puts a passed replay's calibration and
+    /// threshold in force with the model, as one recorded version.
+    pub fn set_activation(&self, activation: Activation) {
+        let _ = self.activation.set(activation);
     }
 
     /// The model file this retrainer maintains.
@@ -558,14 +734,39 @@ impl Retrainer {
 
     // ── Going live ──────────────────────────────────────────────────────
 
+    fn with_rotation(&self, change: impl FnOnce() -> Result<()>) -> Result<()> {
+        if self.store.model_rotation_backup(ROTATION_KEY)?.is_some() {
+            return Err(DaygleError::Database(
+                "a model rotation still needs recovery; restart before changing classifiers"
+                    .to_string(),
+            ));
+        }
+        begin_rotation(&self.store, &self.learned)?;
+        match change() {
+            Ok(()) => self.store.finish_model_rotation(),
+            Err(cause) => {
+                if let Err(recovery) = recover_rotation(&self.store, &self.learned) {
+                    return Err(DaygleError::Internal(format!(
+                        "model rotation failed: {cause}; recovery also failed: {recovery}"
+                    )));
+                }
+                Err(cause)
+            }
+        }
+    }
+
     fn install(&self) -> Result<()> {
+        self.install_path(&self.learned)
+    }
+
+    fn install_path(&self, path: &Path) -> Result<()> {
         if let Some(install) = self.installer.get() {
-            install(&self.learned)?;
+            install(path)?;
         }
         // The model is live now: whatever the engine keys to the identity of
         // the model it replaced is stale (see [`Self::set_installed`]).
         if let Some(installed) = self.installed.get() {
-            installed(&self.learned);
+            installed(path);
         }
         Ok(())
     }
@@ -574,23 +775,19 @@ impl Retrainer {
     /// replaces becomes the previous one, and every failure puts the files
     /// back the way they were.
     fn promote(&self, file: &Path, record: &serde_json::Value) -> Result<()> {
+        self.with_rotation(|| self.promote_files(file, record))
+    }
+
+    fn promote_files(&self, file: &Path, record: &serde_json::Value) -> Result<()> {
         let previous = previous_model_path(&self.learned);
-        let had_learned = self.learned.is_file();
-        if had_learned {
+        if self.learned.is_file() {
             std::fs::rename(&self.learned, &previous)?;
             swap_stats(&self.learned, StatsMove::CurrentToPrevious);
         }
-        if let Err(e) = std::fs::rename(file, &self.learned) {
-            self.restore_after_failed_rotation(had_learned);
-            return Err(DaygleError::Io(e));
-        }
-        if let Err(e) = self.install() {
-            let _ = std::fs::remove_file(&self.learned);
-            self.restore_after_failed_rotation(had_learned);
-            return Err(DaygleError::Config(format!(
-                "the new model could not be loaded, so the current model was kept: {e}"
-            )));
-        }
+        std::fs::rename(file, &self.learned)?;
+        self.install().map_err(|error| {
+            DaygleError::Config(format!("the new model could not be loaded: {error}"))
+        })?;
         match serde_json::to_vec_pretty(record) {
             Ok(bytes) => {
                 if let Err(e) = std::fs::write(stats_path(&self.learned), bytes) {
@@ -606,14 +803,6 @@ impl Retrainer {
             ),
         }
         Ok(())
-    }
-
-    fn restore_after_failed_rotation(&self, had_learned: bool) {
-        let previous = previous_model_path(&self.learned);
-        if had_learned && previous.is_file() {
-            let _ = std::fs::rename(&previous, &self.learned);
-            swap_stats(&self.learned, StatsMove::PreviousToCurrent);
-        }
     }
 
     /// Retrain now and put the result live at once: the operator's explicit
@@ -667,18 +856,12 @@ impl Retrainer {
                 "there is no previous model to restore".to_string(),
             ));
         }
-        self.swap_with_previous()?;
-        if let Err(e) = self.install() {
-            if let Err(undo) = self.swap_with_previous() {
-                self.log(
-                    LogLevel::Warn,
-                    format!("could not undo a failed model restore: {undo}"),
-                );
-            }
-            return Err(DaygleError::Config(format!(
-                "the previous model could not be loaded, so the current model was kept: {e}"
-            )));
-        }
+        self.with_rotation(|| {
+            self.swap_with_previous()?;
+            self.install().map_err(|error| {
+                DaygleError::Config(format!("the previous model could not be loaded: {error}"))
+            })
+        })?;
         // A candidate was judged against the model just replaced; it is
         // no longer a fair comparison.
         if self.discard_candidate() {
@@ -699,16 +882,8 @@ impl Retrainer {
         let previous = previous_model_path(&self.learned);
         let staged = self.learned.with_extension("rolled-back.bin");
         std::fs::rename(&self.learned, &staged)?;
-        if let Err(e) = std::fs::rename(&previous, &self.learned) {
-            let _ = std::fs::rename(&staged, &self.learned);
-            return Err(DaygleError::Io(e));
-        }
-        if let Err(e) = std::fs::rename(&staged, &previous) {
-            self.log(
-                LogLevel::Warn,
-                format!("the replaced model was left at {}: {e}", staged.display()),
-            );
-        }
+        std::fs::rename(&previous, &self.learned)?;
+        std::fs::rename(&staged, &previous)?;
         swap_stats(&self.learned, StatsMove::Exchange);
         Ok(())
     }
@@ -722,6 +897,63 @@ impl Retrainer {
             .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
             .map(|value| Trial::from_json(&value))
             .unwrap_or_default()
+    }
+
+    /// Finish durable trial/watch bookkeeping after startup recovered a
+    /// scheduled activation. Idempotent so a second interruption retries it.
+    pub(crate) fn complete_recovered_activation(
+        &self,
+        candidate: &crate::store::CandidateVersion,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        let watch_path = self.watch_path();
+        let existing_watch = std::fs::read(&watch_path)
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok());
+        let same_watch = existing_watch
+            .as_ref()
+            .and_then(|watch| watch.get("candidate_id"))
+            .and_then(serde_json::Value::as_i64)
+            == Some(candidate.id);
+        let watch = if same_watch {
+            existing_watch.unwrap_or_default()
+        } else {
+            serde_json::json!({
+                "candidate_id": candidate.id,
+                "promoted_at": now,
+                "until": now + WATCH_SECS,
+            })
+        };
+        let watch_bytes = serde_json::to_vec_pretty(&watch).map_err(|error| {
+            DaygleError::Internal(format!("could not encode model watch: {error}"))
+        })?;
+        std::fs::write(&watch_path, watch_bytes)?;
+
+        let trial = self.trial();
+        let concluded_scoring = trial
+            .shadow_scoring
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+        let already_concluded = trial
+            .last_outcome
+            .as_deref()
+            .is_some_and(|outcome| outcome.starts_with("promoted:"))
+            && concluded_scoring.as_ref() == Some(&candidate.validation_report);
+        if !already_concluded {
+            let reason = candidate
+                .validation_report
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("validated scheduled replay");
+            let concluded = trial
+                .concluded(format!("promoted: {reason}; completed after restart"), None)
+                .with_scoring(Some(&candidate.validation_report));
+            let trial_bytes = serde_json::to_vec_pretty(&concluded.to_json()).map_err(|error| {
+                DaygleError::Internal(format!("could not encode completed model trial: {error}"))
+            })?;
+            std::fs::write(trial_path(&self.learned), trial_bytes)?;
+        }
+        self.store.finish_scheduled_activation(candidate.id)
     }
 
     fn write_trial(&self, trial: &Trial) {
@@ -843,6 +1075,7 @@ impl Retrainer {
             retry_after: None,
             last_outcome: trial.last_outcome.clone(),
             history: trial.history.clone(),
+            shadow_scoring: trial.shadow_scoring.clone(),
         });
         self.log(
             LogLevel::Info,
@@ -899,40 +1132,166 @@ impl Retrainer {
         let now = chrono::Utc::now().timestamp();
         match verdict {
             Ok(why) => {
-                let record = std::fs::read(candidate.with_extension("json"))
+                let mut record = std::fs::read(candidate.with_extension("json"))
                     .ok()
                     .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
                     .unwrap_or_else(|| serde_json::json!({}));
+                // The held-out replay decides, not the trial's automatic
+                // signals alone. Without a replay there is no held-out
+                // evidence, and the incumbent stays in force.
+                let scoring = self
+                    .shadow_scoring
+                    .get()
+                    .map(|replay| {
+                        replay(&candidate, settings, started, ends).unwrap_or_else(|error| {
+                            serde_json::json!({ "passed": false, "reason": error.to_string() })
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        serde_json::json!({
+                            "passed": false,
+                            "reason": "no candidate replay is configured, so the held-out results were not validated"
+                        })
+                    });
+                if let Some(record) = record.as_object_mut() {
+                    record.insert("shadow_scoring".to_string(), scoring.clone());
+                }
+                if !scoring
+                    .get("passed")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    let reason = scoring
+                        .get("reason")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("the candidate replay did not validate the held-out results")
+                        .to_string();
+                    self.reject(
+                        settings,
+                        trial,
+                        format!("candidate replay did not validate: {reason}"),
+                        now,
+                        Some(&scoring),
+                    );
+                    return;
+                }
+                // A passed replay carries the calibration map it fitted and
+                // the threshold it validated on the held-out half. Promoting
+                // without either would leave the old scoring in force.
+                let calibration = scoring.get("calibration").and_then(|value| {
+                    serde_json::from_value::<crate::calibration::CalibrationMap>(value.clone()).ok()
+                });
+                let threshold = scoring
+                    .pointer("/threshold/candidate")
+                    .and_then(serde_json::Value::as_f64)
+                    .map(|value| value as f32);
+                let signal_weights = scoring
+                    .get("signal_weights")
+                    .and_then(|value| serde_json::from_value(value.clone()).ok())
+                    .unwrap_or_default();
+                let (Some(calibration), Some(threshold)) = (calibration, threshold) else {
+                    self.reject(
+                        settings,
+                        trial,
+                        "candidate replay passed without a validated calibration map and threshold"
+                            .to_string(),
+                        now,
+                        Some(&scoring),
+                    );
+                    return;
+                };
                 let _ = std::fs::remove_file(candidate.with_extension("json"));
-                match self.promote(&candidate, &record) {
-                    Ok(()) => {
-                        self.start_watch(chrono::Utc::now().timestamp());
-                        self.log(
-                            LogLevel::Info,
-                            format!(
-                                "AI promoted its candidate classifier after a shadow trial: {why}. It is watched for {} days and undone if it misbehaves",
-                                WATCH_SECS / 86_400
-                            ),
-                        );
-                        self.write_trial(&trial.concluded(format!("promoted: {why}"), None));
-                    }
+                let activation = TrialActivation {
+                    calibration: Some(calibration),
+                    threshold,
+                    signal_weights,
+                    report: scoring.clone(),
+                };
+                // The version is recorded and its scoring applied *before* the
+                // model is installed. Until that record exists there is nothing
+                // for the new model to belong to, so a failed write leaves the
+                // incumbent live with the scoring that describes it.
+                let activated = match self.activation.get() {
+                    Some(activate) => activate(&candidate, &self.learned, &activation).map(Some),
+                    None => Ok(None),
+                };
+                let undo = match activated {
+                    Ok(undo) => undo,
                     Err(e) => {
                         self.reject(
                             settings,
                             trial,
-                            format!("it passed its trial but could not be loaded: {e}"),
+                            format!(
+                                "it passed its trial but its validated scoring could not be recorded: {e}"
+                            ),
                             now,
+                            Some(&scoring),
+                        );
+                        return;
+                    }
+                };
+                if let Err(e) = self.promote(&candidate, &record) {
+                    // Activation came first, so the files were put back by the
+                    // rotation's recovery and the model was never loaded. Take
+                    // the version and scoring back out too, or the incumbent
+                    // would keep answering under the failed candidate's
+                    // calibration and threshold.
+                    let failures = undo.map(|undo| undo.undo()).unwrap_or_default();
+                    let suffix = if failures.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            "; putting the previous scoring back did not fully succeed: {}",
+                            failures.join("; ")
+                        )
+                    };
+                    self.reject(
+                        settings,
+                        trial,
+                        format!("it passed its trial but could not be loaded: {e}{suffix}"),
+                        now,
+                        Some(&scoring),
+                    );
+                    return;
+                }
+                self.start_watch(chrono::Utc::now().timestamp());
+                self.log(
+                    LogLevel::Info,
+                    format!(
+                        "AI promoted its candidate classifier after a shadow trial: {why}. It is watched for {} days and undone if it misbehaves",
+                        WATCH_SECS / 86_400
+                    ),
+                );
+                self.write_trial(
+                    &trial
+                        .concluded(format!("promoted: {why}"), None)
+                        .with_scoring(Some(&scoring)),
+                );
+                if let Some(activation) = undo {
+                    if let Err(error) = activation.complete() {
+                        self.log(
+                            LogLevel::Warn,
+                            format!(
+                                "the scheduled model is live but its activation recovery marker could not be cleared: {error}"
+                            ),
                         );
                     }
                 }
             }
-            Err(why) => self.reject(settings, trial, why, now),
+            Err(why) => self.reject(settings, trial, why, now, None),
         }
     }
 
     /// Set a candidate aside, pause retraining and tell the operator. The
     /// live model was never touched.
-    fn reject(&self, settings: &AiSettings, trial: &Trial, why: String, now: i64) {
+    fn reject(
+        &self,
+        settings: &AiSettings,
+        trial: &Trial,
+        why: String,
+        now: i64,
+        scoring: Option<&serde_json::Value>,
+    ) {
         let candidate = candidate_path(&self.learned);
         let _ = std::fs::rename(&candidate, self.learned.with_extension("rejected.bin"));
         let _ = std::fs::remove_file(candidate.with_extension("json"));
@@ -974,7 +1333,11 @@ impl Retrainer {
                 "The model the AI retrained did worse than the live model during its shadow trial ({why}), so it was set aside. Nothing changed for your clients.{detail}",
             ),
         );
-        self.write_trial(&trial.concluded(format!("rejected: {why}"), Some(now + pause)));
+        self.write_trial(
+            &trial
+                .concluded(format!("rejected: {why}"), Some(now + pause))
+                .with_scoring(scoring),
+        );
     }
 
     // ── The watch after an automatic promotion ──────────────────────────
@@ -1074,25 +1437,16 @@ impl Retrainer {
     fn undo_promotion(&self, settings: &AiSettings, why: &str, now: i64) {
         let undone = {
             let _running = self.running.lock().unwrap_or_else(|e| e.into_inner());
-            if previous_model_path(&self.learned).is_file() {
-                self.swap_with_previous().and_then(|()| {
-                    self.install().inspect_err(|_| {
-                        let _ = self.swap_with_previous();
-                    })
-                })
-            } else {
-                // The first model it learned: back to the configured one.
-                let set_aside = self.learned.with_extension("rolled-back.bin");
-                std::fs::rename(&self.learned, &set_aside)
-                    .map_err(DaygleError::Io)
-                    .and_then(|()| match self.installer.get() {
-                        Some(install) => install(Path::new(&self.configured_model(settings)))
-                            .inspect_err(|_| {
-                                let _ = std::fs::rename(&set_aside, &self.learned);
-                            }),
-                        None => Ok(()),
-                    })
-            }
+            self.with_rotation(|| {
+                if previous_model_path(&self.learned).is_file() {
+                    self.swap_with_previous().and_then(|()| self.install())
+                } else {
+                    // The first model it learned: back to the configured one.
+                    let set_aside = self.learned.with_extension("rolled-back.bin");
+                    std::fs::rename(&self.learned, &set_aside)?;
+                    self.install_path(Path::new(&self.configured_model(settings)))
+                }
+            })
         };
         let _ = std::fs::remove_file(self.watch_path());
         if let Err(e) = undone {
@@ -1509,7 +1863,6 @@ fn score_with_slack(
 #[derive(Clone, Copy)]
 enum StatsMove {
     CurrentToPrevious,
-    PreviousToCurrent,
     Exchange,
 }
 
@@ -1523,10 +1876,6 @@ fn swap_stats(learned: &Path, how: StatsMove) {
         StatsMove::CurrentToPrevious => {
             let _ = std::fs::remove_file(&previous);
             let _ = std::fs::rename(&current, &previous);
-        }
-        StatsMove::PreviousToCurrent => {
-            let _ = std::fs::remove_file(&current);
-            let _ = std::fs::rename(&previous, &current);
         }
         StatsMove::Exchange => {
             let staged = learned.with_extension("rolled-back.json");
@@ -1543,6 +1892,129 @@ fn swap_stats(learned: &Path, how: StatsMove) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_restores_files_from_an_interrupted_learned_model_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("ai.db");
+        let learned = crate::learn::learned_model_path(&database);
+        let previous = previous_model_path(&learned);
+        let stats = stats_path(&learned);
+        let expected = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../models/daygle-starter.bin"
+        ))
+        .unwrap();
+        std::fs::write(&learned, &expected).unwrap();
+        std::fs::write(&previous, b"original previous").unwrap();
+        std::fs::write(&stats, b"original stats").unwrap();
+        {
+            let store = AiStore::open(&database).unwrap();
+            begin_rotation(&store, &learned).unwrap();
+            std::fs::rename(&learned, &previous).unwrap();
+            std::fs::write(previous_stats_path(&learned), b"unexpected stats").unwrap();
+        }
+
+        let settings = AiSettings {
+            database: database.to_string_lossy().into_owned(),
+            ..AiSettings::default()
+        };
+        let ai = crate::AiEngine::new(
+            &settings,
+            ":memory:",
+            Arc::new(daygle_dns_authoritative::ZoneStore::open(":memory:").unwrap()),
+            Arc::new(LogStore::new(64)),
+        )
+        .unwrap();
+        assert_eq!(ai.live_model_path(), learned.to_string_lossy());
+        assert_eq!(std::fs::read(&learned).unwrap(), expected);
+        assert_eq!(std::fs::read(&previous).unwrap(), b"original previous");
+        assert_eq!(std::fs::read(&stats).unwrap(), b"original stats");
+        assert!(!previous_stats_path(&learned).exists());
+        assert!(!recover_rotation(&ai.store, &learned).unwrap());
+    }
+
+    /// A passed trial is recorded and its scoring applied before the model is
+    /// installed, so a failure writing that version rejects the candidate
+    /// without ever loading it. Injecting the activation failure here proves
+    /// the install is behind it.
+    #[test]
+    fn a_failed_scheduled_activation_never_installs_the_candidate() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("ai.db");
+        let learned = crate::learn::learned_model_path(&database);
+        let live = dir.path().join("live.bin");
+        let starter = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../models/daygle-starter.bin"
+        );
+        std::fs::copy(starter, &live).unwrap();
+        std::fs::copy(starter, candidate_path(&learned)).unwrap();
+        let store = Arc::new(AiStore::open(&database).unwrap());
+        let settings = Arc::new(ArcSwap::from_pointee(AiSettings {
+            mode: daygle_dns_core::config::AiMode::Enforce,
+            block_threshold: 0.5,
+            ..AiSettings::default()
+        }));
+        let retrainer = Retrainer::new(
+            store,
+            settings.clone(),
+            Arc::new(LogStore::new(64)),
+            learned.clone(),
+            Arc::new(ArcSwap::from_pointee(live.to_string_lossy().into_owned())),
+        );
+        retrainer.set_shadow_scoring(Box::new(|candidate, _, _, ends| {
+            let model = crate::threshold::model_version(&candidate.to_string_lossy());
+            Ok(serde_json::json!({
+                "passed": true,
+                "calibration": crate::calibration::CalibrationMap::identity(&model, ends),
+                "threshold": { "candidate": 0.9 },
+                "signal_weights": crate::fusion::SignalWeights::default(),
+            }))
+        }));
+        let installs = Arc::new(AtomicUsize::new(0));
+        let counted = installs.clone();
+        retrainer.set_installer(Box::new(move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }));
+        retrainer.set_activation(Box::new(|_, _, _| {
+            Err(DaygleError::Database(
+                "injected scheduled activation failure".to_string(),
+            ))
+        }));
+
+        let now = chrono::Utc::now().timestamp();
+        let trial = Trial {
+            started_at: Some(now - 600),
+            ends_at: Some(now + 1),
+            ..Default::default()
+        };
+        std::fs::write(
+            trial_path(&learned),
+            serde_json::to_vec(&trial.to_json()).unwrap(),
+        )
+        .unwrap();
+        let current = settings.load_full();
+        retrainer.conclude_trial(&current, &trial);
+
+        assert_eq!(
+            installs.load(Ordering::SeqCst),
+            0,
+            "the version is recorded before the model is installed"
+        );
+        assert!(
+            !learned.is_file(),
+            "the failed candidate was set aside, not installed"
+        );
+        let outcome = retrainer.trial().last_outcome.unwrap_or_default();
+        assert!(
+            outcome.starts_with("rejected") && outcome.contains("could not be recorded"),
+            "{outcome}"
+        );
+    }
 
     #[test]
     fn repeated_rejections_back_off() {

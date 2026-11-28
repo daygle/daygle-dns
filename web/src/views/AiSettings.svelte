@@ -1,5 +1,6 @@
 <script>
   import { api, formatApiError } from '../api.js';
+  import { changedAiSettings } from './aiSettingsPatch.js';
   import SettingsForm from './SettingsForm.svelte';
 
   // AI -> Settings: when and how the scanner runs and when its detections
@@ -160,7 +161,9 @@
     if (error) return;
     busy = true;
     try {
-      await api.updateSettings({ ai: body });
+      const patch = changedAiSettings(JSON.parse(savedBody), body);
+      if (Object.keys(patch).length === 0) return;
+      await api.updateSettings({ ai: patch });
       notice = 'AI settings saved and applied.';
       await load();
       onSaved();

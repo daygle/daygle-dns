@@ -2496,6 +2496,7 @@ pub async fn ai_rollback(State(state): State<AppState>) -> Response {
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
+    let _scoring_change = ai.lock_scoring_change().await;
     let outcome = run_blocking({
         let ai = ai.clone();
         move || ai.rollback_learned_model()
@@ -2582,6 +2583,7 @@ pub async fn ai_threshold_trial(State(state): State<AppState>) -> Response {
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
+    let _scoring_change = ai.lock_scoring_change().await;
     let outcome = run_blocking({
         let ai = ai.clone();
         move || ai.run_threshold_trial()
@@ -2654,10 +2656,8 @@ async fn publish_block_threshold(
     Ok(())
 }
 
-/// Publish a candidate's whole scoring configuration, not only its threshold:
-/// the version's fusion mode, confidence floor, FPR target, threat-label
-/// policy and authority setting travel with it, so promoting or rolling back a
-/// version restores what its hash describes.
+/// Restore the version's threshold, fusion mode and confidence floor while
+/// keeping the operator's current threat labels, authority and FPR target.
 async fn publish_candidate_config(
     state: &AppState,
     ai: &Arc<daygle_dns_ml::AiEngine>,
@@ -2670,6 +2670,10 @@ async fn publish_candidate_config(
     ) {
         update.apply_to(&mut config.ai);
     }
+    config.ai.authority = current.ai.authority.clone();
+    config.ai.auto_block_categories = current.ai.auto_block_categories.clone();
+    config.ai.auto_block_removals = current.ai.auto_block_removals.clone();
+    config.ai.threshold_fpr_target = current.ai.threshold_fpr_target;
     // The threshold is the candidate's, whatever the overlay said.
     config.ai.block_threshold = candidate.block_threshold;
     config.validate()?;
@@ -2750,9 +2754,11 @@ pub async fn ai_threshold_apply(
     State(state): State<AppState>,
     Json(input): Json<ThresholdTrialInput>,
 ) -> Response {
+    let _config_write = state.config_write.lock().await;
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
+    let _scoring_change = ai.lock_scoring_change().await;
     let found = run_blocking({
         let ai = ai.clone();
         move || ai.store.threshold_trial(input.id)
@@ -2777,11 +2783,32 @@ pub async fn ai_threshold_apply(
     // The threshold this application replaces is the one in force now (the
     // trial's own recorded base may be older, if another trial moved it), and
     // it is what undoing this trial must put back.
-    let base = ai.settings.load_full().block_threshold;
-    // The model actually live at this moment, not the one the trial was
-    // measured against: a retrain may have promoted another one in between,
-    // and the threshold and the model only mean something together.
+    let settings = ai.settings.load_full();
+    let base = settings.block_threshold;
+    if trial.fpr_target > settings.threshold_fpr_target {
+        return error_response(
+            StatusCode::CONFLICT,
+            "the false-positive target is stricter than the one this trial used; run a new trial",
+        );
+    }
+    // A retrain can replace the model between measurement and application.
     let applied_model = daygle_dns_ml::threshold::model_version(&ai.live_model_path());
+    if applied_model != trial.model || applied_model.starts_with("unreadable:") {
+        return error_response(
+            StatusCode::CONFLICT,
+            "that trial was not validated for the identifiable live model; run a new trial",
+        );
+    }
+    if trial
+        .report
+        .get("scoring")
+        .is_some_and(|scoring| *scoring != ai.threshold_scoring_context(&settings))
+    {
+        return error_response(
+            StatusCode::CONFLICT,
+            "the trial measured different scoring settings; run a new trial",
+        );
+    }
     let marked = run_blocking({
         let ai = ai.clone();
         let id = trial.id;
@@ -2836,9 +2863,11 @@ pub async fn ai_threshold_rollback(
     State(state): State<AppState>,
     Json(input): Json<ThresholdTrialInput>,
 ) -> Response {
+    let _config_write = state.config_write.lock().await;
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
+    let _scoring_change = ai.lock_scoring_change().await;
     let rolled = run_blocking({
         let ai = ai.clone();
         move || ai.store.mark_threshold_rolled_back(input.id)
@@ -2951,6 +2980,7 @@ pub async fn ai_calibration_fit(State(state): State<AppState>) -> Response {
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
+    let _scoring_change = ai.lock_scoring_change().await;
     let outcome = run_blocking({
         let ai = ai.clone();
         move || ai.fit_calibration()
@@ -2975,9 +3005,11 @@ pub async fn ai_calibration_apply(
     State(state): State<AppState>,
     Json(input): Json<CalibrationInput>,
 ) -> Response {
+    let _config_write = state.config_write.lock().await;
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
+    let _scoring_change = ai.lock_scoring_change().await;
     let outcome = run_blocking({
         let ai = ai.clone();
         let version = input.version.clone();
@@ -3004,9 +3036,11 @@ pub async fn ai_calibration_apply(
 
 /// `POST /api/ai/calibration/disable` - go back to the uncalibrated score.
 pub async fn ai_calibration_disable(State(state): State<AppState>) -> Response {
+    let _config_write = state.config_write.lock().await;
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
+    let _scoring_change = ai.lock_scoring_change().await;
     let outcome = run_blocking({
         let ai = ai.clone();
         move || ai.disable_calibration()
@@ -3039,9 +3073,11 @@ pub async fn ai_candidates(State(state): State<AppState>) -> Response {
 /// `POST /api/ai/candidates/snapshot` - record the scoring system as it
 /// stands now as a candidate version. Nothing is promoted.
 pub async fn ai_candidates_snapshot(State(state): State<AppState>) -> Response {
+    let _config_write = state.config_write.lock().await;
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
+    let _scoring_change = ai.lock_scoring_change().await;
     let outcome = run_blocking({
         let ai = ai.clone();
         move || ai.snapshot_candidate()
@@ -3071,9 +3107,11 @@ pub async fn ai_candidates_promote(
     State(state): State<AppState>,
     Json(input): Json<CandidateInput>,
 ) -> Response {
+    let _config_write = state.config_write.lock().await;
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
+    let _scoring_change = ai.lock_scoring_change().await;
     let outcome = run_blocking({
         let ai = ai.clone();
         move || ai.promote_candidate_with_undo(input.id)
@@ -3126,9 +3164,11 @@ pub async fn ai_candidates_promote(
 /// `POST /api/ai/candidates/rollback` - restore the complete previous
 /// version: its model artifact, threshold, calibration and signal weights.
 pub async fn ai_candidates_rollback(State(state): State<AppState>) -> Response {
+    let _config_write = state.config_write.lock().await;
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
+    let _scoring_change = ai.lock_scoring_change().await;
     let rolled = run_blocking({
         let ai = ai.clone();
         move || {
@@ -3209,6 +3249,7 @@ pub async fn ai_retrain(State(state): State<AppState>) -> Response {
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
+    let _scoring_change = ai.lock_scoring_change().await;
     let outcome = run_blocking({
         let ai = ai.clone();
         move || ai.retrain_learned_model()
@@ -8084,6 +8125,11 @@ pub async fn update_settings(
     axum::Json(update): axum::Json<SettingsUpdate>,
 ) -> Response {
     let _config_write = state.config_write.lock().await;
+    let scoring_engine = update.ai.as_ref().and_then(|_| ai_engine(&state));
+    let _scoring_change = match &scoring_engine {
+        Some(ai) => Some(ai.lock_scoring_change().await),
+        None => None,
+    };
     let old_config = (*state.config.load_full()).clone();
     let mut config = old_config.clone();
     let mut listeners_affected = false;

@@ -210,6 +210,26 @@ impl Scanner {
         self.weights.load_full().as_ref().clone()
     }
 
+    /// The scoring identity a page finding was produced under: the page
+    /// reader, the calibration map and the fusion mode. A review of a page
+    /// finding counts for advancement only against the identity that made it.
+    pub fn scoring_version(&self) -> String {
+        let calibration = self.calibration.load_full();
+        let reader = self
+            .page_model
+            .get()
+            .map_or_else(|| "phrases".to_string(), |model| model.version());
+        format!(
+            "page:{reader}|{}|{}",
+            calibration
+                .as_ref()
+                .as_ref()
+                .map(|map| map.version.as_str())
+                .unwrap_or("identity"),
+            self.settings.load().fusion.as_str()
+        )
+    }
+
     /// Replace the reader the page stage uses, e.g. with readings a test
     /// already knows. Returns false if one was already installed.
     pub fn set_page_reader(&self, reader: Box<dyn crate::page::PageReader>) -> bool {
@@ -878,6 +898,7 @@ impl Scanner {
             now,
             cfg.confidence_floor,
             cfg.max_domains_per_scan as usize,
+            cfg.fusion,
         )?;
         let live = crate::page::PageFetcher::new(
             std::time::Duration::from_secs(cfg.page_fetch_timeout_secs.clamp(1, 30)),
@@ -908,9 +929,14 @@ impl Scanner {
                 .filter_map(|handle| handle.join().ok())
                 .collect::<Vec<_>>()
         });
+        let scoring_version = self.scoring_version();
         for (domain, reading) in readings {
-            self.store
-                .save_page_discovery(&domain, &reading, Utc::now().timestamp())?;
+            self.store.save_page_discovery(
+                &domain,
+                &reading,
+                Utc::now().timestamp(),
+                &scoring_version,
+            )?;
         }
         Ok(())
     }
@@ -1137,7 +1163,17 @@ impl Scanner {
         // reaches the block snapshot. A source is demoted here automatically
         // when its measured false-positive share passes the configured limit.
         let decisions = if cfg.authority.enabled {
-            match crate::authority::evaluate(&self.store, &cfg.authority) {
+            match crate::authority::evaluate_for_scoring(
+                &self.store,
+                &cfg.authority,
+                self.calibration
+                    .load_full()
+                    .as_ref()
+                    .as_ref()
+                    .map(|map| map.version.as_str())
+                    .unwrap_or(""),
+                cfg.fusion.as_str(),
+            ) {
                 Ok(decisions) => decisions,
                 Err(e) => {
                     // Fail closed: a broken measurement must not grant
@@ -1195,6 +1231,11 @@ impl Scanner {
         }
         // Page findings go through the same snapshot, cap and exemptions as
         // model findings. Graduated authority treats them as automated findings.
+        // A page finding is independent of the model's enabled threat families:
+        // the page itself is the evidence, so it may enforce while no family is
+        // listed. The operator's explicit switches (fetch, monitor, enforce),
+        // per-domain exemptions and the authority stage still bound it, and a
+        // family they suppressed globally is skipped below.
         let automated_may_block = !cfg.authority.enabled
             || crate::authority::decision_for(&decisions, crate::authority::Source::Model)
                 .is_some_and(|decision| decision.may_block());
@@ -1204,7 +1245,6 @@ impl Scanner {
                 && cfg.monitor_page_discovery
                 && cfg.enforce_page_discovery
                 && cfg.page_rule != daygle_dns_core::config::PageRule::Evidence
-                && cfg.is_auto_block_category("phishing")
                 && automated_may_block
                 && self.settings.load().enforce_page_discovery
         }) {
@@ -1224,11 +1264,21 @@ impl Scanner {
                 {
                     continue;
                 }
-                let Some(page) = self
-                    .store
-                    .page_discovery(&domain, now)?
-                    .and_then(|report| report.observation())
-                else {
+                let Some(report) = self.store.page_discovery(&domain, now)? else {
+                    continue;
+                };
+                if report.reading.category.as_deref().is_some_and(|category| {
+                    cfg.label_role(category) == daygle_dns_core::config::LabelRole::Suppressed
+                }) {
+                    // An explicit global suppression outranks a page finding.
+                    continue;
+                }
+                let block_category = report
+                    .reading
+                    .category
+                    .clone()
+                    .unwrap_or_else(|| "phishing".to_string());
+                let Some(page) = report.observation() else {
                     continue;
                 };
                 let confidence = page.value.unwrap_or_default();
@@ -1253,7 +1303,7 @@ impl Scanner {
                 eligible.insert(
                     domain,
                     ActiveBlock {
-                        category: "phishing".to_string(),
+                        category: block_category,
                         expires_at,
                         exact_host: true,
                     },

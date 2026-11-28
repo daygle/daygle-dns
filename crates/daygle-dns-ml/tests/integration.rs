@@ -3317,9 +3317,10 @@ fn seed_content_verdicts(ai: &AiEngine, range: std::ops::Range<usize>) {
 }
 
 /// A scheduled retrain builds a candidate that runs in the shadow of the
-/// live model: nothing changes until its trial ends and it is promoted.
+/// live model: nothing changes until its trial ends. Without a passed replay
+/// of the held-out evidence the incumbent stays in force.
 #[test]
-fn a_scheduled_retrain_runs_in_the_shadow_until_promoted() {
+fn a_scheduled_retrain_needs_a_passed_replay_to_promote() {
     let _train = training_guard();
     let dir = TempDir::new().unwrap();
     let ai = engine(
@@ -3354,18 +3355,449 @@ fn a_scheduled_retrain_runs_in_the_shadow_until_promoted() {
 
     end_trial_soon(&ai);
     std::thread::sleep(std::time::Duration::from_millis(1100));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let scoring_change = runtime.block_on(ai.lock_scoring_change());
+    assert!(ai.run_due_maintenance().is_none());
+    assert!(learned_trial(&ai).in_progress());
+    assert!(!learned_active(&ai));
+    drop(scoring_change);
+
     assert!(ai.run_due_maintenance().is_none());
     let trial = learned_trial(&ai);
     assert!(
         trial
             .last_outcome
             .as_deref()
-            .is_some_and(|o| o.starts_with("promoted")),
-        "{trial:?}"
+            .is_some_and(|o| o.starts_with("rejected")),
+        "no reviewed held-out evidence means no promotion: {trial:?}"
     );
-    assert!(learned_active(&ai), "promoted without a restart");
-    assert_eq!(ai.content_backend_name(), "fasttext");
+    assert!(
+        !learned_active(&ai),
+        "the incumbent stays in force when the replay does not validate"
+    );
+    assert_eq!(
+        ai.content_backend_name(),
+        "fasttext",
+        "the configured model is still the one answering"
+    );
     assert_eq!(trial.history.len(), 1, "the trial is in the history");
+    assert_eq!(
+        ai.maintained_status()["trial"]["shadow_scoring"]["passed"],
+        false,
+        "the rejected trial keeps the replay's diagnostic result"
+    );
+}
+
+/// A scheduled activation records its version before it installs the model.
+/// When that write fails, the incumbent must still be the live model and the
+/// scoring in force must still be the calibration and threshold that belong to
+/// it - not the passed trial's, and not a new model under the old scoring.
+#[test]
+fn a_failed_activation_record_leaves_the_live_model_and_its_scoring_in_force() {
+    let dir = TempDir::new().unwrap();
+    let configured = dir.path().join("model.bin");
+    std::fs::copy(PROMOTION_MODEL, &configured).unwrap();
+    let ai = engine(
+        &dir,
+        AiSettings {
+            model_path: configured.to_string_lossy().into_owned(),
+            block_threshold: 0.55,
+            ..settings(AiMode::Enforce)
+        },
+    );
+    let incumbent_map = apply_a_map_fitted_for_the_live_model(&ai);
+    let incumbent = ai.live_model_path();
+    let threshold = ai.settings.load().block_threshold;
+    let learned = ai.learned_model_path().to_path_buf();
+    assert!(!learned.is_file());
+
+    // The trial's artifact is a different file from the path the version will
+    // occupy, as it is while the candidate sits beside the live model.
+    let artifact = dir.path().join("retrained.bin");
+    std::fs::copy(PROMOTION_MODEL, &artifact).unwrap();
+    let trial_map = daygle_dns_ml::calibration::CalibrationMap::identity(
+        "the-candidate-model",
+        chrono::Utc::now().timestamp(),
+    );
+    let trial_threshold = 0.9;
+    fail_candidate_record_writes(&dir);
+
+    let failed = ai
+        .record_scheduled_activation(
+            &artifact,
+            &learned,
+            &daygle_dns_ml::maintain::TrialActivation {
+                calibration: Some(trial_map),
+                threshold: trial_threshold,
+                signal_weights: Default::default(),
+                report: serde_json::json!({"passed": true}),
+            },
+        )
+        .err()
+        .expect("the candidate record cannot be written");
+    assert!(
+        failed
+            .to_string()
+            .contains("injected candidate record failure"),
+        "{failed}"
+    );
+    assert_eq!(
+        ai.live_model_path(),
+        incumbent,
+        "the failed record must not install the candidate"
+    );
+    assert!(
+        (ai.settings.load().block_threshold - threshold).abs() < f32::EPSILON,
+        "the incumbent's threshold stays in force"
+    );
+    assert!(
+        ai.store.active_candidate().unwrap().is_none(),
+        "no version is in force"
+    );
+    assert_eq!(
+        ai.store
+            .active_calibration()
+            .unwrap()
+            .map(|map| map.version),
+        Some(incumbent_map.version.clone()),
+        "the incumbent's calibration stays active"
+    );
+    assert_eq!(
+        ai.scanner.calibration_map().map(|map| map.version),
+        Some(incumbent_map.version),
+        "the scanner is not applying the failed trial's calibration"
+    );
+    assert!(!learned.is_file(), "the candidate was never installed");
+}
+
+/// If the model cannot be installed after its version was recorded, undoing
+/// the activation puts the ledger and the complete scoring that was in force
+/// back. The model itself was never installed, so it stays the incumbent.
+#[test]
+fn undoing_a_scheduled_activation_restores_the_scoring_it_replaced() {
+    let dir = TempDir::new().unwrap();
+    let configured = dir.path().join("model.bin");
+    std::fs::copy(PROMOTION_MODEL, &configured).unwrap();
+    let ai = engine(
+        &dir,
+        AiSettings {
+            model_path: configured.to_string_lossy().into_owned(),
+            block_threshold: 0.55,
+            ..settings(AiMode::Enforce)
+        },
+    );
+    let incumbent_map = apply_a_map_fitted_for_the_live_model(&ai);
+    let incumbent = ai.live_model_path();
+    let threshold = ai.settings.load().block_threshold;
+    let learned = ai.learned_model_path().to_path_buf();
+    let artifact = dir.path().join("retrained.bin");
+    std::fs::copy(PROMOTION_MODEL, &artifact).unwrap();
+    let trial_map = daygle_dns_ml::calibration::CalibrationMap::identity(
+        "the-candidate-model",
+        chrono::Utc::now().timestamp(),
+    );
+    let trial_version = trial_map.version.clone();
+
+    let (_promoted, undo) = ai
+        .record_scheduled_activation(
+            &artifact,
+            &learned,
+            &daygle_dns_ml::maintain::TrialActivation {
+                calibration: Some(trial_map),
+                threshold: 0.9,
+                signal_weights: Default::default(),
+                report: serde_json::json!({"passed": true}),
+            },
+        )
+        .expect("one recoverable activation");
+    assert!((ai.settings.load().block_threshold - 0.9).abs() < f32::EPSILON);
+    assert!(ai.store.active_candidate().unwrap().is_some());
+    assert_eq!(
+        ai.scanner.calibration_map().map(|map| map.version),
+        Some(trial_version)
+    );
+    assert_eq!(
+        ai.live_model_path(),
+        incumbent,
+        "recording the version does not install its model"
+    );
+    assert!(!learned.is_file());
+
+    let failures = ai.undo_scheduled_activation(undo);
+    assert!(failures.is_empty(), "{failures:?}");
+    assert!(
+        (ai.settings.load().block_threshold - threshold).abs() < f32::EPSILON,
+        "the incumbent's threshold is back"
+    );
+    assert!(
+        ai.store.active_candidate().unwrap().is_none(),
+        "the recorded version is out of force"
+    );
+    assert_eq!(
+        ai.store
+            .active_calibration()
+            .unwrap()
+            .map(|map| map.version),
+        Some(incumbent_map.version.clone()),
+        "the incumbent's calibration is active"
+    );
+    assert_eq!(
+        ai.scanner.calibration_map().map(|map| map.version),
+        Some(incumbent_map.version),
+        "the scanner applies the incumbent's calibration"
+    );
+    assert_eq!(ai.live_model_path(), incumbent);
+    assert!(ai.store.pending_scheduled_activation().unwrap().is_none());
+}
+
+/// If the process stops after the candidate version commits but before the
+/// model is installed, startup restores the model bytes from that active version
+/// and uses its threshold, calibration and weights from the first scan.
+#[test]
+fn restart_completes_a_scheduled_activation_interrupted_before_model_install() {
+    let _train = training_guard();
+    let dir = TempDir::new().unwrap();
+    let configured = dir.path().join("configured.bin");
+    std::fs::copy(PROMOTION_MODEL, &configured).unwrap();
+    let initial = AiSettings {
+        model_path: configured.to_string_lossy().into_owned(),
+        block_threshold: 0.55,
+        ..settings(AiMode::Enforce)
+    };
+    let first = engine(&dir, initial.clone());
+    let learned = first.learned_model_path().to_path_buf();
+    drop(first);
+    let incumbent_source = dir.path().join("incumbent.bin");
+    let incumbent_pairs = (0..80)
+        .map(|i| {
+            (
+                if i % 2 == 0 { "news" } else { "shopping" }.to_string(),
+                format!("incumbent-domain{i}.example"),
+            )
+        })
+        .collect::<Vec<_>>();
+    daygle_dns_ml::learn::train(&incumbent_pairs, &incumbent_source).unwrap();
+    std::fs::copy(&incumbent_source, &learned).unwrap();
+    let incumbent_bytes = std::fs::read(&learned).unwrap();
+    let ai = engine(&dir, initial.clone());
+    assert_eq!(ai.live_model_path(), learned.to_string_lossy());
+    one_threat_verdict(&ai, "scheduled-recovery.example");
+    let artifact = dir.path().join("scheduled-candidate.bin");
+    let pairs = (0..80)
+        .map(|i| {
+            (
+                if i % 2 == 0 { "phishing" } else { "news" }.to_string(),
+                format!("candidate-domain{i}.example"),
+            )
+        })
+        .collect::<Vec<_>>();
+    daygle_dns_ml::learn::train(&pairs, &artifact).unwrap();
+    let source_model = daygle_dns_ml::threshold::model_version(&artifact.to_string_lossy());
+    let map = daygle_dns_ml::calibration::CalibrationMap::identity(
+        &source_model,
+        chrono::Utc::now().timestamp(),
+    );
+    let weights = daygle_dns_ml::fusion::SignalWeights {
+        model: 0.73,
+        ..Default::default()
+    };
+    let candidate_bytes = std::fs::read(&artifact).unwrap();
+
+    let (promoted, _undo) = ai
+        .record_scheduled_activation(
+            &artifact,
+            &learned,
+            &daygle_dns_ml::maintain::TrialActivation {
+                calibration: Some(map.clone()),
+                threshold: 0.81,
+                signal_weights: weights.clone(),
+                report: serde_json::json!({"passed": true, "reason": "held-out replay"}),
+            },
+        )
+        .expect("activation record commits before installation");
+    assert_eq!(
+        std::fs::read(&learned).unwrap(),
+        incumbent_bytes,
+        "simulates interruption before model install: incumbent is still on disk"
+    );
+    assert_eq!(
+        daygle_dns_ml::threshold::model_version(&artifact.to_string_lossy()),
+        format!("sha256:{}", promoted.model_sha256)
+    );
+    // If the configured file appears newer, recovery must still honor the
+    // committed active scheduled version rather than the timestamp heuristic.
+    std::fs::File::options()
+        .write(true)
+        .open(&configured)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(86_400))
+        .unwrap();
+    drop(ai);
+
+    // A failed startup rescore must keep the pending marker, so a subsequent
+    // restart retries and completes the bundle instead of loading it half-done.
+    fail_stored_verdict_writes(&dir);
+    let zones_path = dir.path().join("zones.db");
+    let interrupted = AiEngine::new(
+        &initial,
+        &zones_path.to_string_lossy(),
+        zone_store(&dir),
+        Arc::new(LogStore::new(128)),
+    )
+    .err()
+    .expect("injected rescore failure interrupts startup recovery");
+    assert!(interrupted
+        .to_string()
+        .contains("injected re-score failure"));
+    let recovery_marker = AiStore::open(&dir.path().join("ai.db")).unwrap();
+    assert_eq!(
+        recovery_marker
+            .pending_scheduled_activation()
+            .unwrap()
+            .unwrap()
+            .id,
+        promoted.id,
+        "failed startup recovery retains the pending candidate"
+    );
+    drop(recovery_marker);
+    let conn = rusqlite::Connection::open(dir.path().join("ai.db")).unwrap();
+    conn.execute_batch("DROP TRIGGER injected_rescore_failure;")
+        .unwrap();
+    drop(conn);
+
+    let restarted = engine(&dir, initial);
+    assert_eq!(
+        restarted.live_model_path(),
+        learned.to_string_lossy(),
+        "startup completes the active scheduled model instead of choosing the older configured file"
+    );
+    assert_eq!(std::fs::read(&learned).unwrap(), candidate_bytes);
+    assert_eq!(
+        std::fs::read(daygle_dns_ml::learn::previous_model_path(&learned)).unwrap(),
+        incumbent_bytes,
+        "restart recovery preserves the model the watch must restore"
+    );
+    assert_eq!(
+        daygle_dns_ml::threshold::model_version(&restarted.live_model_path()),
+        source_model
+    );
+    assert!(
+        (restarted.settings.load().block_threshold - 0.81).abs() < f32::EPSILON,
+        "the recorded candidate threshold is restored"
+    );
+    assert_eq!(
+        restarted
+            .scanner
+            .calibration_map()
+            .map(|active| active.version),
+        Some(map.version.clone()),
+        "the recorded calibration is active on the first scan"
+    );
+    assert_eq!(
+        restarted.scanner.signal_weights(),
+        weights,
+        "the recorded signal weights are active"
+    );
+    assert_eq!(
+        restarted.store.active_candidate().unwrap().unwrap().id,
+        promoted.id
+    );
+    assert!(
+        restarted
+            .store
+            .pending_scheduled_activation()
+            .unwrap()
+            .is_none(),
+        "startup clears the recovery marker only after rebuilding the full activation"
+    );
+    assert!(
+        !restarted.maintained_status()["watch"].is_null(),
+        "startup completes the post-promotion watch before clearing the marker"
+    );
+    assert!(
+        learned_trial(&restarted)
+            .last_outcome
+            .as_deref()
+            .is_some_and(|outcome| outcome.starts_with("promoted:")),
+        "startup concludes the interrupted scheduled trial"
+    );
+}
+
+/// A scheduled promotion records its validated threshold in the same
+/// candidate version a manual promotion uses, and a restart puts that number
+/// back instead of leaving the candidate's scores compared against the old
+/// threshold.
+#[test]
+fn a_scheduled_activation_is_one_recoverable_version() {
+    let dir = TempDir::new().unwrap();
+    let configured_model = dir.path().join("configured.bin");
+    std::fs::copy(PROMOTION_MODEL, &configured_model).unwrap();
+    let ai = engine(
+        &dir,
+        AiSettings {
+            model_path: configured_model.to_string_lossy().into_owned(),
+            ..settings(AiMode::Enforce)
+        },
+    );
+    let model = ai.learned_model_path().to_path_buf();
+    let artifact = dir.path().join("scheduled.bin");
+    std::fs::copy(&configured_model, &artifact).unwrap();
+    let before = ai.settings.load().block_threshold;
+    let threshold = if (before - 0.7).abs() < f32::EPSILON {
+        0.8
+    } else {
+        0.7
+    };
+    ai.record_scheduled_activation(
+        &artifact,
+        &model,
+        &daygle_dns_ml::maintain::TrialActivation {
+            calibration: None,
+            threshold,
+            signal_weights: Default::default(),
+            report: serde_json::json!({"passed": true, "reason": "held-out replay"}),
+        },
+    )
+    .expect("one recoverable activation");
+    assert!((ai.settings.load().block_threshold - threshold).abs() < f32::EPSILON);
+    let active = ai
+        .store
+        .active_candidate()
+        .unwrap()
+        .expect("active version");
+    assert!((active.block_threshold - threshold).abs() < f32::EPSILON);
+    assert_eq!(active.model_path, model.to_string_lossy());
+    drop(ai);
+
+    let restarted = engine(&dir, settings(AiMode::Enforce));
+    assert_eq!(restarted.live_model_path(), model.to_string_lossy());
+    assert!(restarted
+        .store
+        .pending_scheduled_activation()
+        .unwrap()
+        .is_none());
+    assert!(
+        (restarted.settings.load().block_threshold - threshold).abs() < f32::EPSILON,
+        "a restart applies the recorded version's threshold"
+    );
+
+    // A threshold the operator sets after the promotion is newer policy, not
+    // a stale copy the version should overwrite.
+    drop(restarted);
+    let operator = (threshold + 0.015).min(0.99);
+    let changed = engine(
+        &dir,
+        AiSettings {
+            block_threshold: operator,
+            ..settings(AiMode::Enforce)
+        },
+    );
+    assert!(
+        (changed.settings.load().block_threshold - operator).abs() < f32::EPSILON,
+        "a newer operator threshold survives a restart"
+    );
 }
 
 /// A damaged retrained model never stops the AI from starting: the engine
@@ -5020,15 +5452,15 @@ fn a_candidate_that_cannot_load_leaves_the_previous_version_in_force() {
 
 // ── A new model retires a calibration map fitted for the old one ─────────────
 
-/// Set a model file's modification time, so replacing the model (which the
-/// version stamp reads) is visible without rewriting its bytes.
-fn stamp(path: &std::path::Path, secs_ago: u64) {
-    let when = std::time::SystemTime::now() - std::time::Duration::from_secs(secs_ago);
+/// Make an artifact with distinct bytes. The fastText reader stops at the
+/// end of the model matrices and permits trailing bytes.
+fn mark_artifact(path: &std::path::Path) {
+    use std::io::Write;
     std::fs::File::options()
-        .write(true)
+        .append(true)
         .open(path)
         .unwrap()
-        .set_modified(when)
+        .write_all(b"replacement artifact")
         .unwrap();
 }
 
@@ -5079,10 +5511,9 @@ fn a_model_change_retires_a_calibration_map_fitted_for_the_old_model() {
     let dir = TempDir::new().unwrap();
     let learned = dir.path().join("learned.bin");
     std::fs::copy(PROMOTION_MODEL, &learned).unwrap();
-    stamp(&learned, 600);
     let previous = dir.path().join("learned.prev.bin");
     std::fs::copy(PROMOTION_MODEL, &previous).unwrap();
-    stamp(&previous, 1_200);
+    mark_artifact(&previous);
     let live_settings = AiSettings {
         model_path: learned.to_string_lossy().into_owned(),
         ..settings(AiMode::Enforce)
@@ -5154,7 +5585,6 @@ fn a_restart_does_not_reapply_a_calibration_map_fitted_for_a_replaced_model() {
     let dir = TempDir::new().unwrap();
     let model = dir.path().join("model.bin");
     std::fs::copy(PROMOTION_MODEL, &model).unwrap();
-    stamp(&model, 600);
     let model_settings = AiSettings {
         model_path: model.to_string_lossy().into_owned(),
         ..settings(AiMode::Enforce)
@@ -5170,8 +5600,15 @@ fn a_restart_does_not_reapply_a_calibration_map_fitted_for_a_replaced_model() {
         map.version
     };
 
-    // The model is replaced while the service is down.
-    stamp(&model, 60);
+    // Restoring identical bytes while the service is down preserves the map.
+    std::fs::copy(PROMOTION_MODEL, &model).unwrap();
+    {
+        let ai = engine(&dir, model_settings.clone());
+        assert_eq!(ai.scanner.calibration_map().unwrap().version, version);
+    }
+
+    // Replacing the bytes while the service is down invalidates the map.
+    mark_artifact(&model);
     let ai = engine(&dir, model_settings);
     assert!(
         ai.store.active_calibration().unwrap().is_none(),
@@ -5197,7 +5634,63 @@ fn a_restart_does_not_reapply_a_calibration_map_fitted_for_a_replaced_model() {
     );
 }
 
+#[test]
+fn restart_restores_candidate_weights_only_for_the_matching_artifact() {
+    use daygle_dns_ml::{candidate, fusion::SignalWeights};
+
+    let dir = TempDir::new().unwrap();
+    let model = dir.path().join("model.bin");
+    std::fs::copy(PROMOTION_MODEL, &model).unwrap();
+    let settings = AiSettings {
+        model_path: model.to_string_lossy().into_owned(),
+        ..settings(AiMode::Enforce)
+    };
+    let weights = SignalWeights {
+        page: 0.3,
+        ..SignalWeights::default()
+    };
+    {
+        let ai = engine(&dir, settings.clone());
+        let candidate = candidate::build(
+            &ai.store,
+            &candidate::CandidateSpec {
+                model_path: settings.model_path.clone(),
+                block_threshold: settings.block_threshold,
+                calibration: None,
+                signal_weights: weights.clone(),
+                scoring_config: serde_json::Value::Null,
+                validation_report: serde_json::Value::Null,
+                metrics: None,
+            },
+        )
+        .unwrap();
+        ai.promote_candidate(candidate.id).unwrap();
+    }
+    assert_eq!(
+        engine(&dir, settings.clone()).scanner.signal_weights(),
+        weights
+    );
+    mark_artifact(&model);
+    assert_eq!(
+        engine(&dir, settings).scanner.signal_weights(),
+        SignalWeights::default()
+    );
+}
+
 // ── A failed scoring change never leaves a half-applied one ──────────────────
+
+/// Make the candidate ledger's insert fail. A scheduled activation records its
+/// version before it installs the model, so this interrupts the transaction at
+/// the point where the old model and scoring must still be the ones in force.
+fn fail_candidate_record_writes(dir: &TempDir) {
+    let conn = rusqlite::Connection::open(dir.path().join("ai.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER injected_candidate_write_failure
+         BEFORE INSERT ON ai_candidates
+         BEGIN SELECT RAISE(ABORT, 'injected candidate record failure'); END;",
+    )
+    .unwrap();
+}
 
 /// Make writes to a stored verdict fail, the way a locked or damaged database
 /// would. The re-score of the stored verdicts is the write a scoring change has
@@ -5427,10 +5920,9 @@ fn a_failed_rescore_never_leaves_a_stale_calibration_deciding_the_gate() {
     let dir = TempDir::new().unwrap();
     let learned = dir.path().join("learned.bin");
     std::fs::copy(PROMOTION_MODEL, &learned).unwrap();
-    stamp(&learned, 600);
     let previous = dir.path().join("learned.prev.bin");
     std::fs::copy(PROMOTION_MODEL, &previous).unwrap();
-    stamp(&previous, 1_200);
+    mark_artifact(&previous);
     let ai = engine(
         &dir,
         AiSettings {

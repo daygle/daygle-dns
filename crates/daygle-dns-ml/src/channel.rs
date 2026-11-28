@@ -9,7 +9,7 @@
 //! | Channel   | Verdict it reports                                      |
 //! |-----------|---------------------------------------------------------|
 //! | `Content` | whatever the categorizer said, always severity `Info`   |
-//! | `Threat`  | a threat label, or any label when the threat score reaches the threshold |
+//! | `Threat`  | a threat label, or an alternate threat reading above the applicable reporting floor |
 //!
 //! The threat channel reads its label set from the *live* settings, so
 //! editing `auto_block_categories` or `auto_block_removals` changes what the
@@ -29,7 +29,7 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use daygle_dns_core::config::{AiSettings, LabelRole};
+use daygle_dns_core::config::{AiSettings, FusionMode, LabelRole};
 
 use crate::backend::{Channel, ClassificationInput, DomainClassifier, Severity, Verdict};
 use crate::learn::BENIGN_LABEL;
@@ -99,16 +99,17 @@ impl DomainClassifier for ChannelBackend {
                 ..verdict
             }),
             Channel::Threat => {
-                // "Not a threat" is the one negative the model can carry: a
-                // learned label, never a finding - not even from an
-                // auto-block list that names it.
-                if verdict.category == BENIGN_LABEL {
-                    return None;
-                }
                 // Settings are always present for this channel; no settings
                 // means no declared threats, which is the safe reading.
                 let settings = self.settings.as_ref()?.load();
-                let role = settings.label_role(&verdict.category);
+                let mut role = settings.label_role(&verdict.category);
+                if verdict.category == BENIGN_LABEL {
+                    // The learned negative is never itself a finding, even if
+                    // an old list named it: a correction must not become a
+                    // block. A different threat family the model scored can
+                    // still carry an independent reading below.
+                    role = LabelRole::Classification;
+                }
                 // Never a threat: the operator's removal suppresses the
                 // model's own verdict on that label, so nothing is reported.
                 if role == LabelRole::Suppressed {
@@ -117,9 +118,8 @@ impl DomainClassifier for ChannelBackend {
                 // The model's own threat score: its highest probability for
                 // any threat label, even one it ranked below its top guess.
                 // A threat label carries the verdict on its own; a
-                // *classification* label only does when that score reaches
-                // `block_threshold`, so the label list no longer decides
-                // whether a suspicious domain can be reported at all.
+                // classification label can carry an alternate threat
+                // reading into the assessment when fusion decides.
                 let strongest = self.strongest_threat_label(input, &settings);
                 let score = strongest.as_ref().map(|(_, probability)| *probability);
                 let verdict = if role == LabelRole::Threat {
@@ -134,7 +134,11 @@ impl DomainClassifier for ChannelBackend {
                     // verifier corroborates like with like and enforcement
                     // applies `block_threshold` to the reported confidence.
                     let (label, probability) = strongest?;
-                    if probability < settings.block_threshold {
+                    let reporting_floor = match settings.fusion {
+                        FusionMode::Decide => settings.confidence_floor,
+                        FusionMode::Off | FusionMode::Monitor => settings.block_threshold,
+                    };
+                    if probability <= 0.0 || probability < reporting_floor {
                         return None;
                     }
                     let classification = verdict.category.clone();
@@ -185,7 +189,14 @@ impl ChannelBackend {
         self.inner
             .label_scores(input)
             .into_iter()
-            .filter(|(label, _)| labels.iter().any(|t| t.eq_ignore_ascii_case(label)))
+            .filter(|(label, _)| {
+                // `threat_labels()` already includes every built-in family the
+                // operator has not removed, so this scans all of them and not
+                // just the ones an older list happened to name. The learned
+                // negative is still never a threat label.
+                !label.eq_ignore_ascii_case(BENIGN_LABEL)
+                    && labels.iter().any(|t| t.eq_ignore_ascii_case(label))
+            })
             .reduce(|best, candidate| {
                 if candidate.1 > best.1 {
                     candidate
@@ -487,6 +498,37 @@ mod tests {
             settings_with(&[]),
         );
         assert!(backend.classify(&input()).is_none());
+    }
+
+    #[test]
+    fn decide_reports_an_alternate_threat_below_the_block_threshold() {
+        let settings = settings_with(&[]);
+        settings.store(Arc::new(AiSettings {
+            fusion: FusionMode::Decide,
+            confidence_floor: 0.2,
+            block_threshold: 0.99,
+            ..AiSettings::default()
+        }));
+        let scores = vec![
+            ("news".to_string(), 0.55),
+            ("phishing".to_string(), 0.40),
+            ("shopping".to_string(), 0.05),
+        ];
+        let threat = ChannelBackend::threat(
+            Box::new(Scored(scores.clone(), "news", 0.55)),
+            settings.clone(),
+        );
+        let content = ChannelBackend::content(Box::new(Scored(scores, "news", 0.55)));
+        assert_eq!(content.classify(&input()).unwrap().category, "news");
+        let verdict = threat.classify(&input()).unwrap();
+        assert_eq!(verdict.category, "phishing");
+        assert_eq!(verdict.threat_score, Some(0.40));
+        assert!(verdict.confidence < settings.load().block_threshold);
+
+        let mut suppressed = (*settings.load_full()).clone();
+        suppressed.auto_block_removals = vec!["phishing".to_string()];
+        settings.store(Arc::new(suppressed));
+        assert!(threat.classify(&input()).is_none());
     }
 
     #[test]

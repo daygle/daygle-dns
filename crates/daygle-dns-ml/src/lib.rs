@@ -58,6 +58,7 @@ pub mod page_model;
 pub mod plugin;
 #[cfg(feature = "verifier-onnx")]
 pub mod reference;
+pub mod replay;
 pub mod scanner;
 pub mod signals;
 pub mod store;
@@ -194,6 +195,10 @@ pub struct PageDiscoveryReport {
     pub reading: page::DiscoveryReading,
     pub inspected_at: i64,
     pub retry_at: i64,
+    /// The page reader, calibration map and fusion mode that produced the
+    /// finding. A review counts only under the scoring version that made the
+    /// finding it reviewed.
+    pub scoring_version: String,
 }
 
 impl PageDiscoveryReport {
@@ -248,6 +253,19 @@ impl AiEngine {
         // never silently ignored, and a damaged learned file never stops the
         // AI from starting.
         let learned_shared = learn::learned_model_path(&database_path);
+        if maintain::recover_rotation(&store, &learned_shared)? {
+            logs.warn(
+                "ai",
+                "restored learned model files after an interrupted rotation",
+            );
+        }
+        // The scoring version and this pending marker commit together before
+        // the scheduled model-file rotation. If the process stopped in that
+        // window, startup restores the version's artifact before choosing
+        // either model channel, rebuilds its assessments and finishes the trial
+        // watch/history before clearing the marker.
+        let recovered_scheduled_activation =
+            recover_scheduled_activation(&store, &learned_shared, &logs)?;
         let learned_reference = database_path.with_file_name(LEARNED_REFERENCE_FILE);
         let pick = |learned: &Path, configured: &str, what: &str| -> bool {
             if !prefer_learned(learned, configured) {
@@ -274,7 +292,8 @@ impl AiEngine {
             );
             true
         };
-        let shared_learned = pick(&learned_shared, &settings.model_path, "classifier");
+        let shared_learned = recovered_scheduled_activation.is_some()
+            || pick(&learned_shared, &settings.model_path, "classifier");
         let shared_path = if shared_learned {
             learned_shared.to_string_lossy().into_owned()
         } else {
@@ -426,19 +445,164 @@ impl AiEngine {
         if let Ok(Some(map)) = store.active_calibration() {
             scanner.set_calibration(Some(map));
         }
-        if let Ok(Some(active)) = store.active_candidate() {
-            scanner.set_signal_weights(active.signal_weights.clone());
-        }
         // A map recorded for a model that is no longer live - a retrain or a
         // restore finished while the service was down - must not be applied
         // again: fit and apply it to the model this start loaded, or it stays
         // off.
         let startup_model = shared.model.load_full();
+        let mismatched_candidate = if let Some(active) = store.active_candidate()? {
+            let expected = if active.model_sha256 == "builtin" {
+                "builtin".to_string()
+            } else {
+                format!("sha256:{}", active.model_sha256)
+            };
+            if expected == threshold::model_version(&startup_model) {
+                // A scheduled promotion records its validated threshold in the
+                // candidate version; a manual one publishes it through the
+                // config path. On restart the recorded number is what the gate
+                // must compare again, but only while the persisted threshold
+                // is still the one the version replaced: an operator who has
+                // since set a newer threshold keeps it.
+                let current = settings_swap.load_full();
+                let replaced = active
+                    .scoring_config
+                    .get("replaces_threshold")
+                    .and_then(serde_json::Value::as_f64)
+                    .map(|value| value as f32);
+                let stale = (current.block_threshold - active.block_threshold).abs() > f32::EPSILON
+                    && replaced.is_some_and(|prior| {
+                        (current.block_threshold - prior).abs() <= f32::EPSILON
+                    });
+                if stale {
+                    let mut live = (*current).clone();
+                    live.block_threshold = active.block_threshold;
+                    settings_swap.store(Arc::new(live));
+                }
+                scanner.set_signal_weights(active.signal_weights);
+                false
+            } else {
+                logs.warn(
+                    "ai",
+                    format!(
+                        "candidate {} belongs to a different model; using default signal weights",
+                        active.version
+                    ),
+                );
+                true
+            }
+        } else {
+            false
+        };
         retire_calibration_for_changed_model(&store, &scanner, settings, &startup_model, &logs);
+        if mismatched_candidate || recovered_scheduled_activation.is_some() {
+            // A scheduled version is committed before its in-memory scoring
+            // and model installation. Re-score on startup even when artifact
+            // recovery succeeded, so a stop between record commit and rescore
+            // cannot leave stored verdicts tagged with the prior calibration.
+            scanner.rescore_assessments(&settings_swap.load_full())?;
+        }
         // Maintenance installs models too (a retrain, a scheduled promotion, a
         // restore), and the scanner is the only holder of the map in force, so
         // the engine hands the retrainer the step that retires a stale one.
         let installed_scanner = scanner.clone();
+        shared.retrainer.set_shadow_scoring(Box::new({
+            let store = store.clone();
+            let logs = logs.clone();
+            let reference = learned_reference.clone();
+            let network = network.clone();
+            let intel = intel.clone();
+            let scanner = scanner.clone();
+            move |path, settings, started, ends| {
+                let model_path = path.to_string_lossy();
+                let model = threshold::model_version(&model_path);
+                if model.starts_with("unreadable:") {
+                    return Err(DaygleError::Config(
+                        "shadow model artifact is unreadable".to_string(),
+                    ));
+                }
+                let mut seen = std::collections::HashSet::new();
+                let mut reviewed = Vec::new();
+                for correction in store.corrections()? {
+                    if !(started..ends).contains(&correction.created_at) {
+                        continue;
+                    }
+                    let domain = correction
+                        .domain
+                        .trim()
+                        .trim_matches('.')
+                        .to_ascii_lowercase();
+                    if !seen.insert(domain.clone()) {
+                        continue;
+                    }
+                    let threat = match correction.action.as_str() {
+                        "category" if settings.is_auto_block_category(&correction.category) => true,
+                        "not_threat" => false,
+                        _ => continue,
+                    };
+                    reviewed.push((domain, threat));
+                    if reviewed.len() == 512 {
+                        break;
+                    }
+                }
+                if reviewed.len() < calibration::MIN_FIT_SAMPLES + calibration::MIN_EVAL_SAMPLES {
+                    return Ok(serde_json::json!({
+                        "scope": "hostname_and_network",
+                        "passed": false,
+                        "reason": "insufficient explicit reviews during the shadow trial",
+                        "reviews": reviewed.len(),
+                    }));
+                }
+                let frozen = Arc::new(ArcSwap::from_pointee(settings.clone()));
+                let backend =
+                    threat_channel(&model_path, settings, &frozen, &logs, &reference, &network)?;
+                let index = intel.index();
+                let weights = scanner.signal_weights();
+                // Replay each reviewed domain through the same assessment,
+                // page/LLM evidence and policy rails the live gate uses. The
+                // active calibration is the one in force; the trial's own map
+                // is fitted below on these replayed scores.
+                let calibration = store.active_calibration()?;
+                let context = replay::ReplayContext::new(
+                    &store,
+                    settings,
+                    calibration.as_ref(),
+                    weights.clone(),
+                )?;
+                let mut policy_blocked = 0usize;
+                let mut escalation_blocked = 0usize;
+                let samples = reviewed
+                    .into_iter()
+                    .map(|(domain, threat)| {
+                        let outcome =
+                            replay::replay_with(&context, backend.as_ref(), &domain, &index, ends);
+                        if outcome.policy_blocked.is_some() {
+                            policy_blocked += 1;
+                            if outcome.threat {
+                                escalation_blocked += 1;
+                            }
+                        }
+                        threshold::Sample {
+                            registrable: assessment::registrable(&domain),
+                            domain,
+                            score: outcome.score,
+                            group: threshold::Group::Correction,
+                            label: threshold::LabelSource::OperatorCorrection,
+                            threat: Some(threat),
+                            scored_at: ends,
+                            policy_blocked: outcome.policy_blocked,
+                        }
+                    })
+                    .collect();
+                let mut report = threshold::tune_replayed_scores(samples, &model, settings, ends);
+                report["scope"] = serde_json::json!("hostname_page_llm_network_and_policy");
+                report["policy_rails"] = context.rails();
+                report["policy_blocked"] = serde_json::json!(policy_blocked);
+                report["escalation_blocked"] = serde_json::json!(escalation_blocked);
+                report["signal_weights"] =
+                    serde_json::to_value(&weights).unwrap_or(serde_json::Value::Null);
+                Ok(report)
+            }
+        }));
         shared.retrainer.set_installed(Box::new({
             let store = store.clone();
             let settings = settings_swap.clone();
@@ -463,7 +627,7 @@ impl AiEngine {
             scanner.exemptions(),
             settings_swap.clone(),
         );
-        Ok(Arc::new(Self {
+        let engine = Arc::new(Self {
             store,
             scanner,
             settings: settings_swap,
@@ -479,7 +643,36 @@ impl AiEngine {
             domain_age,
             llm: llm::LlmManager::new(),
             install_model,
-        }))
+        });
+        // A scheduled promotion records what it validated through the same
+        // candidate ledger a manual promotion uses. The hook is installed
+        // once, after the engine exists, so the retrainer can call back into
+        // the activation service without owning the configuration.
+        engine.shared.retrainer.set_activation(Box::new({
+            let engine = engine.clone();
+            move |artifact, live, activation| {
+                let (promoted, undo) =
+                    engine.record_scheduled_activation(artifact, live, activation)?;
+                let engine_for_undo = engine.clone();
+                let engine_for_complete = engine.clone();
+                Ok(crate::maintain::ActivationUndo::new(
+                    move || engine_for_undo.undo_scheduled_activation(undo),
+                    move || {
+                        engine_for_complete
+                            .shared
+                            .retrainer
+                            .complete_recovered_activation(&promoted)
+                    },
+                ))
+            }
+        }));
+        if let Some(candidate) = recovered_scheduled_activation {
+            engine
+                .shared
+                .retrainer
+                .complete_recovered_activation(&candidate)?;
+        }
+        Ok(engine)
     }
 
     /// Keep the threat feeds downloaded and fresh until `shutdown`. `mirror`
@@ -588,11 +781,19 @@ impl AiEngine {
         self.maintenance.run()
     }
 
+    /// Reserve the scoring lifecycle across a manual operation, including
+    /// publication to the configuration store when the caller owns it.
+    pub async fn lock_scoring_change(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.maintenance.lock_scoring_change().await
+    }
+
     /// Run a threshold trial over the stored verdicts and the operator's
     /// corrections, and record it. It changes nothing: the candidate is
     /// applied only when the operator says so.
     pub fn run_threshold_trial(&self) -> Result<store::ThresholdTrial> {
         let settings = self.settings.load_full();
+        let model = threshold::model_version(&self.live_model_path());
+        let scoring = self.threshold_scoring_context(&settings);
         let index = self.intel.index();
         let samples = threshold::collect(&self.store, &index, &settings, THRESHOLD_SAMPLES)?;
         let report = threshold::run(
@@ -600,15 +801,37 @@ impl AiEngine {
             settings.threshold_fpr_target,
             settings.block_threshold,
         );
+        if model != threshold::model_version(&self.live_model_path())
+            || scoring != self.threshold_scoring_context(&self.settings.load_full())
+        {
+            return Err(DaygleError::Config(
+                "scoring changed during the threshold trial; run it again".to_string(),
+            ));
+        }
+        let mut report_json = serde_json::to_value(&report).map_err(|error| {
+            DaygleError::Internal(format!("could not serialize threshold trial: {error}"))
+        })?;
+        report_json["scoring"] = scoring;
         let record = store::NewThresholdTrial {
-            model: threshold::model_version(&self.live_model_path()),
+            model,
             base_threshold: settings.block_threshold,
             candidate: report.candidate.unwrap_or(settings.block_threshold),
             fpr_target: settings.threshold_fpr_target,
             passed: report.passed,
-            report: serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string()),
+            report: report_json.to_string(),
         };
         self.store.save_threshold_trial(&record)
+    }
+
+    /// The scoring inputs a threshold trial measures, apart from the model
+    /// artifact identity recorded in its own column.
+    pub fn threshold_scoring_context(&self, settings: &AiSettings) -> serde_json::Value {
+        serde_json::json!({
+            "fusion": settings.fusion,
+            "calibration": self.scanner.calibration_map().map(|map| map.version),
+            "weights": self.scanner.signal_weights(),
+            "threat_labels": settings.threat_labels(),
+        })
     }
 
     /// Put the previous model back in front of the scanner, live. Reversible:
@@ -1032,6 +1255,11 @@ impl AiEngine {
             }
         }
         let source_model = threshold::model_version(&self.live_model_path());
+        if source_model.starts_with("unreadable:") {
+            return Err(DaygleError::Config(format!(
+                "cannot fit calibration without a readable model artifact ({source_model})"
+            )));
+        }
         let Some(mut map) =
             calibration::fit(&tuning, &source_model, chrono::Utc::now().timestamp())
         else {
@@ -1080,7 +1308,7 @@ impl AiEngine {
         // the fit replaces that distribution, so the held-out report no longer
         // describes the scores the map would be applied to.
         let live = threshold::model_version(&self.live_model_path());
-        if record.map.source_model != live {
+        if record.map.source_model != live || live.starts_with("unreadable:") {
             return Err(DaygleError::Config(format!(
                 "that calibration map was fitted for {}, but the live model is {live}: fit it again",
                 record.map.source_model
@@ -1166,19 +1394,29 @@ impl AiEngine {
     /// version. Nothing is promoted.
     pub fn snapshot_candidate(&self) -> Result<store::CandidateVersion> {
         let settings = self.settings.load_full();
+        let model_path = self.live_model_path();
+        let model = threshold::model_version(&model_path);
+        let scoring = self.threshold_scoring_context(&settings);
         let calibration = self.store.active_calibration()?;
         let validation = self
             .store
-            .threshold_trials(1)?
-            .into_iter()
-            .next()
+            .applied_threshold_trial()?
+            .filter(|trial| {
+                trial.passed
+                    && trial.model == model
+                    && trial.applied_model == model
+                    && !model.starts_with("unreadable:")
+                    && trial.candidate == settings.block_threshold
+                    && trial.fpr_target <= settings.threshold_fpr_target
+                    && trial.report.get("scoring") == Some(&scoring)
+            })
             .map(|trial| trial.report)
             .unwrap_or(serde_json::Value::Null);
         let metrics = calibration.as_ref().and_then(|m| m.metrics.clone());
         candidate::build(
             &self.store,
             &candidate::CandidateSpec {
-                model_path: self.live_model_path(),
+                model_path,
                 block_threshold: settings.block_threshold,
                 calibration,
                 signal_weights: self.scanner.signal_weights(),
@@ -1198,6 +1436,172 @@ impl AiEngine {
                 metrics,
             },
         )
+    }
+
+    /// Put a passed trial's validated scoring in force as one candidate
+    /// version before its model is installed. The artifact is read from
+    /// `artifact` but the version belongs at `live`, so a failed record write
+    /// happens while the incumbent is still the live model. On success the
+    /// calibration map, threshold, signal weights and validation report are
+    /// active together; the caller installs the model next and can hand the
+    /// returned undo back to [`Self::undo_scheduled_activation`] if that
+    /// install fails. A restart reads the same active version, so a scheduled
+    /// promotion is as recoverable as a manual one.
+    pub fn record_scheduled_activation(
+        &self,
+        artifact: &Path,
+        live: &Path,
+        activation: &maintain::TrialActivation,
+    ) -> Result<(store::CandidateVersion, ScheduledActivationUndo)> {
+        let settings = self.settings.load_full();
+        // What the persisted configuration still says, so a restart can tell
+        // this promotion from a newer operator threshold. A second scheduled
+        // promotion keeps the root of the chain unless the operator changed
+        // the threshold in between.
+        let replaces_threshold = match self.store.active_candidate()? {
+            Some(prior)
+                if prior.scoring_config.get("replaces_threshold").is_some()
+                    && (settings.block_threshold - prior.block_threshold).abs() <= f32::EPSILON =>
+            {
+                prior
+                    .scoring_config
+                    .get("replaces_threshold")
+                    .and_then(serde_json::Value::as_f64)
+                    .map(|value| value as f32)
+                    .unwrap_or(settings.block_threshold)
+            }
+            _ => settings.block_threshold,
+        };
+        let live_model = live.to_string_lossy().into_owned();
+        // The scoring the version being recorded replaces. The model itself is
+        // not installed until after this record is written, so an undo of a
+        // failed install only has to put the ledger and scoring back.
+        let previous_calibration = self.store.active_calibration()?;
+        let previous_weights = self.scanner.signal_weights();
+        let previous_threshold = settings.block_threshold;
+        let spec = candidate::CandidateSpec {
+            model_path: live_model,
+            block_threshold: activation.threshold,
+            calibration: activation.calibration.clone(),
+            signal_weights: activation.signal_weights.clone(),
+            scoring_config: serde_json::json!({
+                "block_threshold": activation.threshold,
+                "replaces_threshold": replaces_threshold,
+                "fusion": settings.fusion,
+                "threshold_fpr_target": settings.threshold_fpr_target,
+                "confidence_floor": settings.confidence_floor,
+                "authority": settings.authority,
+                "auto_block_categories": settings.auto_block_categories,
+                "auto_block_removals": settings.auto_block_removals,
+                "threat_labels": settings.threat_labels(),
+            }),
+            validation_report: activation.report.clone(),
+            metrics: activation
+                .calibration
+                .as_ref()
+                .and_then(|map| map.metrics.clone()),
+        };
+        let candidate = candidate::build_from(&self.store, &spec, artifact)?;
+        let promoted = self.store.promote_scheduled_candidate(candidate.id)?;
+        let undo = ScheduledActivationUndo {
+            promoted: promoted.clone(),
+            previous_calibration,
+            previous_weights,
+            previous_threshold,
+        };
+        self.scanner.set_calibration(promoted.calibration.clone());
+        self.scanner
+            .set_signal_weights(promoted.signal_weights.clone());
+        let mut live = (*settings).clone();
+        live.block_threshold = promoted.block_threshold;
+        self.settings.store(Arc::new(live));
+        match self.rescore_stored_verdicts("a scheduled promotion") {
+            Ok(_) => {
+                self.refresh_snapshot_now();
+                self.trigger_rescan();
+                Ok((promoted, undo))
+            }
+            Err(e) => {
+                let failures = self.undo_scheduled_activation(undo);
+                Err(failed_change(
+                    "could not apply the new version's scores to the stored verdicts",
+                    e,
+                    &failures,
+                ))
+            }
+        }
+    }
+
+    /// Take a passed trial's scoring back out of force after the model it was
+    /// recorded for could not be installed, restoring the version, calibration,
+    /// weights, threshold and stored scores that were in force before it.
+    /// Returns what could not be restored. A later promotion or rollback wins
+    /// over this undo, the same way [`Self::abandon_promotion`] does.
+    pub fn undo_scheduled_activation(&self, undo: ScheduledActivationUndo) -> Vec<String> {
+        match self.store.active_candidate() {
+            Ok(Some(active)) if active.id == undo.promoted.id => {}
+            Ok(_) => return Vec::new(),
+            Err(e) => {
+                return vec![format!(
+                    "could not read the version in force before undoing the activation: {e}"
+                )]
+            }
+        }
+        let mut failures = Vec::new();
+        match self.store.rollback_active_candidate() {
+            Ok(Some(restored)) => {
+                self.scanner
+                    .set_signal_weights(restored.signal_weights.clone());
+                match self.store.active_calibration() {
+                    Ok(map) => self.scanner.set_calibration(map),
+                    Err(e) => {
+                        failures.push(format!("could not read the calibration map in force: {e}"))
+                    }
+                }
+            }
+            // A first activation supersedes no stored version: take it out of
+            // force and put back the calibration and weights it replaced.
+            Ok(None) => {
+                if let Err(e) = self.store.retire_active_candidate(undo.promoted.id) {
+                    failures.push(format!(
+                        "could not take candidate {} out of force: {e}",
+                        undo.promoted.version
+                    ));
+                }
+                if let Err(e) = self.store.activate_calibration(
+                    undo.previous_calibration
+                        .as_ref()
+                        .map(|m| m.version.as_str()),
+                ) {
+                    failures.push(format!("could not put the calibration map back: {e}"));
+                }
+                self.scanner
+                    .set_calibration(undo.previous_calibration.clone());
+                self.scanner
+                    .set_signal_weights(undo.previous_weights.clone());
+            }
+            Err(e) => failures.push(format!("could not restore the previous version: {e}")),
+        }
+        let mut live = (*self.settings.load_full()).clone();
+        live.block_threshold = undo.previous_threshold;
+        self.settings.store(Arc::new(live));
+        // The activation re-scored the verdicts under its own calibration, so
+        // the version that comes back has to own them again.
+        if let Err(e) = self.rescore_stored_verdicts("a scheduled activation was undone") {
+            failures.push(format!(
+                "could not put the stored verdicts back under the scoring that was in force: {e}"
+            ));
+        }
+        if let Err(e) = self.store.finish_scheduled_activation(undo.promoted.id) {
+            failures.push(format!(
+                "could not clear the pending activation marker: {e}"
+            ));
+        }
+        if failures.is_empty() {
+            self.refresh_snapshot_now();
+            self.trigger_rescan();
+        }
+        failures
     }
 
     /// Every recorded candidate version, newest first.
@@ -1592,23 +1996,57 @@ impl AiEngine {
     /// stage in force.
     pub fn authority_status(&self) -> Result<serde_json::Value> {
         let settings = self.settings.load_full();
-        let decisions = authority::evaluate(&self.store, &settings.authority)?;
+        let calibration_version = self
+            .scanner
+            .calibration_map()
+            .map(|map| map.version)
+            .unwrap_or_default();
+        let decisions = authority::evaluate_for_scoring(
+            &self.store,
+            &settings.authority,
+            &calibration_version,
+            settings.fusion.as_str(),
+        )?;
+        let now = chrono::Utc::now().timestamp();
+        let reviews = self.store.authority_reviews(now)?;
+        let reviewed_sources = [authority::Source::Feed, authority::Source::Model]
+            .iter()
+            .map(|source| {
+                let (_, findings, corrected, confirmed) = reviews
+                    .iter()
+                    .find(|(name, ..)| name == source.as_str())
+                    .cloned()
+                    .unwrap_or_default();
+                serde_json::json!({
+                    "source": source.as_str(),
+                    "unreviewed": findings - corrected - confirmed,
+                    "corrected": corrected,
+                    "confirmed": confirmed,
+                })
+            })
+            .collect::<Vec<_>>();
+        let scoring_version = self.scanner.scoring_version();
         let page_discovery_review = if settings.monitor_page_discovery {
-            let (findings, corrected, confirmed) = self
-                .store
-                .page_discovery_reviews(chrono::Utc::now().timestamp())?;
+            // The status reports every finding and the review that attaches
+            // to it; each row carries the scoring version that made it. Only
+            // advancement restricts credit to the version in force.
+            let (findings, corrected, confirmed) = self.store.page_discovery_reviews(now, None)?;
             let reviewed = corrected + confirmed;
             Some(serde_json::json!({
+                "scoring_version": scoring_version,
+                "findings": findings,
                 "unreviewed": findings.saturating_sub(reviewed),
                 "corrected": corrected,
                 "confirmed": confirmed,
                 "reviewed_correction_share": (reviewed > 0).then(|| corrected as f64 / reviewed as f64),
+                "reviews": self.store.page_discovery_review_rows(now, None)?,
             }))
         } else {
             None
         };
         Ok(serde_json::json!({
             "enabled": settings.authority.enabled,
+            "reviewed_sources": reviewed_sources,
             "page_discovery_review": page_discovery_review,
             "settings": {
                 "feed_stage": settings.authority.feed_stage.as_str(),
@@ -1618,6 +2056,9 @@ impl AiEngine {
                 "safety_limit": crate::scanner::MAX_NEW_BLOCKS_PER_REFRESH,
                 "demote_fp_rate": settings.authority.demote_fp_rate,
                 "demote_min_samples": settings.authority.demote_min_samples,
+                "advancement": settings.authority.advancement,
+                "advance_min_reviews": settings.authority.advance_min_reviews,
+                "advance_fp_rate": settings.authority.advance_fp_rate,
             },
             "sources": decisions
                 .iter()
@@ -1788,6 +2229,18 @@ pub struct PromotionUndo {
     live_model: String,
 }
 
+/// What undoing a scheduled activation needs: the version it recorded and the
+/// scoring it replaced. The model was not installed before the version was
+/// written, so the artifact and the loaded model need no restore; the retrainer
+/// owns the threshold, so it is put back here rather than by a caller that
+/// publishes configuration.
+pub struct ScheduledActivationUndo {
+    promoted: store::CandidateVersion,
+    previous_calibration: Option<calibration::CalibrationMap>,
+    previous_weights: fusion::SignalWeights,
+    previous_threshold: f32,
+}
+
 fn failed_change(
     what: &str,
     cause: impl std::fmt::Display,
@@ -1820,7 +2273,7 @@ fn retire_calibration_for_changed_model(
     let Ok(Some(map)) = store.active_calibration() else {
         return;
     };
-    if map.source_model == live {
+    if map.source_model == live && !live.starts_with("unreadable:") {
         return;
     }
     let mut failures = Vec::new();
@@ -1892,6 +2345,87 @@ fn note_live_model(store: &AiStore, path: &str, logs: &LogStore) {
 
 /// Whether a learned model should be preferred over the configured one: it
 /// exists and is at least as new (or nothing is configured).
+/// Complete the file half of a scheduled activation if its scoring record
+/// committed but the learned model rotation did not. The active record stores
+/// the model bytes in `ai_model_artifacts`; restoring them here makes startup
+/// load the exact model whose calibration, weights and threshold are active.
+///
+/// Return the pending version after verifying/restoring its artifact, so
+/// startup gives it precedence over an older configured model, rebuilds stored
+/// scores and completes its watch/history before clearing the marker.
+fn recover_scheduled_activation(
+    store: &AiStore,
+    learned: &Path,
+    logs: &LogStore,
+) -> Result<Option<store::CandidateVersion>> {
+    let Some(active) = store.pending_scheduled_activation()? else {
+        return Ok(None);
+    };
+    if Path::new(&active.model_path) != learned {
+        return Err(DaygleError::Database(format!(
+            "pending scheduled activation {} points at unexpected model path {}",
+            active.version, active.model_path
+        )));
+    }
+    let expected = if active.model_sha256 == "builtin" {
+        "builtin".to_string()
+    } else {
+        format!("sha256:{}", active.model_sha256)
+    };
+    let already_installed = threshold::model_version(&learned.to_string_lossy()) == expected;
+    if !already_installed {
+        // Rotation recovery restores the incumbent files first. Preserve that
+        // learned model as the watch rollback target before writing the active
+        // candidate over it; otherwise a crash during file promotion followed
+        // by a restart would complete the new version but lose its predecessor.
+        if learned.is_file() {
+            let previous = learn::previous_model_path(learned);
+            candidate::write_artifact(&previous, &std::fs::read(learned)?)?;
+            let current_stats = learn::stats_path(learned);
+            let previous_stats = learn::previous_stats_path(learned);
+            if current_stats.is_file() {
+                candidate::write_artifact(&previous_stats, &std::fs::read(&current_stats)?)?;
+                std::fs::remove_file(current_stats)?;
+            } else if let Err(error) = std::fs::remove_file(previous_stats) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    return Err(error.into());
+                }
+            }
+        }
+        candidate::restore_artifact(store, &active)?;
+    }
+    let actual = threshold::model_version(&learned.to_string_lossy());
+    if actual != expected {
+        return Err(DaygleError::Config(format!(
+            "could not recover the model for scheduled activation {}: expected {expected}, found {actual}",
+            active.version
+        )));
+    }
+    if already_installed {
+        logs.push(
+            daygle_dns_core::LogLevel::Info,
+            "ai",
+            format!(
+                "completed scheduled activation {} after confirming its model artifact",
+                active.version
+            ),
+        );
+    } else {
+        logs.warn(
+            "ai",
+            format!(
+                "completed scheduled activation {} after restoring its interrupted model install",
+                active.version
+            ),
+        );
+    }
+    // Always select the learned path for this active scheduled version. This
+    // also covers a restart after the file move but before the in-memory model
+    // channels were switched, even if the older configured model has a newer
+    // timestamp than the candidate artifact.
+    Ok(Some(active))
+}
+
 fn prefer_learned(learned: &Path, configured: &str) -> bool {
     if !learned.is_file() {
         return false;

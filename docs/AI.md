@@ -89,12 +89,12 @@ The tab keeps the three outputs of a detection apart:
 - **Decision** - `block`, `override` (your exemption, your *not a threat*
   mark or a removal wins), `monitor` (reported, not blocked) or `allow`.
 
-A domain the model *classified* as `news` can still be a reported threat: if
-its score for a threat label reaches `ai.block_threshold`, the row appears in
-the threats list with that threat label as its category, that score as its
-confidence, and the model's classification shown beside it. Below the
-threshold the classification is left alone. Either way the row's *Why* line
-says what the model read, what it scored and what evidence confirmed or
+A domain classified as `news` can still have a threat assessment. In Signal
+Fusion Decide mode, an alternate threat reading at the scanner confidence
+floor reaches the verifier and evidence assessment. Off and Monitor still
+require the alternate reading to reach `ai.block_threshold` before reporting
+it as a threat. The content classification stays on its own channel. The
+threat row shows the assessed family and explains what evidence confirmed or
 disputed it.
 
 Enforcement is unchanged: `ai.block_threshold`, the verifier, disputes,
@@ -252,13 +252,13 @@ correction says so), the operator's corrections, and unseen domains.
 
 A trial is a record, not a change. It stores the threshold it started from,
 the candidate, the false-positive target, the outcome, the per-group rows and
-the model version it measured (`path@stamp:bytes`, or `builtin`) in one row,
+the model version it measured (`sha256:<artifact digest>`, or `builtin`) in one row,
 because a threshold means nothing apart from the model that produced the
 scores. `POST /api/ai/threshold/apply` puts a trial's candidate in force, and
-refuses a trial that did not keep the target on the held-out half. Applying
-also records the model that was live at that moment beside the threshold it
-replaced, since a retrain can promote a different model between the trial and
-its application. `POST /api/ai/threshold/rollback` puts back the threshold
+refuses a trial that missed the target on the held-out half or was measured
+against a different model. Applying records the model beside the threshold it
+replaced. Run a fresh trial to apply a threshold from a file-backed trial
+recorded before artifact digests were introduced. `POST /api/ai/threshold/rollback` puts back the threshold
 that trial replaced; that moves the threshold alone, so a model promoted
 since stays live, and the response names the model the trial was applied
 under so the two can be reverted together by hand if that is what is wanted.
@@ -300,18 +300,46 @@ fused score under `decide`, the confidence otherwise). The gate, the threshold
 trial, the console's explanation and the exported threat list all read that one
 number.
 
+Calibration follows the artifact bytes across a restore or restart. On
+upgrade, an active map identified only by an older file path and timestamp is
+retired at startup. Fit and apply a new map for the live model. Scheduled
+classifier promotion does not fit a new calibration map or publish a new
+validated threshold.
+Scheduled shadow trials also record a hostname-and-network replay report
+under the last training result when the candidate passes the existing
+shadow checks. It uses explicit reviews filed during the trial and fits a
+candidate calibration and threshold when enough independent labels exist.
+The report is diagnostic. Later page and LLM changes are outside this replay,
+and it does not publish a calibration map or threshold.
+
 **Versioned candidates** (`/api/ai/candidates`) hold the whole scoring system
 as one version - the model artifact bytes and hash, the threshold, the
 calibration map, the signal weights, the scoring configuration and the
 validation report. Promoting one activates all of it; one rollback restores
 the complete previous version, artifact included, not just a model name.
+The current operator threat labels, authority settings and false-positive
+target carry forward when a candidate is promoted or rolled back.
+New threshold trials record the fusion mode, calibration map, signal weights
+and effective threat labels they measured. Applying one requires that context
+to match the running engine. A candidate snapshot attaches a threshold report
+only when the passing trial is in force for the same model, scoring context
+and threshold, and meets the current false-positive target.
+On restart, the scanner restores candidate-specific signal weights only
+when the candidate's artifact digest matches the loaded classifier.
+Scheduled maintenance defers while an operator operation holds the scoring
+lifecycle lock. This includes threshold trials, calibration changes,
+candidate publication and rollback, and console AI settings changes.
+Learned-model rotation journals the current and previous classifier files
+and their records before changing them. If the process stops before the
+rotation commits, startup restores those files before selecting a model.
 
 **Graduated authority** (`ai.authority`, off by default) decides which
 evidence may block: feed-confirmed findings can be enforced while model-only
 findings are only proposed, or the reverse. Findings at `monitor`/`propose`
 are recorded and listed but never reach the block snapshot, and a source whose
 measured false-positive share passes `demote_fp_rate` is demoted to `monitor`
-automatically. Operator labels and overrides are never filtered or demoted by
+automatically. The configured stage is the ceiling for each source. Moving
+that ceiling to Enforce requires an operator change. Operator labels and overrides are never filtered or demoted by
 it. The per-refresh limit on new blocks can be tightened here, never raised
 above its 500-domain ceiling. Turn it on under AI -> Settings (Scoring) ->
 Enforcement Authority, or with `ai.authority` in the config file.
@@ -419,7 +447,9 @@ Set `ai.monitor_page_discovery = true` to inspect uncertain threat results for
 review when `ai.fetch_pages` is on. Discovery uses up to four workers and the
 time remaining after the existing page stages. It records outcomes under
 `page_discovery` in `GET /api/ai/signals?domain=…` for a day after a readable
-response, or an hour after a failed fetch. A missing threat reading is unknown.
+response, or an hour after a failed fetch. The scanner considers a skipped
+verdict or one whose raw confidence or current assessment is below the
+confidence floor. A missing threat reading is unknown.
 Discovery recognises suspicious password forms, brand sign-in impersonation,
 and payment, identity, or verification-code forms paired with coercive
 verification demands. It records cross-site hops and HTTPS downgrades and
@@ -445,7 +475,8 @@ The next regular block snapshot refresh considers new findings.
 `page_discovery_active` shows whether an exact-host finding was published.
 `GET /api/ai/authority` reports confirmations, corrections, and unreviewed
 findings for the current cache. Its correction share covers only explicit
-reviews. A missing share means there are no reviewed findings.
+reviews. A policy allow exemption alone leaves the finding unreviewed.
+A missing share means there are no reviewed findings.
 Evidence-only page mode, overrides, popularity and established-domain
 disputes, automated finding authority, and the per-refresh cap still apply.
 Page-only entries stay out of the category snapshot and threat export, where

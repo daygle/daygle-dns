@@ -24,14 +24,81 @@
 //! operator applies it (see [`crate::store::ThresholdTrial`]).
 
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use daygle_dns_core::config::AiSettings;
 use daygle_dns_core::error::Result;
 
 use crate::intel::IntelIndex;
 use crate::store::AiStore;
+
+/// Fit a candidate's map on its tuning names, compare it with identity on
+/// held-out names, then select and validate its calibrated threshold.
+/// A zero score means replay found no enforceable verdict for that name.
+pub(crate) fn tune_replayed_scores(
+    mut samples: Vec<Sample>,
+    model: &str,
+    settings: &AiSettings,
+    now: i64,
+) -> serde_json::Value {
+    use crate::calibration::{self, CalibrationMap, Labelled};
+
+    let (holdout, tuning): (Vec<_>, Vec<_>) = samples
+        .iter()
+        .filter(|sample| sample.score > 0.0)
+        .filter_map(|sample| {
+            Some((
+                held_out(&sample.domain),
+                Labelled {
+                    score: sample.score,
+                    threat: sample.threat?,
+                },
+            ))
+        })
+        .partition(|(held, _)| *held);
+    let tuning: Vec<_> = tuning.into_iter().map(|(_, sample)| sample).collect();
+    let holdout: Vec<_> = holdout.into_iter().map(|(_, sample)| sample).collect();
+    let Some(mut map) = calibration::fit(&tuning, model, now) else {
+        return serde_json::json!({
+            "passed": false,
+            "reason": "insufficient labelled candidate verdicts to fit a calibration map",
+            "tuning_samples": tuning.len(),
+            "holdout_samples": holdout.len(),
+        });
+    };
+    let baseline = calibration::evaluate(&holdout, &CalibrationMap::identity(model, now));
+    let metrics = calibration::evaluate(&holdout, &map);
+    let acceptance = calibration::accept(&metrics, Some(&baseline));
+    map.metrics = Some(metrics);
+    if !acceptance.accepted
+        || !holdout.iter().any(|sample| sample.threat)
+        || !holdout.iter().any(|sample| !sample.threat)
+    {
+        return serde_json::json!({
+            "passed": false,
+            "reason": if acceptance.accepted { "held-out candidate verdicts need both classes" } else { &acceptance.reason },
+            "calibration": map,
+        });
+    }
+    for sample in &mut samples {
+        if sample.score > 0.0 {
+            sample.score = map.apply(sample.score);
+        }
+    }
+    let report = run(
+        &samples,
+        settings.threshold_fpr_target,
+        settings.block_threshold,
+    );
+    serde_json::json!({
+        "passed": report.passed && report.holdout.caught > 0,
+        "calibration": map,
+        "threshold": report,
+    })
+}
 
 /// The lowest threshold a trial may choose: below this the model's own score
 /// stops meaning threat.
@@ -175,11 +242,23 @@ pub struct Sample {
     pub threat: Option<bool>,
     /// When the verdict was classified, for the time-based evaluation.
     pub scored_at: i64,
+    /// The live policy rail that would stop this finding from blocking even
+    /// when its score clears the threshold: an operator exemption, a
+    /// category override, a dispute, or an authority stage below enforce.
+    /// The replay records the rail so a trial measures the decision the gate
+    /// would make, not just the number it would compare.
+    pub policy_blocked: Option<String>,
 }
 
 impl Sample {
     pub fn benign(&self) -> Option<bool> {
         self.threat.map(|threat| !threat)
+    }
+
+    /// Whether the gate would block this name at `threshold`: the score has
+    /// to clear the threshold *and* no policy rail may deny it.
+    fn blocks_at(&self, threshold: f32) -> bool {
+        self.policy_blocked.is_none() && self.score >= threshold
     }
 }
 
@@ -412,7 +491,7 @@ fn choose(tuning: &[&Sample], fpr_target: f32) -> Option<f32> {
         let threshold = MIN_THRESHOLD + step as f32 * GRID_STEP;
         let false_positives = tuning
             .iter()
-            .filter(|s| s.benign() == Some(true) && s.score >= threshold)
+            .filter(|s| s.benign() == Some(true) && s.blocks_at(threshold))
             .count();
         if false_positives as f32 / benign as f32 <= fpr_target {
             return Some((threshold * 1000.0).round() / 1000.0);
@@ -428,15 +507,16 @@ fn side(samples: &[&Sample], candidate: Option<f32>) -> Side {
     let benign = samples.iter().filter(|s| s.benign() == Some(true)).count();
     let false_positives = samples
         .iter()
-        .filter(|s| s.benign() == Some(true) && s.score >= threshold)
+        .filter(|s| s.benign() == Some(true) && s.blocks_at(threshold))
         .count();
+
     let threats = samples.iter().filter(|s| s.benign() == Some(false)).count();
     let caught = samples
         .iter()
-        .filter(|s| s.benign() == Some(false) && s.score >= threshold)
+        .filter(|s| s.benign() == Some(false) && s.blocks_at(threshold))
         .count();
     let unseen: Vec<&&Sample> = samples.iter().filter(|s| s.benign().is_none()).collect();
-    let unseen_blocked = unseen.iter().filter(|s| s.score >= threshold).count();
+    let unseen_blocked = unseen.iter().filter(|s| s.blocks_at(threshold)).count();
     Side {
         benign,
         false_positives,
@@ -475,7 +555,7 @@ fn group_row(samples: &[Sample], group: Group, candidate: Option<f32>) -> GroupR
         max_score: scores.last().copied(),
         at_candidate: samples
             .iter()
-            .filter(|s| s.group == group && s.score >= threshold)
+            .filter(|s| s.group == group && s.blocks_at(threshold))
             .count(),
     }
 }
@@ -590,36 +670,68 @@ fn collect_rows(
                 label,
                 threat,
                 scored_at,
+                policy_blocked: None,
             }
         })
         .collect())
 }
 
-/// The model's identity for a trial record: `builtin` for the shipped
-/// classifier, else the path with its stamp, so the threshold can always be
-/// read beside the model it was measured with.
+/// The model's identity for calibration and threshold records. Restoring
+/// identical bytes preserves the identity even when the path or stamp changes.
 pub fn model_version(path: &str) -> String {
     let path = path.trim();
     if path.is_empty() {
         return "builtin".to_string();
     }
-    match std::fs::metadata(path) {
-        Ok(meta) => {
-            let stamp = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            format!("{path}@{stamp}:{}", meta.len())
+    artifact_version(path).unwrap_or_else(|_| format!("unreadable:{path}"))
+}
+
+fn artifact_version(path: &str) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0; 16 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            return Ok(format!(
+                "sha256:{}",
+                crate::candidate::hex(&hash.finalize())
+            ));
         }
-        Err(_) => path.to_string(),
+        hash.update(&buffer[..count]);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_tunes_calibration_and_threshold_on_separate_splits() {
+        let samples = (0..400)
+            .map(|i| {
+                let threat = i % 2 == 0;
+                sample(
+                    &format!("shadow-review-{i}.example"),
+                    if threat { 0.8 } else { 0.3 },
+                    Group::Correction,
+                    Some(threat),
+                )
+            })
+            .collect();
+        let report = tune_replayed_scores(samples, "sha256:shadow", &AiSettings::default(), 1);
+        assert_eq!(report["passed"], true, "{report}");
+        assert_eq!(report["calibration"]["source_model"], "sha256:shadow");
+        assert_eq!(report["threshold"]["holdout"]["false_positives"], 0);
+        assert!(report["threshold"]["holdout"]["caught"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn replay_refuses_to_tune_without_labelled_candidate_verdicts() {
+        let report = tune_replayed_scores(Vec::new(), "sha256:shadow", &AiSettings::default(), 1);
+        assert_eq!(report["passed"], false);
+        assert!(report.get("threshold").is_none());
+    }
 
     fn sample(domain: &str, score: f32, group: Group, threat: Option<bool>) -> Sample {
         let label = match group {
@@ -636,6 +748,7 @@ mod tests {
             label,
             threat,
             scored_at: 1_700_000_000,
+            policy_blocked: None,
         }
     }
 
@@ -852,11 +965,24 @@ mod tests {
     }
 
     #[test]
-    fn a_model_path_is_part_of_the_candidate() {
+    fn an_unreadable_artifact_has_no_content_identity() {
         assert_eq!(model_version(""), "builtin");
         assert_eq!(
             model_version("/nonexistent/model.bin"),
-            "/nonexistent/model.bin"
+            "unreadable:/nonexistent/model.bin"
         );
+    }
+
+    #[test]
+    fn model_identity_follows_the_bytes_across_restores() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("live.bin");
+        let restored = dir.path().join("restored.bin");
+        std::fs::write(&live, b"first").unwrap();
+        let original = model_version(live.to_str().unwrap());
+        std::fs::write(&restored, b"first").unwrap();
+        assert_eq!(model_version(restored.to_str().unwrap()), original);
+        std::fs::write(&live, b"other").unwrap();
+        assert_ne!(model_version(live.to_str().unwrap()), original);
     }
 }

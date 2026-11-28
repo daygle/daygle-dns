@@ -43,6 +43,10 @@ CREATE TABLE IF NOT EXISTS ai_model_artifacts (
     bytes      BLOB NOT NULL,
     created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS ai_model_rotation (
+    key   TEXT PRIMARY KEY,
+    bytes BLOB NOT NULL
+);
 CREATE TABLE IF NOT EXISTS ai_candidates (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     version             TEXT NOT NULL UNIQUE,
@@ -245,6 +249,43 @@ fn candidate_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<CandidateVersion> {
 }
 
 impl AiStore {
+    pub(crate) fn record_model_rotation(
+        &self,
+        manifest: &[u8],
+        files: &[(String, Vec<u8>)],
+    ) -> Result<()> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO ai_model_rotation VALUES ('manifest', ?1)",
+            [manifest],
+        )?;
+        for (digest, bytes) in files {
+            tx.execute(
+                "INSERT OR IGNORE INTO ai_model_rotation VALUES (?1, ?2)",
+                params![digest, bytes],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn model_rotation_backup(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(
+                "SELECT bytes FROM ai_model_rotation WHERE key = ?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub(crate) fn finish_model_rotation(&self) -> Result<()> {
+        self.lock()?.execute("DELETE FROM ai_model_rotation", [])?;
+        Ok(())
+    }
+
     /// Record the observations behind one verdict, replacing the previous
     /// set: they describe the verdict that is stored now.
     pub fn save_observations(
@@ -683,12 +724,18 @@ impl AiStore {
     /// candidate a candidate again. Its calibration is not touched - the caller
     /// restores the map that was active before.
     pub fn retire_active_candidate(&self, id: i64) -> Result<()> {
-        let conn = self.lock()?;
-        conn.execute(
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        tx.execute(
             "UPDATE ai_candidates SET status = 'candidate', promoted_at = 0, superseded_id = 0
              WHERE id = ?1 AND status = 'active'",
             params![id],
         )?;
+        tx.execute(
+            "DELETE FROM ai_meta WHERE key = 'scheduled_activation_pending' AND value = ?1",
+            params![id.to_string()],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -698,6 +745,21 @@ impl AiStore {
     /// a rollback finds it. The rows change in one transaction; the caller
     /// then restores the artifact and publishes the threshold.
     pub fn promote_candidate(&self, id: i64) -> Result<CandidateVersion> {
+        self.promote_candidate_with_pending_activation(id, false)
+    }
+
+    /// Promote a scheduled candidate and record the in-progress activation
+    /// marker in the same SQLite transaction. Startup uses this marker to
+    /// finish the model-file half if the process stops before installation.
+    pub fn promote_scheduled_candidate(&self, id: i64) -> Result<CandidateVersion> {
+        self.promote_candidate_with_pending_activation(id, true)
+    }
+
+    fn promote_candidate_with_pending_activation(
+        &self,
+        id: i64,
+        scheduled_activation: bool,
+    ) -> Result<CandidateVersion> {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
         let previous: Option<i64> = tx
@@ -744,22 +806,91 @@ impl AiStore {
                 params![candidate.calibration_version],
             )?;
         }
+        if scheduled_activation {
+            tx.execute(
+                "INSERT INTO ai_meta (key, value) VALUES ('scheduled_activation_pending', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = ?1",
+                params![id.to_string()],
+            )?;
+        } else {
+            // Any explicit later promotion supersedes a pending scheduled
+            // activation, so startup must not resurrect that older candidate.
+            tx.execute(
+                "DELETE FROM ai_meta WHERE key = 'scheduled_activation_pending'",
+                [],
+            )?;
+        }
         tx.commit()?;
         Ok(candidate)
+    }
+
+    /// The active scheduled activation awaiting startup/runtime completion.
+    pub fn pending_scheduled_activation(&self) -> Result<Option<CandidateVersion>> {
+        let conn = self.lock()?;
+        let id: Option<String> = conn
+            .query_row(
+                "SELECT value FROM ai_meta WHERE key = 'scheduled_activation_pending'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(id) = id else {
+            return Ok(None);
+        };
+        let id = id.parse::<i64>().map_err(|error| {
+            DaygleError::Database(format!("invalid scheduled activation marker: {error}"))
+        })?;
+        let candidate = conn
+            .query_row(
+                &format!("SELECT {CANDIDATE_COLUMNS} FROM ai_candidates WHERE id = ?1"),
+                params![id],
+                candidate_row,
+            )
+            .optional()?;
+        match candidate {
+            Some(candidate) if candidate.is_active() => Ok(Some(candidate)),
+            Some(_) => Err(DaygleError::Database(format!(
+                "scheduled activation marker refers to inactive candidate {id}"
+            ))),
+            None => Err(DaygleError::Database(format!(
+                "scheduled activation marker refers to missing candidate {id}"
+            ))),
+        }
+    }
+
+    /// Clear the in-progress marker after the model and scoring are installed.
+    /// The id guard prevents an older completion from clearing a newer one.
+    pub fn finish_scheduled_activation(&self, id: i64) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "DELETE FROM ai_meta WHERE key = 'scheduled_activation_pending' AND value = ?1",
+            params![id.to_string()],
+        )?;
+        Ok(())
     }
 
     /// Roll back the active candidate to the one it replaced. Returns the
     /// candidate now active, including its stored calibration map; the caller
     /// restores the artifact bytes and the threshold that travel with it.
     pub fn rollback_active_candidate(&self) -> Result<Option<CandidateVersion>> {
-        let Some(active) = self.active_candidate()? else {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let active = tx
+            .query_row(
+                &format!(
+                    "SELECT {CANDIDATE_COLUMNS} FROM ai_candidates
+                     WHERE status = 'active' ORDER BY promoted_at DESC LIMIT 1"
+                ),
+                [],
+                candidate_row,
+            )
+            .optional()?;
+        let Some(active) = active else {
             return Ok(None);
         };
         if active.superseded_id == 0 {
             return Ok(None);
         }
-        let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
         let now = now_epoch();
         tx.execute(
             "UPDATE ai_candidates SET status = 'rolled_back', rolled_back_at = ?1 WHERE id = ?2",
@@ -789,6 +920,10 @@ impl AiStore {
                 params![restored.calibration_version],
             )?;
         }
+        tx.execute(
+            "DELETE FROM ai_meta WHERE key = 'scheduled_activation_pending' AND value = ?1",
+            params![active.id.to_string()],
+        )?;
         tx.commit()?;
         Ok(Some(restored))
     }
@@ -865,6 +1000,59 @@ impl AiStore {
                     r.get::<_, i64>(1)?,
                     r.get::<_, i64>(2)?,
                 ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Explicit reviews of current findings. An allow exemption is a policy
+    /// decision and does not by itself establish that the finding was wrong.
+    pub(crate) fn authority_reviews(&self, now: i64) -> Result<Vec<(String, i64, i64, i64)>> {
+        self.authority_review_rows(now, None, None)
+    }
+
+    /// [`Self::authority_reviews`] restricted to findings produced under the
+    /// scoring version in force: the calibration map and fusion mode recorded
+    /// on the verdict. A review of an older version's finding is provenance,
+    /// not evidence for advancing the version now deciding.
+    pub(crate) fn authority_reviews_for_scoring(
+        &self,
+        now: i64,
+        calibration_version: &str,
+        assessment_mode: &str,
+    ) -> Result<Vec<(String, i64, i64, i64)>> {
+        self.authority_review_rows(now, Some(calibration_version), Some(assessment_mode))
+    }
+
+    /// The review counts, optionally restricted to the scoring version. `None`
+    /// keeps every version, which is what the diagnostic status reports.
+    fn authority_review_rows(
+        &self,
+        now: i64,
+        calibration_version: Option<&str>,
+        assessment_mode: Option<&str>,
+    ) -> Result<Vec<(String, i64, i64, i64)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT CASE WHEN instr(v.evidence, ', listed by ') > 0
+                         THEN 'feed' ELSE 'model' END AS source,
+                    count(*),
+                    count(CASE WHEN o.action = 'not_threat' THEN 1 END),
+                    count(CASE WHEN o.action IS NULL AND c.category = v.category THEN 1 END)
+             FROM ai_verdicts v
+             LEFT JOIN ai_overrides o
+               ON o.domain = v.domain AND o.created_at >= v.classified_at
+             LEFT JOIN ai_category_overrides c
+               ON c.domain = v.domain AND c.created_at >= v.classified_at
+             WHERE v.channel = 'threat' AND v.status = 'classified'
+               AND v.severity = 'threat' AND v.expires_at > ?1
+               AND (?2 IS NULL OR v.calibration_version = ?2)
+               AND (?3 IS NULL OR v.assessment_mode = ?3)
+             GROUP BY source",
+        )?;
+        let rows = stmt
+            .query_map(params![now, calibration_version, assessment_mode], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)

@@ -1169,6 +1169,128 @@ async fn applying_a_trial_records_the_live_model_and_rollback_reports_it() {
 }
 
 #[tokio::test]
+async fn a_passing_threshold_trial_for_a_different_model_cannot_be_applied() {
+    let dir = scratch_dir("threshold-stale-model");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai.clone()));
+    let trial = ai
+        .store
+        .save_threshold_trial(&daygle_dns_ml::store::NewThresholdTrial {
+            model: "sha256:replaced-model".to_string(),
+            base_threshold: 0.99,
+            candidate: 0.96,
+            fpr_target: 0.01,
+            passed: true,
+            report: "{}".to_string(),
+        })
+        .unwrap();
+    let threshold = ai.settings.load().block_threshold;
+    let (code, _, body) = call(
+        state.clone(),
+        "POST",
+        "/api/ai/threshold/apply",
+        Some(serde_json::json!({ "id": trial.id })),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CONFLICT, "{body}");
+    assert!(ai.store.applied_threshold_trial().unwrap().is_none());
+    assert_eq!(ai.settings.load().block_threshold, threshold);
+    assert_eq!(overlay_threshold(&state), None);
+}
+
+#[tokio::test]
+async fn candidate_validation_uses_the_applied_trial_for_the_current_scoring() {
+    let dir = scratch_dir("threshold-scoring-context");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai.clone()));
+    let settings = ai.settings.load_full();
+    let model = daygle_dns_ml::threshold::model_version(&ai.live_model_path());
+    let scoring = ai.threshold_scoring_context(&settings);
+    let record = |candidate, summary| {
+        ai.store
+            .save_threshold_trial(&daygle_dns_ml::store::NewThresholdTrial {
+                model: model.clone(),
+                base_threshold: settings.block_threshold,
+                candidate,
+                fpr_target: settings.threshold_fpr_target,
+                passed: true,
+                report: serde_json::json!({ "summary": summary, "scoring": scoring }).to_string(),
+            })
+            .unwrap()
+    };
+    let applied = record(0.96, "validated and applied");
+    let unrelated = record(0.97, "newer but unapplied");
+    let (code, _, body) = call(
+        state.clone(),
+        "POST",
+        "/api/ai/threshold/apply",
+        Some(serde_json::json!({ "id": applied.id })),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    assert_eq!(
+        ai.snapshot_candidate().unwrap().validation_report["summary"],
+        "validated and applied"
+    );
+
+    let mut weights = ai.scanner.signal_weights();
+    weights.page = 0.3;
+    ai.scanner.set_signal_weights(weights);
+    assert!(ai.snapshot_candidate().unwrap().validation_report.is_null());
+    let (code, _, body) = call(
+        state.clone(),
+        "POST",
+        "/api/ai/threshold/apply",
+        Some(serde_json::json!({ "id": unrelated.id })),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        ai.store.applied_threshold_trial().unwrap().unwrap().id,
+        applied.id
+    );
+    assert_eq!(overlay_threshold(&state), Some(0.96));
+}
+
+#[tokio::test]
+async fn a_threshold_trial_cannot_be_applied_after_the_target_tightens() {
+    let dir = scratch_dir("threshold-stricter-target");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai.clone()));
+    let threshold = ai.settings.load().block_threshold;
+    let trial = ai
+        .store
+        .save_threshold_trial(&daygle_dns_ml::store::NewThresholdTrial {
+            model: daygle_dns_ml::threshold::model_version(&ai.live_model_path()),
+            base_threshold: threshold,
+            candidate: 0.96,
+            fpr_target: 0.01,
+            passed: true,
+            report: "{}".to_string(),
+        })
+        .unwrap();
+    let (code, _, body) = call(
+        state.clone(),
+        "PUT",
+        "/api/config",
+        Some(serde_json::json!({ "ai": { "threshold_fpr_target": 0.005 } })),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let (code, _, body) = call(
+        state.clone(),
+        "POST",
+        "/api/ai/threshold/apply",
+        Some(serde_json::json!({ "id": trial.id })),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CONFLICT, "{body}");
+    assert!(ai.store.applied_threshold_trial().unwrap().is_none());
+    assert_eq!(ai.settings.load().block_threshold, threshold);
+    assert_eq!(overlay_threshold(&state), Some(threshold));
+}
+
+#[tokio::test]
 async fn autonomy_and_the_false_positive_target_round_trip() {
     let dir = scratch_dir("threshold-settings");
     let ai = engine(&dir);
@@ -1474,6 +1596,49 @@ fn seed_threat(ai: &AiEngine, domain: &str) {
             3_600,
         )
         .unwrap();
+}
+
+#[tokio::test]
+async fn candidate_rollback_preserves_newer_operator_policy() {
+    let dir = scratch_dir("rollback-operator-policy");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai.clone()));
+    let first = ai.snapshot_candidate().unwrap();
+    let live = ai.live_model_path();
+    let bytes = std::fs::read(&live).unwrap_or_default();
+    let second = candidate_version(&ai, "second", &live, &bytes, 0.96, serde_json::json!({}));
+    for id in [first.id, second] {
+        let (code, _, body) = call(
+            state.clone(),
+            "POST",
+            "/api/ai/candidates/promote",
+            Some(serde_json::json!({ "id": id })),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{body}");
+    }
+    let (code, _, body) = call(
+        state.clone(),
+        "PUT",
+        "/api/config",
+        Some(serde_json::json!({ "ai": {
+            "auto_block_removals": ["phishing"],
+            "threshold_fpr_target": 0.005,
+            "authority": { "enabled": true, "model_stage": "monitor" }
+        }})),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+
+    let (code, _, body) = call(state.clone(), "POST", "/api/ai/candidates/rollback", None).await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let settings = ai.settings.load_full();
+    assert_eq!(settings.block_threshold, first.block_threshold);
+    assert_eq!(settings.threshold_fpr_target, 0.005);
+    assert!(!settings.is_auto_block_category("phishing"));
+    assert!(settings.authority.enabled);
+    assert_eq!(settings.authority.model_stage.as_str(), "monitor");
+    assert_eq!(overlay_threshold(&state), Some(first.block_threshold));
 }
 
 #[tokio::test]

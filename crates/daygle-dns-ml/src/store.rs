@@ -1405,10 +1405,14 @@ impl AiStore {
     }
 
     /// Independent confirmations of a label, by domain: the page reading
-    /// where there is one, else the verifier's corroboration.
+    /// where there is one, the verifier's corroboration, and a page discovery
+    /// the operator explicitly confirmed. A discovery nobody reviewed, or one
+    /// only exempted from policy, is not a label: a retrain must not learn the
+    /// scanner's own unreviewed prediction as ground truth.
     pub fn independent_labels(&self) -> Result<std::collections::HashMap<String, String>> {
         let mut labels = self.corroborated_threats()?;
         labels.extend(self.current_page_labels()?);
+        labels.extend(self.reviewed_page_discovery_labels(now_epoch())?);
         Ok(labels)
     }
 
