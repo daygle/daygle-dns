@@ -35,6 +35,10 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     out
 }
 
+pub(crate) fn artifact_matches(bytes: &[u8], digest: &str) -> bool {
+    hex(&Sha256::digest(bytes)) == digest
+}
+
 /// Everything a candidate version is made of.
 pub struct CandidateSpec {
     pub model_path: String,
@@ -126,8 +130,7 @@ pub fn restore_artifact(store: &AiStore, candidate: &CandidateVersion) -> Result
                 candidate.version, candidate.model_sha256
             ))
         })?;
-    let actual = hex(&Sha256::digest(&bytes));
-    if actual != candidate.model_sha256 {
+    if !artifact_matches(&bytes, &candidate.model_sha256) {
         return Err(DaygleError::Config(format!(
             "the stored artifact for candidate {} does not match its hash",
             candidate.version

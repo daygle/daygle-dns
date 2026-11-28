@@ -29,6 +29,7 @@ use arc_swap::ArcSwap;
 use daygle_dns_core::config::AiSettings;
 use daygle_dns_core::error::{DaygleError, Result};
 use daygle_dns_core::{LogLevel, LogStore};
+use serde::{Deserialize, Serialize};
 
 use crate::backend::{ClassificationInput, DomainClassifier};
 use crate::evidence::NetworkEvidence;
@@ -40,6 +41,85 @@ use crate::learn::{
     Sources, TrainingStats, BENIGN_LABEL, MIN_ACCURACY, MIN_EXAMPLES, MIN_LABELS, VALIDATION_SLACK,
 };
 use crate::store::AiStore;
+
+const ROTATION_KEY: &str = "manifest";
+
+#[derive(Deserialize, Serialize)]
+struct SavedFile {
+    digest: String,
+    modified: Option<std::time::SystemTime>,
+}
+
+fn rotation_files(learned: &Path) -> [PathBuf; 4] {
+    [
+        learned.to_path_buf(),
+        previous_model_path(learned),
+        stats_path(learned),
+        previous_stats_path(learned),
+    ]
+}
+
+fn begin_rotation(store: &AiStore, learned: &Path) -> Result<()> {
+    let mut saved = Vec::new();
+    let mut files = Vec::new();
+    for path in rotation_files(learned) {
+        let entry = match std::fs::read(&path) {
+            Ok(bytes) => {
+                use sha2::{Digest, Sha256};
+                let digest = crate::candidate::hex(&Sha256::digest(&bytes));
+                files.push((digest.clone(), bytes));
+                Some(SavedFile {
+                    digest,
+                    modified: std::fs::metadata(&path)?.modified().ok(),
+                })
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        saved.push(entry);
+    }
+    let journal = serde_json::to_vec(&saved).map_err(|error| {
+        DaygleError::Internal(format!("could not record model rotation: {error}"))
+    })?;
+    store.record_model_rotation(&journal, &files)
+}
+
+/// A rotation with a durable marker was interrupted. Restore its original
+/// files before choosing a model. Keep the marker if any recovery step fails.
+pub(crate) fn recover_rotation(store: &AiStore, learned: &Path) -> Result<bool> {
+    let Some(journal) = store.model_rotation_backup(ROTATION_KEY)? else {
+        return Ok(false);
+    };
+    let saved: [Option<SavedFile>; 4] = serde_json::from_slice(&journal).map_err(|error| {
+        DaygleError::Database(format!("invalid model rotation journal: {error}"))
+    })?;
+    for (path, entry) in rotation_files(learned).into_iter().zip(saved) {
+        if let Some(entry) = entry {
+            let bytes = store.model_rotation_backup(&entry.digest)?.ok_or_else(|| {
+                DaygleError::Database(format!("model rotation backup {} is missing", entry.digest))
+            })?;
+            if !crate::candidate::artifact_matches(&bytes, &entry.digest) {
+                return Err(DaygleError::Database(format!(
+                    "model rotation backup {} failed its digest check",
+                    entry.digest
+                )));
+            }
+            crate::candidate::write_artifact(&path, &bytes)?;
+            if let Some(modified) = entry.modified {
+                std::fs::File::options()
+                    .write(true)
+                    .open(&path)?
+                    .set_modified(modified)?;
+            }
+        } else if let Err(error) = std::fs::remove_file(&path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(error.into());
+            }
+        }
+    }
+    store.finish_model_rotation()?;
+    Ok(true)
+}
 
 /// Loads an accepted model file into the running channels. Set by the engine,
 /// so every way a model goes live - a promotion, a manual retrain or a
@@ -570,14 +650,39 @@ impl Retrainer {
 
     // ── Going live ──────────────────────────────────────────────────────
 
+    fn with_rotation(&self, change: impl FnOnce() -> Result<()>) -> Result<()> {
+        if self.store.model_rotation_backup(ROTATION_KEY)?.is_some() {
+            return Err(DaygleError::Database(
+                "a model rotation still needs recovery; restart before changing classifiers"
+                    .to_string(),
+            ));
+        }
+        begin_rotation(&self.store, &self.learned)?;
+        match change() {
+            Ok(()) => self.store.finish_model_rotation(),
+            Err(cause) => {
+                if let Err(recovery) = recover_rotation(&self.store, &self.learned) {
+                    return Err(DaygleError::Internal(format!(
+                        "model rotation failed: {cause}; recovery also failed: {recovery}"
+                    )));
+                }
+                Err(cause)
+            }
+        }
+    }
+
     fn install(&self) -> Result<()> {
+        self.install_path(&self.learned)
+    }
+
+    fn install_path(&self, path: &Path) -> Result<()> {
         if let Some(install) = self.installer.get() {
-            install(&self.learned)?;
+            install(path)?;
         }
         // The model is live now: whatever the engine keys to the identity of
         // the model it replaced is stale (see [`Self::set_installed`]).
         if let Some(installed) = self.installed.get() {
-            installed(&self.learned);
+            installed(path);
         }
         Ok(())
     }
@@ -586,23 +691,19 @@ impl Retrainer {
     /// replaces becomes the previous one, and every failure puts the files
     /// back the way they were.
     fn promote(&self, file: &Path, record: &serde_json::Value) -> Result<()> {
+        self.with_rotation(|| self.promote_files(file, record))
+    }
+
+    fn promote_files(&self, file: &Path, record: &serde_json::Value) -> Result<()> {
         let previous = previous_model_path(&self.learned);
-        let had_learned = self.learned.is_file();
-        if had_learned {
+        if self.learned.is_file() {
             std::fs::rename(&self.learned, &previous)?;
             swap_stats(&self.learned, StatsMove::CurrentToPrevious);
         }
-        if let Err(e) = std::fs::rename(file, &self.learned) {
-            self.restore_after_failed_rotation(had_learned);
-            return Err(DaygleError::Io(e));
-        }
-        if let Err(e) = self.install() {
-            let _ = std::fs::remove_file(&self.learned);
-            self.restore_after_failed_rotation(had_learned);
-            return Err(DaygleError::Config(format!(
-                "the new model could not be loaded, so the current model was kept: {e}"
-            )));
-        }
+        std::fs::rename(file, &self.learned)?;
+        self.install().map_err(|error| {
+            DaygleError::Config(format!("the new model could not be loaded: {error}"))
+        })?;
         match serde_json::to_vec_pretty(record) {
             Ok(bytes) => {
                 if let Err(e) = std::fs::write(stats_path(&self.learned), bytes) {
@@ -618,14 +719,6 @@ impl Retrainer {
             ),
         }
         Ok(())
-    }
-
-    fn restore_after_failed_rotation(&self, had_learned: bool) {
-        let previous = previous_model_path(&self.learned);
-        if had_learned && previous.is_file() {
-            let _ = std::fs::rename(&previous, &self.learned);
-            swap_stats(&self.learned, StatsMove::PreviousToCurrent);
-        }
     }
 
     /// Retrain now and put the result live at once: the operator's explicit
@@ -679,18 +772,12 @@ impl Retrainer {
                 "there is no previous model to restore".to_string(),
             ));
         }
-        self.swap_with_previous()?;
-        if let Err(e) = self.install() {
-            if let Err(undo) = self.swap_with_previous() {
-                self.log(
-                    LogLevel::Warn,
-                    format!("could not undo a failed model restore: {undo}"),
-                );
-            }
-            return Err(DaygleError::Config(format!(
-                "the previous model could not be loaded, so the current model was kept: {e}"
-            )));
-        }
+        self.with_rotation(|| {
+            self.swap_with_previous()?;
+            self.install().map_err(|error| {
+                DaygleError::Config(format!("the previous model could not be loaded: {error}"))
+            })
+        })?;
         // A candidate was judged against the model just replaced; it is
         // no longer a fair comparison.
         if self.discard_candidate() {
@@ -711,16 +798,8 @@ impl Retrainer {
         let previous = previous_model_path(&self.learned);
         let staged = self.learned.with_extension("rolled-back.bin");
         std::fs::rename(&self.learned, &staged)?;
-        if let Err(e) = std::fs::rename(&previous, &self.learned) {
-            let _ = std::fs::rename(&staged, &self.learned);
-            return Err(DaygleError::Io(e));
-        }
-        if let Err(e) = std::fs::rename(&staged, &previous) {
-            self.log(
-                LogLevel::Warn,
-                format!("the replaced model was left at {}: {e}", staged.display()),
-            );
-        }
+        std::fs::rename(&previous, &self.learned)?;
+        std::fs::rename(&staged, &previous)?;
         swap_stats(&self.learned, StatsMove::Exchange);
         Ok(())
     }
@@ -1086,25 +1165,16 @@ impl Retrainer {
     fn undo_promotion(&self, settings: &AiSettings, why: &str, now: i64) {
         let undone = {
             let _running = self.running.lock().unwrap_or_else(|e| e.into_inner());
-            if previous_model_path(&self.learned).is_file() {
-                self.swap_with_previous().and_then(|()| {
-                    self.install().inspect_err(|_| {
-                        let _ = self.swap_with_previous();
-                    })
-                })
-            } else {
-                // The first model it learned: back to the configured one.
-                let set_aside = self.learned.with_extension("rolled-back.bin");
-                std::fs::rename(&self.learned, &set_aside)
-                    .map_err(DaygleError::Io)
-                    .and_then(|()| match self.installer.get() {
-                        Some(install) => install(Path::new(&self.configured_model(settings)))
-                            .inspect_err(|_| {
-                                let _ = std::fs::rename(&set_aside, &self.learned);
-                            }),
-                        None => Ok(()),
-                    })
-            }
+            self.with_rotation(|| {
+                if previous_model_path(&self.learned).is_file() {
+                    self.swap_with_previous().and_then(|()| self.install())
+                } else {
+                    // The first model it learned: back to the configured one.
+                    let set_aside = self.learned.with_extension("rolled-back.bin");
+                    std::fs::rename(&self.learned, &set_aside)?;
+                    self.install_path(Path::new(&self.configured_model(settings)))
+                }
+            })
         };
         let _ = std::fs::remove_file(self.watch_path());
         if let Err(e) = undone {
@@ -1521,7 +1591,6 @@ fn score_with_slack(
 #[derive(Clone, Copy)]
 enum StatsMove {
     CurrentToPrevious,
-    PreviousToCurrent,
     Exchange,
 }
 
@@ -1535,10 +1604,6 @@ fn swap_stats(learned: &Path, how: StatsMove) {
         StatsMove::CurrentToPrevious => {
             let _ = std::fs::remove_file(&previous);
             let _ = std::fs::rename(&current, &previous);
-        }
-        StatsMove::PreviousToCurrent => {
-            let _ = std::fs::remove_file(&current);
-            let _ = std::fs::rename(&previous, &current);
         }
         StatsMove::Exchange => {
             let staged = learned.with_extension("rolled-back.json");
@@ -1555,6 +1620,47 @@ fn swap_stats(learned: &Path, how: StatsMove) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_restores_files_from_an_interrupted_learned_model_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("ai.db");
+        let learned = crate::learn::learned_model_path(&database);
+        let previous = previous_model_path(&learned);
+        let stats = stats_path(&learned);
+        let expected = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../models/daygle-starter.bin"
+        ))
+        .unwrap();
+        std::fs::write(&learned, &expected).unwrap();
+        std::fs::write(&previous, b"original previous").unwrap();
+        std::fs::write(&stats, b"original stats").unwrap();
+        {
+            let store = AiStore::open(&database).unwrap();
+            begin_rotation(&store, &learned).unwrap();
+            std::fs::rename(&learned, &previous).unwrap();
+            std::fs::write(previous_stats_path(&learned), b"unexpected stats").unwrap();
+        }
+
+        let settings = AiSettings {
+            database: database.to_string_lossy().into_owned(),
+            ..AiSettings::default()
+        };
+        let ai = crate::AiEngine::new(
+            &settings,
+            ":memory:",
+            Arc::new(daygle_dns_authoritative::ZoneStore::open(":memory:").unwrap()),
+            Arc::new(LogStore::new(64)),
+        )
+        .unwrap();
+        assert_eq!(ai.live_model_path(), learned.to_string_lossy());
+        assert_eq!(std::fs::read(&learned).unwrap(), expected);
+        assert_eq!(std::fs::read(&previous).unwrap(), b"original previous");
+        assert_eq!(std::fs::read(&stats).unwrap(), b"original stats");
+        assert!(!previous_stats_path(&learned).exists());
+        assert!(!recover_rotation(&ai.store, &learned).unwrap());
+    }
 
     #[test]
     fn repeated_rejections_back_off() {

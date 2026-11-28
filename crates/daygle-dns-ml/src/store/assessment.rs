@@ -43,6 +43,10 @@ CREATE TABLE IF NOT EXISTS ai_model_artifacts (
     bytes      BLOB NOT NULL,
     created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS ai_model_rotation (
+    key   TEXT PRIMARY KEY,
+    bytes BLOB NOT NULL
+);
 CREATE TABLE IF NOT EXISTS ai_candidates (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     version             TEXT NOT NULL UNIQUE,
@@ -245,6 +249,43 @@ fn candidate_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<CandidateVersion> {
 }
 
 impl AiStore {
+    pub(crate) fn record_model_rotation(
+        &self,
+        manifest: &[u8],
+        files: &[(String, Vec<u8>)],
+    ) -> Result<()> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO ai_model_rotation VALUES ('manifest', ?1)",
+            [manifest],
+        )?;
+        for (digest, bytes) in files {
+            tx.execute(
+                "INSERT OR IGNORE INTO ai_model_rotation VALUES (?1, ?2)",
+                params![digest, bytes],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn model_rotation_backup(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(
+                "SELECT bytes FROM ai_model_rotation WHERE key = ?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub(crate) fn finish_model_rotation(&self) -> Result<()> {
+        self.lock()?.execute("DELETE FROM ai_model_rotation", [])?;
+        Ok(())
+    }
+
     /// Record the observations behind one verdict, replacing the previous
     /// set: they describe the verdict that is stored now.
     pub fn save_observations(

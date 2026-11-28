@@ -323,6 +323,9 @@ when the candidate's artifact digest matches the loaded classifier.
 Scheduled maintenance defers while an operator operation holds the scoring
 lifecycle lock. This includes threshold trials, calibration changes,
 candidate publication and rollback, and console AI settings changes.
+Learned-model rotation journals the current and previous classifier files
+and their records before changing them. If the process stops before the
+rotation commits, startup restores those files before selecting a model.
 
 **Graduated authority** (`ai.authority`, off by default) decides which
 evidence may block: feed-confirmed findings can be enforced while model-only

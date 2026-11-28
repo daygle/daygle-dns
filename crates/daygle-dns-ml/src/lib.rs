@@ -248,6 +248,12 @@ impl AiEngine {
         // never silently ignored, and a damaged learned file never stops the
         // AI from starting.
         let learned_shared = learn::learned_model_path(&database_path);
+        if maintain::recover_rotation(&store, &learned_shared)? {
+            logs.warn(
+                "ai",
+                "restored learned model files after an interrupted rotation",
+            );
+        }
         let learned_reference = database_path.with_file_name(LEARNED_REFERENCE_FILE);
         let pick = |learned: &Path, configured: &str, what: &str| -> bool {
             if !prefer_learned(learned, configured) {
