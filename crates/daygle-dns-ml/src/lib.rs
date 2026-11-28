@@ -860,6 +860,29 @@ impl AiEngine {
         self.shared.status()
     }
 
+    pub fn autonomy_readiness(&self) -> Result<serde_json::Value> {
+        let settings = self.settings.load_full();
+        let mut status = self.shared.retrainer.readiness()?;
+        status["advancement"] = serde_json::json!(settings.authority.advancement);
+        status["authority"] = serde_json::Value::Array(
+            self.scanner
+                .authority_decisions(&settings)?
+                .iter()
+                .map(authority::AuthorityDecision::to_json)
+                .collect(),
+        );
+        let page_can_enforce = settings.fetch_pages
+            && settings.monitor_page_discovery
+            && settings.enforce_page_discovery
+            && settings.page_rule != daygle_dns_core::config::PageRule::Evidence;
+        status["enforcement_holds"] = serde_json::json!({
+            "global_record_only": settings.mode != daygle_dns_core::config::AiMode::Enforce,
+            "binary_starter": backend::is_binary_starter(&self.threat_backend_name()),
+            "page_policy": !page_can_enforce,
+        });
+        Ok(status)
+    }
+
     /// Run the scheduled maintenance step now - judge a candidate whose
     /// trial ended, or build one when due, then refresh the verifier
     /// reference. The scan loop calls the same step after each cycle.
@@ -2178,15 +2201,7 @@ impl AiEngine {
             },
             "sources": decisions
                 .iter()
-                .map(|decision| serde_json::json!({
-                    "source": decision.source.as_str(),
-                    "configured": decision.configured.as_str(),
-                    "effective": decision.effective.as_str(),
-                    "false_positives": decision.false_positives,
-                    "true_positives": decision.true_positives,
-                    "demoted": decision.demoted,
-                    "reason": decision.reason,
-                }))
+                .map(authority::AuthorityDecision::to_json)
                 .collect::<Vec<_>>(),
             "recorded": self
                 .store

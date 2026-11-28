@@ -1096,6 +1096,61 @@ fn binary_name_model_blocks_without_enabled_families_and_respects_policy() {
     config.authority.model_stage = AuthorityStage::Enforce;
     ai.apply_settings(&config);
     assert!(ai.snapshot().load().contains_key(suspicious));
+    config.authority.advancement = true;
+    config.authority.advance_min_reviews = 1;
+    ai.apply_settings(&config);
+    let stage = || {
+        let status = ai.autonomy_readiness().unwrap();
+        status["authority"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|source| source["source"] == "model")
+            .unwrap()["effective"]
+            .clone()
+    };
+    assert_eq!(stage(), "monitor");
+    assert!(!ai.snapshot().load().contains_key(suspicious));
+    for domain in [
+        "credentialgrabber-13.example",
+        "credentialgrabber-14.example",
+    ] {
+        ai.store.observe(domain).unwrap();
+    }
+    ai.scanner.run_cycle(0, zone_store(&dir).as_ref()).unwrap();
+    ai.store
+        .set_category_override("credentialgrabber-13.example", threat_label)
+        .unwrap();
+    ai.refresh_snapshot_now();
+    assert_eq!(stage(), "propose");
+    assert!(!ai.snapshot().load().contains_key(suspicious));
+    ai.store
+        .set_category_override("credentialgrabber-14.example", threat_label)
+        .unwrap();
+    let stale = "old-binary-score.example";
+    ai.store.observe(stale).unwrap();
+    ai.store
+        .save_verdict(
+            Channel::Threat,
+            stale,
+            threat_label,
+            "threat",
+            "classified",
+            0.99,
+            "fasttext-binary",
+            "",
+            3600,
+        )
+        .unwrap();
+    ai.refresh_snapshot_now();
+    assert_eq!(stage(), "enforce");
+    assert!(ai.snapshot().load().contains_key(suspicious));
+    assert!(!ai.snapshot().load().contains_key(stale));
+    config.block_threshold = 0.76;
+    ai.apply_settings(&config);
+    assert_eq!(stage(), "monitor");
+    assert!(!ai.snapshot().load().contains_key(suspicious));
+    config.authority.advancement = false;
     config.auto_block_removals.push(threat_label.to_string());
     ai.apply_settings(&config);
     assert!(!ai.snapshot().load().contains_key(suspicious));
@@ -1160,6 +1215,10 @@ fn builtin_binary_starts_in_monitor_and_promotes_without_operator_reviews() {
         .run_due_maintenance()
         .expect("the first scheduled run is due")
         .unwrap_err();
+    assert_eq!(
+        ai.autonomy_readiness().unwrap()["state"],
+        "waiting_for_evidence"
+    );
     assert!(skipped
         .to_string()
         .contains("independent training names per class"));
@@ -1193,6 +1252,10 @@ fn builtin_binary_starts_in_monitor_and_promotes_without_operator_reviews() {
     let weak = discovered.next().unwrap();
     let ai = engine(&dir, config.clone());
     assert_eq!(ai.live_model_path(), starter);
+    assert_eq!(
+        ai.autonomy_readiness().unwrap()["state"],
+        "waiting_for_evidence"
+    );
     assert!(ai
         .scanner
         .set_page_reader(Box::new(DiscoveryFixture(direct.clone()))));
@@ -1219,6 +1282,7 @@ fn builtin_binary_starts_in_monitor_and_promotes_without_operator_reviews() {
     let record: serde_json::Value =
         serde_json::from_slice(&std::fs::read(candidate).unwrap()).unwrap();
     assert_eq!(record["binary_training"]["direct_page_threats"], 1);
+    assert_eq!(ai.autonomy_readiness().unwrap()["state"], "validating");
     assert_eq!(ai.live_model_path(), starter);
     end_trial_soon(&ai);
     std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -2065,6 +2129,52 @@ async fn discovery_requires_opt_in_and_enforces_only_the_inspected_hostname() {
     ai.apply_settings(&configured);
     ai.refresh_snapshot_now();
     assert!(plugin.evaluate(&query(domain)).await.is_none());
+    configured.authority.advancement = true;
+    configured.authority.model_stage = AuthorityStage::Enforce;
+    configured.authority.advance_min_reviews = 1;
+    ai.apply_settings(&configured);
+    let fresh = "new-page-finding.example";
+    for name in [
+        "first-reviewed-page.example",
+        "second-reviewed-page.example",
+        fresh,
+    ] {
+        ai.store.observe(name).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Threat,
+                name,
+                "",
+                "",
+                "skipped",
+                0.0,
+                "test",
+                "",
+                3600,
+            )
+            .unwrap();
+    }
+    ai.scanner.run_cycle(0, zones.as_ref()).unwrap();
+    for name in [
+        "first-reviewed-page.example",
+        "second-reviewed-page.example",
+    ] {
+        ai.store.set_category_override(name, "phishing").unwrap();
+    }
+    ai.refresh_snapshot_now();
+    assert!(plugin.evaluate(&query(fresh)).await.is_some());
+    assert!(
+        plugin.evaluate(&query(domain)).await.is_none(),
+        "old page score"
+    );
+    let readiness = ai.autonomy_readiness().unwrap();
+    let stages = readiness["authority"].as_array().unwrap();
+    assert!(stages
+        .iter()
+        .any(|source| source["source"] == "page" && source["effective"] == "enforce"));
+    assert!(stages
+        .iter()
+        .any(|source| source["source"] == "model" && source["effective"] == "monitor"));
     configured.authority.enabled = false;
     ai.apply_settings(&configured);
     ai.set_not_threat_override(domain, "fixture correction")

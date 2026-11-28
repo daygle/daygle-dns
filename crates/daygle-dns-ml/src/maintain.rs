@@ -43,6 +43,7 @@ use crate::learn::{
 use crate::store::AiStore;
 
 const ROTATION_KEY: &str = "manifest";
+const LAST_RETRAIN_OUTCOME: &str = "last_scheduled_retrain_outcome";
 
 #[derive(Deserialize, Serialize)]
 struct SavedFile {
@@ -1147,7 +1148,51 @@ impl Retrainer {
             };
             self.log(LogLevel::Info, format!("AI retrain skipped: {why}"));
         }
+        let (state, detail) = match &outcome {
+            Ok(_) => ("built", None),
+            Err(DaygleError::Config(reason))
+                if reason.starts_with("not enough training data")
+                    || reason.starts_with("binary retraining needs")
+                    || reason.starts_with("no new independent binary") =>
+            {
+                ("waiting_for_evidence", Some(reason.clone()))
+            }
+            Err(error) => ("build_failed", Some(error.to_string())),
+        };
+        let record = serde_json::json!({ "at": now, "state": state, "detail": detail });
+        if let Err(error) = self
+            .store
+            .set_meta(LAST_RETRAIN_OUTCOME, &record.to_string())
+        {
+            tracing::warn!(%error, "could not record scheduled retraining status");
+        }
         Some(outcome)
+    }
+
+    pub(crate) fn readiness(&self) -> Result<serde_json::Value> {
+        let settings = self.settings.load_full();
+        let trial = self.trial();
+        let now = chrono::Utc::now().timestamp();
+        let last = self
+            .store
+            .meta(LAST_RETRAIN_OUTCOME)?
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+        let state = if !settings.enabled || !settings.autonomy {
+            "autonomy_off"
+        } else if trial.in_progress() {
+            "validating"
+        } else if trial.retry_after.is_some_and(|after| after > now) {
+            "paused_after_trial"
+        } else if !settings.auto_retrain {
+            "retraining_off"
+        } else {
+            match last.as_ref().and_then(|value| value["state"].as_str()) {
+                Some("waiting_for_evidence") => "waiting_for_evidence",
+                Some("build_failed") => "build_failed",
+                _ => "scheduled",
+            }
+        };
+        Ok(serde_json::json!({ "state": state, "last_attempt": last }))
     }
 
     /// Build a candidate and put it on trial - or, with trials off, live.

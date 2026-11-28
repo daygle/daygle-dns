@@ -1479,11 +1479,13 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
                 ai.blockable_counts()?,
                 ai.store.threat_verdict_counts()?,
                 ai.store.active_calibration()?.map(|map| map.version),
+                ai.autonomy_readiness()?,
             ))
         }
     })
     .await;
-    let (statuses, blockable, threat_counts, calibration_version) = match counts {
+    let (statuses, blockable, threat_counts, calibration_version, autonomy_readiness) = match counts
+    {
         Ok(counts) => counts,
         Err(e) => return map_err(e),
     };
@@ -1534,6 +1536,7 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         // Autonomy is what the AI may do unasked; `mode` is what it may
         // enforce. A build can run the AI's work but never block on it.
         "autonomy": settings.autonomy,
+        "autonomy_readiness": autonomy_readiness,
         // The threshold trial: the false-positive target, and the trial whose
         // candidate is in force (the model it was tuned with travels with it).
         "threshold_fpr_target": settings.threshold_fpr_target,

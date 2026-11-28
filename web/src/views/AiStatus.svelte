@@ -8,6 +8,15 @@
   let { onOpenThreats = null } = $props();
 
   let status = $state(null);
+  const readinessLabels = {
+    autonomy_off: 'Autonomy is off',
+    retraining_off: 'Automatic retraining is off',
+    validating: 'Validating a candidate in a shadow trial',
+    paused_after_trial: 'Retraining paused after a rejected trial or rollback',
+    waiting_for_evidence: 'Waiting for independently validated training evidence',
+    build_failed: 'The last candidate build failed a check',
+    scheduled: 'Waiting for the next scheduled retraining check',
+  };
   // When the scanner is not running: whether Settings has it turned on
   // (it then only needs a restart), or null when unknown.
   let enabledInSettings = $state(null);
@@ -789,6 +798,44 @@
           <strong>Restore Previous Model</strong> undoes it.</li>
       </ul>
     </details>
+    {#if status.autonomy_readiness}
+      {@const readiness = status.autonomy_readiness}
+      <section aria-label="Learning and enforcement progress" style="margin: 12px 0">
+        <p><strong>{readinessLabels[readiness.state] || 'Learning status unavailable'}</strong></p>
+        {#if ['waiting_for_evidence', 'build_failed'].includes(readiness.state) && readiness.last_attempt?.detail}
+          <p class="muted">{readiness.last_attempt.detail}</p>
+        {/if}
+        {#if readiness.state === 'paused_after_trial' && status.learned_model?.trial?.last_outcome}
+          <p class="muted">{status.learned_model.trial.last_outcome}</p>
+        {/if}
+        {#if readiness.enforcement_holds.global_record_only}
+          <p class="muted">The default AI mode is Train. Filtering group overrides can change that mode.</p>
+        {/if}
+        {#if readiness.enforcement_holds.binary_starter}
+          <p class="muted">Starter name findings stay in monitor mode until a candidate passes validation.</p>
+        {/if}
+        {#if status.monitor_page_discovery && readiness.enforcement_holds.page_policy}
+          <p class="muted">Page findings are held below enforcement by the current page settings.</p>
+        {/if}
+        {#if readiness.authority?.length}
+          <ul style="padding-left: 18px">
+            {#each readiness.authority as decision (decision.source)}
+              <li>
+                <strong>{titleCase(decision.source)} · {titleCase(decision.effective)}</strong>
+                <span class="muted">(configured {readiness.advancement ? 'ceiling' : 'stage'} {titleCase(decision.configured)})</span>
+                <div class="muted">{decision.reason}</div>
+                {#if decision.next_review_target != null}
+                  <div class="muted">
+                    Current scoring version: {fmt(decision.confirmed_reviews + decision.corrected_reviews)}
+                    of {fmt(decision.next_review_target)} reviews toward the next stage.
+                  </div>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
+    {/if}
     {@render maintained('Classifier', status.learned_model)}
     {#if isAdmin}
       <p class="muted" style="font-size: 0.8rem; margin: 6px 0 0">
