@@ -874,6 +874,37 @@ impl DnsDispatcher {
         };
         let mut previous_mac: Option<Vec<u8>> = None;
         let mut info = None;
+        // A record written before records were size-checked can still be too
+        // large to encode into any message. It could never be transferred, and
+        // leaving it in would fail the whole transfer at the message that held
+        // it, so it is skipped and reported instead.
+        let answers: Vec<Record> = answers
+            .into_iter()
+            .filter(|record| {
+                let fits = hickory_proto::serialize::binary::BinEncodable::to_bytes(record)
+                    .map(|bytes| {
+                        bytes.len() <= daygle_dns_authoritative::model::MAX_RECORD_WIRE_BYTES
+                    })
+                    .unwrap_or(false);
+                if !fits {
+                    warn!(
+                        query = %qname,
+                        name = %record.name,
+                        rtype = %record.record_type(),
+                        "skipping a record that cannot be encoded into one DNS message"
+                    );
+                    self.log_error(
+                        "transfer",
+                        format!(
+                            "transfer for {qname} skipped {} {}: it cannot fit in one DNS message",
+                            record.name,
+                            record.record_type()
+                        ),
+                    );
+                }
+                fits
+            })
+            .collect();
         for chunk in transfer_chunks(&answers) {
             let mut response = MessageResponseBuilder::from_message_request(request).build(
                 metadata,

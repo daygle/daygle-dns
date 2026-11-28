@@ -911,7 +911,9 @@ Zone transfers (AXFR/IXFR, RFC 5936/1995) are served over the plaintext TCP
 and DoT listeners - not over HTTP - gated by `authoritative.axfr_enabled` and
 the `axfr_networks` client allow-list in `daygle-dns.toml`. The DoT listener
 also answers the `xot` ALPN (zone transfers over TLS, RFC 9103), so the same
-transfers work encrypted. Secondary zones (zones replicated from remote
+transfers work encrypted. A stored record that cannot be encoded into one DNS
+message (one written before the API refused such records) is left out of the
+transfer and logged under the `transfer` component, rather than failing it. Secondary zones (zones replicated from remote
 masters on a refresh interval) are also configured in `daygle-dns.toml` under
 `[[authoritative.secondary_zones]]`; each replicated zone appears in
 `GET /api/zones` like any other zone, but is served read-only. A master entry
