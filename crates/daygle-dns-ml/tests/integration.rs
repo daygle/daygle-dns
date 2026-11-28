@@ -3375,6 +3375,10 @@ fn a_scheduled_retrain_runs_in_the_shadow_until_promoted() {
     assert!(learned_active(&ai), "promoted without a restart");
     assert_eq!(ai.content_backend_name(), "fasttext");
     assert_eq!(trial.history.len(), 1, "the trial is in the history");
+    assert_eq!(
+        ai.maintained_status()["last"]["shadow_scoring"]["passed"],
+        false
+    );
 }
 
 /// A damaged retrained model never stops the AI from starting: the engine

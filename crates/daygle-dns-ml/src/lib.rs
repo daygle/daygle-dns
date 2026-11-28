@@ -467,6 +467,108 @@ impl AiEngine {
         // restore), and the scanner is the only holder of the map in force, so
         // the engine hands the retrainer the step that retires a stale one.
         let installed_scanner = scanner.clone();
+        shared.retrainer.set_shadow_scoring(Box::new({
+            let store = store.clone();
+            let logs = logs.clone();
+            let reference = learned_reference.clone();
+            let network = network.clone();
+            let intel = intel.clone();
+            let scanner = scanner.clone();
+            move |path, settings, started, ends| {
+                let model_path = path.to_string_lossy();
+                let model = threshold::model_version(&model_path);
+                if model.starts_with("unreadable:") {
+                    return Err(DaygleError::Config(
+                        "shadow model artifact is unreadable".to_string(),
+                    ));
+                }
+                let mut seen = std::collections::HashSet::new();
+                let mut reviewed = Vec::new();
+                for correction in store.corrections()? {
+                    if !(started..ends).contains(&correction.created_at) {
+                        continue;
+                    }
+                    let domain = correction
+                        .domain
+                        .trim()
+                        .trim_matches('.')
+                        .to_ascii_lowercase();
+                    if !seen.insert(domain.clone()) {
+                        continue;
+                    }
+                    let threat = match correction.action.as_str() {
+                        "category" if settings.is_auto_block_category(&correction.category) => true,
+                        "not_threat" => false,
+                        _ => continue,
+                    };
+                    reviewed.push((domain, threat));
+                    if reviewed.len() == 512 {
+                        break;
+                    }
+                }
+                if reviewed.len() < calibration::MIN_FIT_SAMPLES + calibration::MIN_EVAL_SAMPLES {
+                    return Ok(serde_json::json!({
+                        "scope": "hostname_and_network",
+                        "passed": false,
+                        "reason": "insufficient explicit reviews during the shadow trial",
+                        "reviews": reviewed.len(),
+                    }));
+                }
+                let frozen = Arc::new(ArcSwap::from_pointee(settings.clone()));
+                let backend =
+                    threat_channel(&model_path, settings, &frozen, &logs, &reference, &network)?;
+                let index = intel.index();
+                let weights = scanner.signal_weights();
+                let samples = reviewed
+                    .into_iter()
+                    .map(|(domain, threat)| {
+                        let score = backend
+                            .classify(&backend::ClassificationInput::domain_only(domain.clone()))
+                            .filter(|verdict| {
+                                verdict.severity == backend::Severity::Threat
+                                    && verdict.confidence >= settings.confidence_floor
+                            })
+                            .map_or(0.0, |verdict| {
+                                let observations = assessment::observe(
+                                    &assessment::Context {
+                                        store: &store,
+                                        intel: &index,
+                                    },
+                                    &assessment::AssessmentInput {
+                                        domain: &domain,
+                                        threat_score: verdict.threat_score.unwrap_or_default(),
+                                        confidence: verdict.confidence,
+                                        severity: verdict.severity.as_str(),
+                                        evidence: &verdict.evidence,
+                                        page: None,
+                                        now: ends,
+                                    },
+                                );
+                                let fused = fusion::fuse(&observations, &weights);
+                                assessment::score_of_record(
+                                    settings.fusion,
+                                    verdict.confidence,
+                                    Some(&fused),
+                                    None,
+                                )
+                                .assessment
+                            });
+                        threshold::Sample {
+                            registrable: assessment::registrable(&domain),
+                            domain,
+                            score,
+                            group: threshold::Group::Correction,
+                            label: threshold::LabelSource::OperatorCorrection,
+                            threat: Some(threat),
+                            scored_at: ends,
+                        }
+                    })
+                    .collect();
+                let mut report = threshold::tune_replayed_scores(samples, &model, settings, ends);
+                report["scope"] = serde_json::json!("hostname_and_network");
+                Ok(report)
+            }
+        }));
         shared.retrainer.set_installed(Box::new({
             let store = store.clone();
             let settings = settings_swap.clone();

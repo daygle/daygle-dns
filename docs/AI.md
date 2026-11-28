@@ -305,6 +305,12 @@ upgrade, an active map identified only by an older file path and timestamp is
 retired at startup. Fit and apply a new map for the live model. Scheduled
 classifier promotion does not fit a new calibration map or publish a new
 validated threshold.
+Scheduled shadow trials also record a hostname-and-network replay report
+under the last training result when the candidate passes the existing
+shadow checks. It uses explicit reviews filed during the trial and fits a
+candidate calibration and threshold when enough independent labels exist.
+The report is diagnostic. Later page and LLM changes are outside this replay,
+and it does not publish a calibration map or threshold.
 
 **Versioned candidates** (`/api/ai/candidates`) hold the whole scoring system
 as one version - the model artifact bytes and hash, the threshold, the

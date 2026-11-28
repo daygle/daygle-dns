@@ -35,6 +35,71 @@ use daygle_dns_core::error::Result;
 use crate::intel::IntelIndex;
 use crate::store::AiStore;
 
+/// Fit a candidate's map on its tuning names, compare it with identity on
+/// held-out names, then select and validate its calibrated threshold.
+/// A zero score means replay found no enforceable verdict for that name.
+pub(crate) fn tune_replayed_scores(
+    mut samples: Vec<Sample>,
+    model: &str,
+    settings: &AiSettings,
+    now: i64,
+) -> serde_json::Value {
+    use crate::calibration::{self, CalibrationMap, Labelled};
+
+    let (holdout, tuning): (Vec<_>, Vec<_>) = samples
+        .iter()
+        .filter(|sample| sample.score > 0.0)
+        .filter_map(|sample| {
+            Some((
+                held_out(&sample.domain),
+                Labelled {
+                    score: sample.score,
+                    threat: sample.threat?,
+                },
+            ))
+        })
+        .partition(|(held, _)| *held);
+    let tuning: Vec<_> = tuning.into_iter().map(|(_, sample)| sample).collect();
+    let holdout: Vec<_> = holdout.into_iter().map(|(_, sample)| sample).collect();
+    let Some(mut map) = calibration::fit(&tuning, model, now) else {
+        return serde_json::json!({
+            "passed": false,
+            "reason": "insufficient labelled candidate verdicts to fit a calibration map",
+            "tuning_samples": tuning.len(),
+            "holdout_samples": holdout.len(),
+        });
+    };
+    let baseline = calibration::evaluate(&holdout, &CalibrationMap::identity(model, now));
+    let metrics = calibration::evaluate(&holdout, &map);
+    let acceptance = calibration::accept(&metrics, Some(&baseline));
+    map.metrics = Some(metrics);
+    if !acceptance.accepted
+        || !holdout.iter().any(|sample| sample.threat)
+        || !holdout.iter().any(|sample| !sample.threat)
+    {
+        return serde_json::json!({
+            "passed": false,
+            "reason": if acceptance.accepted { "held-out candidate verdicts need both classes" } else { &acceptance.reason },
+            "calibration": map,
+        });
+    }
+    for sample in &mut samples {
+        if sample.score > 0.0 {
+            sample.score = map.apply(sample.score);
+        }
+    }
+    let report = run(
+        &samples,
+        settings.threshold_fpr_target,
+        settings.block_threshold,
+    );
+    serde_json::json!({
+        "passed": report.passed && report.holdout.caught > 0,
+        "calibration": map,
+        "threshold": report,
+    })
+}
+
 /// The lowest threshold a trial may choose: below this the model's own score
 /// stops meaning threat.
 pub const MIN_THRESHOLD: f32 = 0.5;
@@ -626,6 +691,33 @@ fn artifact_version(path: &str) -> std::io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_tunes_calibration_and_threshold_on_separate_splits() {
+        let samples = (0..400)
+            .map(|i| {
+                let threat = i % 2 == 0;
+                sample(
+                    &format!("shadow-review-{i}.example"),
+                    if threat { 0.8 } else { 0.3 },
+                    Group::Correction,
+                    Some(threat),
+                )
+            })
+            .collect();
+        let report = tune_replayed_scores(samples, "sha256:shadow", &AiSettings::default(), 1);
+        assert_eq!(report["passed"], true, "{report}");
+        assert_eq!(report["calibration"]["source_model"], "sha256:shadow");
+        assert_eq!(report["threshold"]["holdout"]["false_positives"], 0);
+        assert!(report["threshold"]["holdout"]["caught"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn replay_refuses_to_tune_without_labelled_candidate_verdicts() {
+        let report = tune_replayed_scores(Vec::new(), "sha256:shadow", &AiSettings::default(), 1);
+        assert_eq!(report["passed"], false);
+        assert!(report.get("threshold").is_none());
+    }
 
     fn sample(domain: &str, score: f32, group: Group, threat: Option<bool>) -> Sample {
         let label = match group {

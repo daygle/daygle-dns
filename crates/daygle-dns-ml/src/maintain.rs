@@ -130,6 +130,8 @@ pub type Installer = Box<dyn Fn(&Path) -> Result<()> + Send + Sync>;
 /// use: the engine retires a calibration map fitted for the model it replaced.
 /// Never fails the install - the new model is already serving.
 pub type InstalledHook = Box<dyn Fn(&Path) + Send + Sync>;
+pub(crate) type ShadowScoring =
+    Box<dyn Fn(&Path, &AiSettings, i64, i64) -> Result<serde_json::Value> + Send + Sync>;
 
 /// A maintenance step with nothing to report (the verifier refresh).
 pub type Step = Box<dyn Fn() + Send + Sync>;
@@ -385,6 +387,7 @@ pub struct Retrainer {
     running: Mutex<()>,
     installer: OnceLock<Installer>,
     installed: OnceLock<InstalledHook>,
+    shadow_scoring: OnceLock<ShadowScoring>,
     /// Threat feeds and this network's usage: confirmation, probes and trial
     /// truths that do not depend on the operator.
     evidence: OnceLock<Arc<NetworkEvidence>>,
@@ -408,6 +411,7 @@ impl Retrainer {
             running: Mutex::new(()),
             installer: OnceLock::new(),
             installed: OnceLock::new(),
+            shadow_scoring: OnceLock::new(),
             evidence: OnceLock::new(),
         }
     }
@@ -429,6 +433,10 @@ impl Retrainer {
     /// Hand the retrainer a step that runs once a model it installed is live.
     pub fn set_installed(&self, installed: InstalledHook) {
         let _ = self.installed.set(installed);
+    }
+
+    pub(crate) fn set_shadow_scoring(&self, scoring: ShadowScoring) {
+        let _ = self.shadow_scoring.set(scoring);
     }
 
     /// The model file this retrainer maintains.
@@ -990,10 +998,18 @@ impl Retrainer {
         let now = chrono::Utc::now().timestamp();
         match verdict {
             Ok(why) => {
-                let record = std::fs::read(candidate.with_extension("json"))
+                let mut record = std::fs::read(candidate.with_extension("json"))
                     .ok()
                     .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
                     .unwrap_or_else(|| serde_json::json!({}));
+                if let Some(replay) = self.shadow_scoring.get() {
+                    let scoring = replay(&candidate, settings, started, ends).unwrap_or_else(
+                        |error| serde_json::json!({ "passed": false, "reason": error.to_string() }),
+                    );
+                    if let Some(record) = record.as_object_mut() {
+                        record.insert("shadow_scoring".to_string(), scoring);
+                    }
+                }
                 let _ = std::fs::remove_file(candidate.with_extension("json"));
                 match self.promote(&candidate, &record) {
                     Ok(()) => {
