@@ -134,7 +134,13 @@ Enforce. The command also remains available for offline training.
 With `ai.auto_retrain` enabled, the scheduler builds binary candidates
 from independently labelled feed names, a popular-domain reference sample,
 and explicit operator adjudications. Popularity is a benign proxy. The
-candidate's own verdicts and unreviewed page findings supply no labels.
+candidate's own verdicts supply no labels. With page discovery enabled,
+recent exact-host findings that meet the direct corroboration rule can
+provide positive training examples even when page enforcement is off.
+Weak, redirected, disputed, exempt, and explicitly suppressed findings
+are excluded, as are popular and established names. These
+automatic page labels are reserved for training and cannot validate a
+candidate's promotion.
 Training and promotion data are separated by registrable domain. Binary
 candidates always run a shadow trial and need validated calibration and a
 threshold that meets the false-positive target before they can go live.

@@ -143,6 +143,28 @@ pub(crate) fn binary_outcomes(
     for (_, domain) in training.into_iter().chain(probe) {
         outcomes.insert(domain, (true, LabelSource::FeedListing));
     }
+    if !evaluate && settings.fetch_pages && settings.monitor_page_discovery {
+        let exemptions = store.allow_overrides()?;
+        let mut page_roots = HashSet::new();
+        for (domain, category) in store.directly_corroborated_discoveries(before)? {
+            if page_roots.len() >= 256 {
+                break;
+            }
+            if !binary_evaluation(&domain)
+                && !intel.is_popular(&domain)
+                && !outcomes.contains_key(&domain)
+                && !crate::scanner::exempt(&domain, &exemptions)
+                && settings.label_role(category.as_deref().unwrap_or("phishing"))
+                    != daygle_dns_core::config::LabelRole::Suppressed
+                && !store
+                    .sighting(&domain)?
+                    .is_some_and(|sighting| sighting.established())
+                && page_roots.insert(crate::assessment::registrable(&domain))
+            {
+                outcomes.insert(domain, (true, LabelSource::DirectPage));
+            }
+        }
+    }
     for domain in store.reviewed_page_discovery_labels(before)?.into_keys() {
         outcomes.insert(domain, (true, LabelSource::OperatorCorrection));
     }

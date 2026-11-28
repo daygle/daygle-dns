@@ -664,6 +664,10 @@ impl Retrainer {
             .iter()
             .filter(|(_, _, source)| *source == crate::threshold::LabelSource::FeedListing)
             .count();
+        let direct_page_examples = outcomes
+            .iter()
+            .filter(|(_, _, source)| *source == crate::threshold::LabelSource::DirectPage)
+            .count();
         let negatives = outcomes.len() - threats;
         if threats < 20 || negatives < 20 {
             return Err(DaygleError::Config(format!(
@@ -698,7 +702,8 @@ impl Retrainer {
         let digest = crate::candidate::hex(&hash.finalize());
         let reference = settings.model_path.trim();
         let training = serde_json::json!({ "reference": reference, "digest": digest,
-            "independent_threats": threats, "independent_ordinary": negatives });
+            "independent_threats": threats, "independent_ordinary": negatives,
+            "direct_page_threats": direct_page_examples });
         if crate::learn::binary_training_record(&self.learned).as_ref() == Some(&training) {
             return Err(DaygleError::Config(
                 "no new independent binary training outcomes".to_string(),

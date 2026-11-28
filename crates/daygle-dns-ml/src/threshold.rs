@@ -134,6 +134,8 @@ pub enum LabelSource {
     OperatorCorrection,
     /// A maintained threat feed lists it.
     FeedListing,
+    /// Direct, independently corroborated page evidence.
+    DirectPage,
     /// Many clients have used it for weeks: a presumption of benign, not a
     /// guarantee.
     Established,
@@ -148,6 +150,7 @@ impl LabelSource {
         match self {
             Self::OperatorCorrection => "operator_correction",
             Self::FeedListing => "feed_listing",
+            Self::DirectPage => "direct_page",
             Self::Established => "established",
             Self::Popular => "popular",
             Self::Unseen => "unseen",
@@ -158,7 +161,7 @@ impl LabelSource {
     pub fn trust(self) -> &'static str {
         match self {
             Self::OperatorCorrection => "strong",
-            Self::FeedListing => "moderate",
+            Self::FeedListing | Self::DirectPage => "moderate",
             Self::Established | Self::Popular => "weak",
             Self::Unseen => "none",
         }
@@ -171,6 +174,7 @@ impl LabelSource {
             Self::FeedListing => {
                 "a curated list, but feeds miss and over-list; not ground truth on its own"
             }
+            Self::DirectPage => "corroborating signals on the original page; used for training only",
             Self::Established => {
                 "long use on this network presumes benign; a compromised long-used host would be mislabelled"
             }

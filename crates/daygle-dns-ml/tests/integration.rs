@@ -1013,9 +1013,33 @@ fn binary_name_model_blocks_without_enabled_families_and_respects_policy() {
 
 #[test]
 fn builtin_binary_starts_in_monitor_and_promotes_without_operator_reviews() {
+    use daygle_dns_ml::page::{DiscoveryReading, Inspection, PageReader};
+    use sha2::{Digest, Sha256};
+
+    struct DiscoveryFixture(String);
+    impl PageReader for DiscoveryFixture {
+        fn inspect(&self, _domain: &str) -> Inspection {
+            Inspection {
+                note: String::new(),
+                reading: None,
+                page: None,
+            }
+        }
+
+        fn inspect_for_discovery(&self, domain: &str, _floor: f32) -> DiscoveryReading {
+            let direct = domain == self.0;
+            DiscoveryReading {
+                final_host: Some(domain.to_string()),
+                category: Some("phishing".to_string()),
+                confidence: Some(if direct { 0.95 } else { 0.90 }),
+                enforcement_eligible: direct,
+                evidence: "synthetic page observation".to_string(),
+            }
+        }
+    }
     let _training = training_guard();
     let dir = TempDir::new().unwrap();
-    let config = AiSettings {
+    let mut config = AiSettings {
         model_path: daygle_dns_ml::learn::BUILTIN_BINARY_MODEL.to_string(),
         auto_retrain: true,
         // Scheduled binary candidates still need validation.
@@ -1067,12 +1091,44 @@ fn builtin_binary_starts_in_monitor_and_promotes_without_operator_reviews() {
         .unwrap();
     drop(store);
 
+    config.fetch_pages = true;
+    config.monitor_page_discovery = true;
+    let mut discovered = (0..100)
+        .map(|i| format!("new-workspace-{i}.test"))
+        .filter(|domain| {
+            let root = daygle_dns_ml::assessment::registrable(domain);
+            Sha256::digest(root.as_bytes())[0] >= 128
+        });
+    let direct = discovered.next().unwrap();
+    let weak = discovered.next().unwrap();
     let ai = engine(&dir, config.clone());
     assert_eq!(ai.live_model_path(), starter);
+    assert!(ai
+        .scanner
+        .set_page_reader(Box::new(DiscoveryFixture(direct.clone()))));
+    for domain in [&direct, &weak] {
+        assert!(ai.threat_feed_for(domain).is_none());
+        ai.store.observe(domain).unwrap();
+    }
+    ai.scanner.run_cycle(0, zone_store(&dir).as_ref()).unwrap();
+    for domain in [&direct, &weak] {
+        assert!(ai
+            .signal_report(domain)
+            .unwrap()
+            .unwrap()
+            .page_discovery
+            .is_some());
+    }
+    assert!(!ai.snapshot().load().contains_key(&weak));
     ai.run_due_maintenance()
         .expect("a scheduled candidate")
         .unwrap();
     assert!(learned_trial(&ai).in_progress());
+    let candidate =
+        daygle_dns_ml::maintain::candidate_path(ai.learned_model_path()).with_extension("json");
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(candidate).unwrap()).unwrap();
+    assert_eq!(record["binary_training"]["direct_page_threats"], 1);
     assert_eq!(ai.live_model_path(), starter);
     end_trial_soon(&ai);
     std::thread::sleep(std::time::Duration::from_millis(1100));

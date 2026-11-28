@@ -422,6 +422,38 @@ impl AiStore {
         Ok(labels)
     }
 
+    /// Direct exact-host observations from the independent page rules.
+    /// Reinspection replaces the row, so a weaker or redirected result
+    /// immediately removes the previous observation from automatic learning.
+    pub(crate) fn directly_corroborated_discoveries(
+        &self,
+        before: i64,
+    ) -> Result<Vec<(String, Option<String>)>> {
+        const EVIDENCE_WINDOW_SECS: i64 = 7 * 86_400;
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT p.domain, p.category FROM ai_page_discovery p
+             WHERE p.enforcement_eligible = 1 AND p.final_host = p.domain
+               AND p.confidence >= ?1 AND p.inspected_at BETWEEN ?2 AND ?3
+               AND NOT EXISTS (SELECT 1 FROM ai_verdicts v WHERE v.domain = p.domain
+                               AND v.channel = 'threat' AND v.severity = 'disputed')
+               AND NOT EXISTS (SELECT 1 FROM ai_overrides o WHERE o.domain = p.domain)
+               AND NOT EXISTS (SELECT 1 FROM ai_category_overrides o WHERE o.domain = p.domain)
+             ORDER BY p.inspected_at DESC, p.domain LIMIT 2048",
+        )?;
+        let rows = stmt
+            .query_map(
+                params![
+                    crate::page::DISCOVERY_ENFORCEMENT_FLOOR,
+                    before.saturating_sub(EVIDENCE_WINDOW_SECS),
+                    before
+                ],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
     pub(crate) fn page_discovery(
         &self,
         domain: &str,
@@ -911,7 +943,7 @@ mod tests {
             store
                 .page_discovery_candidates(now, 0.5, 4, FusionMode::Decide)
                 .unwrap(),
-            [domain]
+            [(domain.to_string(), None)]
         );
         assert!(store
             .page_discovery_candidates(now, 0.5, 4, FusionMode::Monitor)
@@ -990,11 +1022,31 @@ mod tests {
             .save_page_discovery(domain, &reading, now, "page")
             .unwrap();
         assert!(store.page_discovery_blocks(now, 0.95).unwrap().is_empty());
+        assert!(store
+            .directly_corroborated_discoveries(now)
+            .unwrap()
+            .is_empty());
         reading.enforcement_eligible = true;
         store
             .save_page_discovery(domain, &reading, now, "page")
             .unwrap();
         assert_eq!(store.page_discovery_blocks(now, 0.95).unwrap()[0].0, domain);
+        assert_eq!(
+            store.directly_corroborated_discoveries(now).unwrap(),
+            [domain]
+        );
+        assert!(store
+            .directly_corroborated_discoveries(now + 8 * 86_400)
+            .unwrap()
+            .is_empty());
+        reading.final_host = Some("different.example".to_owned());
+        store
+            .save_page_discovery(domain, &reading, now, "page")
+            .unwrap();
+        assert!(store
+            .directly_corroborated_discoveries(now)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
