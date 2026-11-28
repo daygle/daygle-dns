@@ -509,6 +509,10 @@ impl Scanner {
             Err(e) => self.log_warn(format!("AI page stage failed: {e}")),
         }
 
+        if let Err(e) = self.page_discovery_stage(&cfg, deadline, &hosted) {
+            self.log_warn(format!("AI page discovery failed: {e}"));
+        }
+
         // 6. Page content for categories: the pages of domains the
         //    categorizer is unsure of, in whatever budget the threat stage
         //    left.
@@ -518,10 +522,6 @@ impl Scanner {
                 "AI read {read} page(s) of domains it was unsure how to categorize; {set} categorized from their page"
             )),
             Err(e) => self.log_warn(format!("AI category page stage failed: {e}")),
-        }
-
-        if let Err(e) = self.page_discovery_stage(&cfg, deadline) {
-            self.log_warn(format!("AI page discovery failed: {e}"));
         }
 
         // 7. The language model, when one is configured: it reads pages the
@@ -944,20 +944,56 @@ impl Scanner {
         Ok((readings.len(), set))
     }
 
-    fn page_discovery_stage(&self, cfg: &AiSettings, deadline: std::time::Instant) -> Result<()> {
+    fn page_discovery_stage(
+        &self,
+        cfg: &AiSettings,
+        deadline: std::time::Instant,
+        hosted: &HashSet<String>,
+    ) -> Result<()> {
         if !cfg.fetch_pages || !cfg.monitor_page_discovery || std::time::Instant::now() >= deadline
         {
             return Ok(());
         }
         let limit = crate::page::workers().min(cfg.page_candidates_per_scan as usize);
+        if limit == 0 {
+            return Ok(());
+        }
         let now = Utc::now().timestamp();
         let exemptions = self.store.allow_overrides()?;
-        let candidates = self.store.page_discovery_candidates(
+        let uncertain = self.store.page_discovery_candidates(
             now,
             cfg.confidence_floor,
             cfg.max_domains_per_scan as usize,
             cfg.fusion,
         )?;
+        let intel = self
+            .intel
+            .get()
+            .map(|intel| intel.index())
+            .unwrap_or_default();
+        let eligible = |domain: &str| is_candidate(domain, hosted) && !exempt(domain, &exemptions);
+        let mut roots = HashSet::new();
+        let mut new = self
+            .store
+            .new_dns_discovery_candidates(now, cfg.max_domains_per_scan as usize)?
+            .into_iter()
+            .filter(|domain| {
+                eligible(domain) && !intel.is_popular(domain) && intel.label_for(domain).is_none()
+            })
+            .filter(|domain| roots.insert(crate::assessment::registrable(domain)))
+            .take(limit);
+        let mut candidates: Vec<_> = new.by_ref().take(limit.div_ceil(2)).collect();
+        let mut selected: HashSet<_> = candidates.iter().cloned().collect();
+        candidates.extend(
+            uncertain
+                .into_iter()
+                .filter(|domain| eligible(domain) && selected.insert(domain.clone()))
+                .take(limit - candidates.len()),
+        );
+        candidates.extend(
+            new.filter(|domain| selected.insert(domain.clone()))
+                .take(limit - candidates.len()),
+        );
         let live = crate::page::PageFetcher::new(
             std::time::Duration::from_secs(cfg.page_fetch_timeout_secs.clamp(1, 30)),
             cfg.page_fetch_max_bytes.clamp(16 * 1024, 2 * 1024 * 1024) as usize,
@@ -971,8 +1007,6 @@ impl Scanner {
         let readings = std::thread::scope(|scope| {
             let handles: Vec<_> = candidates
                 .into_iter()
-                .filter(|domain| !exempt(domain, &exemptions))
-                .take(limit)
                 .take_while(|_| std::time::Instant::now() < deadline)
                 .map(|domain| {
                     scope.spawn(move || {

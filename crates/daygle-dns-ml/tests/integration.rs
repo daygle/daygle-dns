@@ -798,6 +798,96 @@ fn scanner_cycle_classifies_query_log_domains() {
 }
 
 #[test]
+fn page_discovery_samples_recent_dns_names_even_with_confident_ordinary_verdicts() {
+    use daygle_dns_ml::page::{DiscoveryReading, Inspection, PageReader};
+
+    struct Reader(Arc<std::sync::Mutex<Vec<String>>>);
+    impl PageReader for Reader {
+        fn inspect(&self, _: &str) -> Inspection {
+            Inspection {
+                note: String::new(),
+                reading: None,
+                page: None,
+            }
+        }
+        fn inspect_for_discovery(&self, domain: &str, _: f32) -> DiscoveryReading {
+            self.0.lock().unwrap().push(domain.to_string());
+            DiscoveryReading {
+                final_host: Some(domain.to_string()),
+                category: None,
+                confidence: None,
+                enforcement_eligible: false,
+                evidence: "no clear finding".into(),
+            }
+        }
+    }
+    let dir = TempDir::new().unwrap();
+    let zones = zone_store(&dir);
+    let ai = engine(
+        &dir,
+        AiSettings {
+            fetch_pages: true,
+            monitor_page_discovery: true,
+            page_candidates_per_scan: 1,
+            ..settings(AiMode::Enforce)
+        },
+    );
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    assert!(ai.scanner.set_page_reader(Box::new(Reader(calls.clone()))));
+    let recent = "fresh-workspace.example";
+    let stale = "old-workspace.example";
+    let exempt = "known.partner.example";
+    let now = chrono::Utc::now();
+    for domain in [recent, stale, exempt] {
+        ai.store.observe(domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Threat,
+                domain,
+                "benign",
+                "info",
+                "classified",
+                0.99,
+                "test",
+                "",
+                3600,
+            )
+            .unwrap();
+    }
+    ai.store
+        .set_override("partner.example", "allow", "test exemption")
+        .unwrap();
+    ai.store
+        .record_sightings_at(
+            &[(stale.to_string(), vec!["10.0.0.2".into()])],
+            now.timestamp() - 8 * 86_400,
+        )
+        .unwrap();
+    ai.scanner
+        .run_cycle(now.timestamp() - 60, zones.as_ref())
+        .unwrap();
+    assert!(calls.lock().unwrap().is_empty());
+    for domain in [recent, stale, exempt] {
+        zones
+            .insert_query_log(&log_row(&now.to_rfc3339(), domain))
+            .unwrap();
+    }
+    for _ in 0..2 {
+        ai.scanner
+            .run_cycle(now.timestamp() - 60, zones.as_ref())
+            .unwrap();
+    }
+    assert_eq!(calls.lock().unwrap().as_slice(), [recent]);
+    assert!(ai
+        .signal_report(recent)
+        .unwrap()
+        .unwrap()
+        .page_discovery
+        .is_some());
+    assert!(!ai.snapshot().load().contains_key(recent));
+}
+
+#[test]
 fn enforce_mode_populates_snapshot_train_does_not() {
     let dir = TempDir::new().unwrap();
     let zones = zone_store(&dir);
@@ -1094,7 +1184,7 @@ fn builtin_binary_starts_in_monitor_and_promotes_without_operator_reviews() {
     config.fetch_pages = true;
     config.monitor_page_discovery = true;
     let mut discovered = (0..100)
-        .map(|i| format!("new-workspace-{i}.test"))
+        .map(|i| format!("new-workspace-{i}.example"))
         .filter(|domain| {
             let root = daygle_dns_ml::assessment::registrable(domain);
             Sha256::digest(root.as_bytes())[0] >= 128
