@@ -81,13 +81,23 @@ pub fn version_of(
 /// Read the model file, keep its bytes, and record the candidate. Nothing is
 /// promoted: the candidate is a record until the operator promotes it.
 pub fn build(store: &AiStore, spec: &CandidateSpec) -> Result<CandidateVersion> {
+    build_from(store, spec, std::path::Path::new(&spec.model_path))
+}
+
+/// [`build`] reading the artifact from a different file than the path the
+/// version belongs at - a trial's candidate before it is rotated into place.
+pub fn build_from(
+    store: &AiStore,
+    spec: &CandidateSpec,
+    artifact: &std::path::Path,
+) -> Result<CandidateVersion> {
     let path = spec.model_path.trim().to_string();
-    let (sha, size) = if path.is_empty() || !std::path::Path::new(&path).is_file() {
+    let (sha, size) = if path.is_empty() || !artifact.is_file() {
         // The heuristic backend has no artifact: its identity is its absence,
         // which the rollback restores by writing nothing.
         ("builtin".to_string(), 0)
     } else {
-        let bytes = std::fs::read(&path).map_err(DaygleError::Io)?;
+        let bytes = std::fs::read(artifact).map_err(DaygleError::Io)?;
         let sha = store.store_model_artifact(&path, &bytes)?;
         (sha, bytes.len() as i64)
     };

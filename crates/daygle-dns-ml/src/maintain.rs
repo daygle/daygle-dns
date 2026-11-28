@@ -145,8 +145,28 @@ pub struct TrialActivation {
     pub report: serde_json::Value,
 }
 
-/// Applies the validated scoring after the model itself is live.
-pub type Activation = Box<dyn Fn(&Path, &TrialActivation) -> Result<()> + Send + Sync>;
+/// Puts the validated scoring in force before the model is installed, and
+/// hands back the step that takes it back out if the install then fails. The
+/// activation is called with the candidate artifact and the path it will live
+/// at, so the record it writes refers to the model that is about to be loaded
+/// rather than a file that is about to be rotated away.
+pub type Activation =
+    Box<dyn Fn(&Path, &Path, &TrialActivation) -> Result<ActivationUndo> + Send + Sync>;
+
+/// Takes a passed trial's scoring back out of force after the model it was
+/// recorded for could not be installed. Returns what could not be restored, so
+/// the caller can report a half-undone activation instead of dropping it.
+pub struct ActivationUndo(Box<dyn FnOnce() -> Vec<String> + Send + Sync>);
+
+impl ActivationUndo {
+    pub fn new(undo: impl FnOnce() -> Vec<String> + Send + Sync + 'static) -> Self {
+        Self(Box::new(undo))
+    }
+
+    pub fn undo(self) -> Vec<String> {
+        (self.0)()
+    }
+}
 
 /// A maintenance step with nothing to report (the verifier refresh).
 pub type Step = Box<dyn Fn() + Send + Sync>;
@@ -1111,48 +1131,72 @@ impl Retrainer {
                     return;
                 };
                 let _ = std::fs::remove_file(candidate.with_extension("json"));
-                match self.promote(&candidate, &record) {
-                    Ok(()) => {
-                        if let Some(activate) = self.activation.get() {
-                            let activation = TrialActivation {
-                                calibration: Some(calibration),
-                                threshold,
-                                signal_weights,
-                                report: scoring.clone(),
-                            };
-                            if let Err(e) = activate(&self.learned, &activation) {
-                                self.log(
-                                    LogLevel::Warn,
-                                    format!(
-                                        "AI promoted its candidate classifier but could not record the validated calibration and threshold as one version: {e}"
-                                    ),
-                                );
-                            }
-                        }
-                        self.start_watch(chrono::Utc::now().timestamp());
-                        self.log(
-                            LogLevel::Info,
-                            format!(
-                                "AI promoted its candidate classifier after a shadow trial: {why}. It is watched for {} days and undone if it misbehaves",
-                                WATCH_SECS / 86_400
-                            ),
-                        );
-                        self.write_trial(
-                            &trial
-                                .concluded(format!("promoted: {why}"), None)
-                                .with_scoring(Some(&scoring)),
-                        );
-                    }
+                let activation = TrialActivation {
+                    calibration: Some(calibration),
+                    threshold,
+                    signal_weights,
+                    report: scoring.clone(),
+                };
+                // The version is recorded and its scoring applied *before* the
+                // model is installed. Until that record exists there is nothing
+                // for the new model to belong to, so a failed write leaves the
+                // incumbent live with the scoring that describes it.
+                let activated = match self.activation.get() {
+                    Some(activate) => activate(&candidate, &self.learned, &activation).map(Some),
+                    None => Ok(None),
+                };
+                let undo = match activated {
+                    Ok(undo) => undo,
                     Err(e) => {
                         self.reject(
                             settings,
                             trial,
-                            format!("it passed its trial but could not be loaded: {e}"),
+                            format!(
+                                "it passed its trial but its validated scoring could not be recorded: {e}"
+                            ),
                             now,
                             Some(&scoring),
                         );
+                        return;
                     }
+                };
+                if let Err(e) = self.promote(&candidate, &record) {
+                    // Activation came first, so the files were put back by the
+                    // rotation's recovery and the model was never loaded. Take
+                    // the version and scoring back out too, or the incumbent
+                    // would keep answering under the failed candidate's
+                    // calibration and threshold.
+                    let failures = undo.map(|undo| undo.undo()).unwrap_or_default();
+                    let suffix = if failures.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            "; putting the previous scoring back did not fully succeed: {}",
+                            failures.join("; ")
+                        )
+                    };
+                    self.reject(
+                        settings,
+                        trial,
+                        format!("it passed its trial but could not be loaded: {e}{suffix}"),
+                        now,
+                        Some(&scoring),
+                    );
+                    return;
                 }
+                self.start_watch(chrono::Utc::now().timestamp());
+                self.log(
+                    LogLevel::Info,
+                    format!(
+                        "AI promoted its candidate classifier after a shadow trial: {why}. It is watched for {} days and undone if it misbehaves",
+                        WATCH_SECS / 86_400
+                    ),
+                );
+                self.write_trial(
+                    &trial
+                        .concluded(format!("promoted: {why}"), None)
+                        .with_scoring(Some(&scoring)),
+                );
             }
             Err(why) => self.reject(settings, trial, why, now, None),
         }
@@ -1808,6 +1852,88 @@ mod tests {
         assert_eq!(std::fs::read(&stats).unwrap(), b"original stats");
         assert!(!previous_stats_path(&learned).exists());
         assert!(!recover_rotation(&ai.store, &learned).unwrap());
+    }
+
+    /// A passed trial is recorded and its scoring applied before the model is
+    /// installed, so a failure writing that version rejects the candidate
+    /// without ever loading it. Injecting the activation failure here proves
+    /// the install is behind it.
+    #[test]
+    fn a_failed_scheduled_activation_never_installs_the_candidate() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("ai.db");
+        let learned = crate::learn::learned_model_path(&database);
+        let live = dir.path().join("live.bin");
+        let starter = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../models/daygle-starter.bin"
+        );
+        std::fs::copy(starter, &live).unwrap();
+        std::fs::copy(starter, candidate_path(&learned)).unwrap();
+        let store = Arc::new(AiStore::open(&database).unwrap());
+        let settings = Arc::new(ArcSwap::from_pointee(AiSettings {
+            mode: daygle_dns_core::config::AiMode::Enforce,
+            block_threshold: 0.5,
+            ..AiSettings::default()
+        }));
+        let retrainer = Retrainer::new(
+            store,
+            settings.clone(),
+            Arc::new(LogStore::new(64)),
+            learned.clone(),
+            Arc::new(ArcSwap::from_pointee(live.to_string_lossy().into_owned())),
+        );
+        retrainer.set_shadow_scoring(Box::new(|candidate, _, _, ends| {
+            let model = crate::threshold::model_version(&candidate.to_string_lossy());
+            Ok(serde_json::json!({
+                "passed": true,
+                "calibration": crate::calibration::CalibrationMap::identity(&model, ends),
+                "threshold": { "candidate": 0.9 },
+                "signal_weights": crate::fusion::SignalWeights::default(),
+            }))
+        }));
+        let installs = Arc::new(AtomicUsize::new(0));
+        let counted = installs.clone();
+        retrainer.set_installer(Box::new(move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }));
+        retrainer.set_activation(Box::new(|_, _, _| {
+            Err(DaygleError::Database(
+                "injected scheduled activation failure".to_string(),
+            ))
+        }));
+
+        let now = chrono::Utc::now().timestamp();
+        let trial = Trial {
+            started_at: Some(now - 600),
+            ends_at: Some(now + 1),
+            ..Default::default()
+        };
+        std::fs::write(
+            trial_path(&learned),
+            serde_json::to_vec(&trial.to_json()).unwrap(),
+        )
+        .unwrap();
+        let current = settings.load_full();
+        retrainer.conclude_trial(&current, &trial);
+
+        assert_eq!(
+            installs.load(Ordering::SeqCst),
+            0,
+            "the version is recorded before the model is installed"
+        );
+        assert!(
+            !learned.is_file(),
+            "the failed candidate was set aside, not installed"
+        );
+        let outcome = retrainer.trial().last_outcome.unwrap_or_default();
+        assert!(
+            outcome.starts_with("rejected") && outcome.contains("could not be recorded"),
+            "{outcome}"
+        );
     }
 
     #[test]

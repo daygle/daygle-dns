@@ -638,10 +638,13 @@ impl AiEngine {
         // the activation service without owning the configuration.
         engine.shared.retrainer.set_activation(Box::new({
             let engine = engine.clone();
-            move |path, activation| {
-                engine
-                    .record_scheduled_activation(path, activation)
-                    .map(|_| ())
+            move |artifact, live, activation| {
+                let (_promoted, undo) =
+                    engine.record_scheduled_activation(artifact, live, activation)?;
+                let engine = engine.clone();
+                Ok(crate::maintain::ActivationUndo::new(move || {
+                    engine.undo_scheduled_activation(undo)
+                }))
             }
         }));
         Ok(engine)
@@ -1411,16 +1414,20 @@ impl AiEngine {
     }
 
     /// Put a passed trial's validated scoring in force as one candidate
-    /// version: the model is already live (the retrainer installed it), and
-    /// this records the calibration map, threshold, signal weights and
-    /// validation report together, activates the map, sets the threshold and
-    /// re-scores the stored verdicts. A restart reads the same active version,
-    /// so a scheduled promotion is as recoverable as a manual one.
+    /// version before its model is installed. The artifact is read from
+    /// `artifact` but the version belongs at `live`, so a failed record write
+    /// happens while the incumbent is still the live model. On success the
+    /// calibration map, threshold, signal weights and validation report are
+    /// active together; the caller installs the model next and can hand the
+    /// returned undo back to [`Self::undo_scheduled_activation`] if that
+    /// install fails. A restart reads the same active version, so a scheduled
+    /// promotion is as recoverable as a manual one.
     pub fn record_scheduled_activation(
         &self,
-        path: &Path,
+        artifact: &Path,
+        live: &Path,
         activation: &maintain::TrialActivation,
-    ) -> Result<store::CandidateVersion> {
+    ) -> Result<(store::CandidateVersion, ScheduledActivationUndo)> {
         let settings = self.settings.load_full();
         // What the persisted configuration still says, so a restart can tell
         // this promotion from a newer operator threshold. A second scheduled
@@ -1440,8 +1447,15 @@ impl AiEngine {
             }
             _ => settings.block_threshold,
         };
+        let live_model = live.to_string_lossy().into_owned();
+        // The scoring the version being recorded replaces. The model itself is
+        // not installed until after this record is written, so an undo of a
+        // failed install only has to put the ledger and scoring back.
+        let previous_calibration = self.store.active_calibration()?;
+        let previous_weights = self.scanner.signal_weights();
+        let previous_threshold = settings.block_threshold;
         let spec = candidate::CandidateSpec {
-            model_path: path.to_string_lossy().into_owned(),
+            model_path: live_model,
             block_threshold: activation.threshold,
             calibration: activation.calibration.clone(),
             signal_weights: activation.signal_weights.clone(),
@@ -1462,8 +1476,14 @@ impl AiEngine {
                 .as_ref()
                 .and_then(|map| map.metrics.clone()),
         };
-        let candidate = candidate::build(&self.store, &spec)?;
+        let candidate = candidate::build_from(&self.store, &spec, artifact)?;
         let promoted = self.store.promote_candidate(candidate.id)?;
+        let undo = ScheduledActivationUndo {
+            promoted: promoted.clone(),
+            previous_calibration,
+            previous_weights,
+            previous_threshold,
+        };
         let calibration = self.store.active_calibration()?;
         self.scanner.set_calibration(calibration);
         self.scanner
@@ -1471,13 +1491,88 @@ impl AiEngine {
         let mut live = (*settings).clone();
         live.block_threshold = promoted.block_threshold;
         self.settings.store(Arc::new(live));
-        if let Err(e) = self.rescore_stored_verdicts("a scheduled promotion") {
-            self.store.rollback_active_candidate()?;
-            return Err(e);
+        match self.rescore_stored_verdicts("a scheduled promotion") {
+            Ok(_) => {
+                self.refresh_snapshot_now();
+                self.trigger_rescan();
+                Ok((promoted, undo))
+            }
+            Err(e) => {
+                let failures = self.undo_scheduled_activation(undo);
+                Err(failed_change(
+                    "could not apply the new version's scores to the stored verdicts",
+                    e,
+                    &failures,
+                ))
+            }
         }
-        self.refresh_snapshot_now();
-        self.trigger_rescan();
-        Ok(promoted)
+    }
+
+    /// Take a passed trial's scoring back out of force after the model it was
+    /// recorded for could not be installed, restoring the version, calibration,
+    /// weights, threshold and stored scores that were in force before it.
+    /// Returns what could not be restored. A later promotion or rollback wins
+    /// over this undo, the same way [`Self::abandon_promotion`] does.
+    pub fn undo_scheduled_activation(&self, undo: ScheduledActivationUndo) -> Vec<String> {
+        match self.store.active_candidate() {
+            Ok(Some(active)) if active.id == undo.promoted.id => {}
+            Ok(_) => return Vec::new(),
+            Err(e) => {
+                return vec![format!(
+                    "could not read the version in force before undoing the activation: {e}"
+                )]
+            }
+        }
+        let mut failures = Vec::new();
+        match self.store.rollback_active_candidate() {
+            Ok(Some(restored)) => {
+                self.scanner
+                    .set_signal_weights(restored.signal_weights.clone());
+                match self.store.active_calibration() {
+                    Ok(map) => self.scanner.set_calibration(map),
+                    Err(e) => {
+                        failures.push(format!("could not read the calibration map in force: {e}"))
+                    }
+                }
+            }
+            // A first activation supersedes no stored version: take it out of
+            // force and put back the calibration and weights it replaced.
+            Ok(None) => {
+                if let Err(e) = self.store.retire_active_candidate(undo.promoted.id) {
+                    failures.push(format!(
+                        "could not take candidate {} out of force: {e}",
+                        undo.promoted.version
+                    ));
+                }
+                if let Err(e) = self.store.activate_calibration(
+                    undo.previous_calibration
+                        .as_ref()
+                        .map(|m| m.version.as_str()),
+                ) {
+                    failures.push(format!("could not put the calibration map back: {e}"));
+                }
+                self.scanner
+                    .set_calibration(undo.previous_calibration.clone());
+                self.scanner
+                    .set_signal_weights(undo.previous_weights.clone());
+            }
+            Err(e) => failures.push(format!("could not restore the previous version: {e}")),
+        }
+        let mut live = (*self.settings.load_full()).clone();
+        live.block_threshold = undo.previous_threshold;
+        self.settings.store(Arc::new(live));
+        // The activation re-scored the verdicts under its own calibration, so
+        // the version that comes back has to own them again.
+        if let Err(e) = self.rescore_stored_verdicts("a scheduled activation was undone") {
+            failures.push(format!(
+                "could not put the stored verdicts back under the scoring that was in force: {e}"
+            ));
+        }
+        if failures.is_empty() {
+            self.refresh_snapshot_now();
+            self.trigger_rescan();
+        }
+        failures
     }
 
     /// Every recorded candidate version, newest first.
@@ -2103,6 +2198,18 @@ pub struct PromotionUndo {
     previous_weights: fusion::SignalWeights,
     displaced: Option<Vec<u8>>,
     live_model: String,
+}
+
+/// What undoing a scheduled activation needs: the version it recorded and the
+/// scoring it replaced. The model was not installed before the version was
+/// written, so the artifact and the loaded model need no restore; the retrainer
+/// owns the threshold, so it is put back here rather than by a caller that
+/// publishes configuration.
+pub struct ScheduledActivationUndo {
+    promoted: store::CandidateVersion,
+    previous_calibration: Option<calibration::CalibrationMap>,
+    previous_weights: fusion::SignalWeights,
+    previous_threshold: f32,
 }
 
 fn failed_change(
