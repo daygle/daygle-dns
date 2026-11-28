@@ -882,10 +882,9 @@ impl DnsDispatcher {
             .into_iter()
             .filter(|record| {
                 let fits = hickory_proto::serialize::binary::BinEncodable::to_bytes(record)
-                    .map(|bytes| {
+                    .is_ok_and(|bytes| {
                         bytes.len() <= daygle_dns_authoritative::model::MAX_RECORD_WIRE_BYTES
-                    })
-                    .unwrap_or(false);
+                    });
                 if !fits {
                     warn!(
                         query = %qname,

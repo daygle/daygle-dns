@@ -42,10 +42,7 @@ async fn a_transfer_skips_a_record_it_cannot_encode() {
     shutdown(server).await;
 
     let quoted = format!("\"{}\"", "x".repeat(250));
-    let oversized = std::iter::repeat(quoted)
-        .take(300)
-        .collect::<Vec<_>>()
-        .join(" ");
+    let oversized = vec![quoted; 300].join(" ");
     let conn = rusqlite::Connection::open(&db).unwrap();
     conn.execute(
         "INSERT INTO records (id, zone_id, name, rtype, content, ttl, priority, disabled, last_modified_at)
